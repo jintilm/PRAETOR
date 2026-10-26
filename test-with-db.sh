@@ -35,4 +35,7 @@ fi
 
 echo "==> PRAETOR_PG_DSN=${PRAETOR_PG_DSN}"
 echo "==> go test"
-go test ./... -count=1 "$@"
+# -p 1：串行跑包。这五个包（agent/db/evidence/llmrec/server）共用一个测试库且都会清理
+# 自己写的数据，并行跑会互相踩（表现为「每次失败的用例都不一样、单包跑全过」）。
+# 它们各自有 advisory lock，但 ping 偶发超时会让某个包没拿锁就跑，所以用 -p 1 兜死。
+go test -p 1 ./... -count=1 "$@"

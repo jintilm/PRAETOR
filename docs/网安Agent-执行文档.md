@@ -217,6 +217,7 @@ go test ./... -count=1
 | 2026-10-26 | 修正 pack 里凭 grep 猜错的工具名：`add_finding`→`report_finding`；删掉不存在的 `coverage`/`asset_coverage`/`list_worker_traces`/`bind_finding_traffic`/`get_finding_traffic`/`goals`，换成真实存在的 `list_untested_assets`/`get_worker_trace`/`search_all_worker_traces` | 由 `TestDomainToolSeeds` 断言 pentest 域缺失集为空 |
 | 2026-10-26 | **改名 ARTEX → PRAETOR**：module path、二进制/镜像、前端品牌与偏好 key、登录用户名、文档全量更新；env 加 `PRAETOR_*` 优先 + `ARTEX_*` 兜底兼容层 | `go build ./...` OK；16 包全绿；`TestEnvPrefersNewPrefix` 锁定兼容顺序 |
 | 2026-10-26 | 沙箱方案定稿：形态 A（常驻工具容器 + `docker exec`）+ `PRAETOR_SANDBOX=required\|optional` 默认 required | 决策入档 §1.5 |
+| 2026-10-26 | **修真库测试红灯**：① 修真 bug `evidence` 目录 fsync（Windows 绑流量 422）② 修测试收尾泄漏 ③ 更新过时断言（coverage 已无 scope 字段）④ 唯一化跨轮数据 + `llmrec` 补 advisory lock + DB 套件 `-p 1` | 真库 `go test -p 1 ./...` 连跑 2 次全绿；无库 18 包全绿 |
 | 2026-10-26 | **P1-2 收口**：注册 `verify_finding`（仅 worker）+ 宿主侧 `NewEvidenceVerifier`（evidence.Store 适配 + 证据挑选 + 结论落库）+ `findings.verification_state` 四列；工具提示词要求「绑定后先验证」 | `agent` 5 个工具用例 + `server` 6 个验证器用例；golden 有意变更 `verify_finding→worker` 已按纪律重生成 |
 | 2026-10-26 | **P1-2（核心）**：`internal/replay` 重放判定（状态码/长度容差/归一化 4-gram Jaccard 相似度/易变值抹除）+ `agent.VerifyBinding` 快照适配（head 容错解析、body 走 `BodySource` 接口） | `replay` 14 个用例 + `agent` 6 个用例全绿；无响应体无哈希时 fail-closed |
 | 2026-10-26 | **P0-7 一任务一容器**：`sandbox/per_task.go` + `BackgroundRunner` + 代理注入 + 任务 ID 透传（`RunInfo.TaskID`）+ reaper；修复 Windows `docker -v` 反斜杠路径 | `sandbox` 18 个用例 + `server` 5 个接线用例全绿 |
@@ -326,7 +327,9 @@ go test ./... -count=1
 3. `go build ./...` → BUILD_OK
 4. `go test ./<改动包>/ -count=1` → ok
 5. `go test ./... -count=1` → 全 ok（提交前至少一次）
-6. 有 DB 相关改动 → `./test-with-db.sh` 跑一次真库验证
+6. 有 DB 相关改动 → `./test-with-db.sh`（内部已用 `-p 1`）跑一次真库验证
+   —— **DB 套件必须串行跑包**：agent/db/evidence/llmrec/server 共用一个测试库且各自清理数据，
+   并行会互相踩（症状：每次失败的用例都不一样、单包跑全过）
 7. 回填 §2 / §3 状态
 
 **golden 纪律**：`agent/testdata/seeds_platform.golden` 是平台工具绑定的快照，**不允许为「让测试变绿」而重写**。确属有意的绑定变更时，用 `go test ./agent/ -run TestBuiltinToolSeedsPlatformUnchanged -update-seed-golden` 重生成，并在提交信息里说明哪条绑定、为什么变。
@@ -352,11 +355,18 @@ go test ./... -count=1
 1. 改名那一轮做过一次全仓 `gofmt -w`，历史上未格式化的 4 个文件（`db/asset_intercept.go`、`db/assets_test.go`、`db/config.go`、`db/task_scope_test.go`）已一并格式化。此遗留项关闭。
 2. `guardPanic` 在 recover 后会用 `log.Printf` 打印完整 panic 栈（`agent/assembly.go:82`）。这是**预期行为**（生产需要现场），但测试输出里看起来像崩溃——排查时先看 `--- FAIL` 行，别被栈骗。
 3. Docker Desktop 守护进程当前未启动；测试栈已就绪但未拉起。
-4. **真库跑测试暴露的既有问题（非本轮引入）**：接上真实 PG 后，`server` 包整包运行会有 6~7 个用例失败
-   （`TestFindingTrafficAPIAndExport`、`TestFindingWorkflow*`、`TestMgmtAPI`、`TestTaskMetadataPatchReturnsRenameAndPin`、
-   `TestInheritedActivityDetailAndRelationDeletion`、`TestChatUnavailableReasonDistinguishesStates`），
-   但**每个用例单独 `-run` 都能通过**；两次连跑失败数从 7 变 6，`tasks` 表累积到 53 行 ——
-   典型的用例间共享库未清理（此前没有可用 PG，这些用例一直被 skip，问题被掩盖）。
-   修法（待排期）：`server` 包 `TestMain` 启动前 `TRUNCATE ... RESTART IDENTITY CASCADE` 可变表，
-   或让断言只按本次创建的 id 过滤，不做全局列表断言。
+4. **真库跑测试暴露的问题：已定位并全部修复（2026-10-26）**。原以为是用例间数据污染，
+   实际是四类问题叠加：
+   - **真 bug（生产影响）**：`evidence.Store.writeBody` 对**目录**调 `d.Sync()`，Windows 上目录句柄
+     不能 flush（`ERROR_ACCESS_DENIED`）→ 绑定流量一律 422。已改为 `syncDir()`，Windows 直接跳过
+     （NTFS 日志保证 rename 元数据一致），其它平台保留 fsync 并容忍 EINVAL。
+   - **测试收尾**：`chat_llm_resolve_test.go` 用 `context.Background()` 建 Server，后台写手不退出，
+     Windows 上 `t.TempDir()` 清理报 “directory is not empty”。改为可取消 ctx + `archiveWG.Wait()` / `<-side.done`。
+   - **用例假设过时**：`TestGraphOverviewExpandsAssociatedCompanyScope` 断言 `coverage["scope"]`，
+     而该字段早已移除（现只有 denominator/tested/by_type/pct/status/host_count）。改为断言
+     「公司 scope 完整落库 + 覆盖度分母 ≥1 + host_count ≥1」的等价事实。
+   - **跨轮/跨包污染**：`company_scope_test` 用固定 CIDR 与 `MAX(assets.id)+1` 做唯一后缀（用例结束删资产，
+     下一轮算出同一个值）→ 改为时间戳唯一 + 清理陈旧 CIDR scope + 用例结束删公司；
+     `llmrec` 包缺 advisory lock，已补 `TestMain` 与其它包同锁；DB 套件统一 `-p 1` 串行。
+   结果：真库 `go test -p 1 ./...` 连跑两次全绿；无库时 18 包全绿（DB 用例按设计 skip）。
 5. 上游 `.gitignore` 原本忽略整个 `/docs/`，导致本文件与选型报告不进版本库。已改为 `/docs/*` + 两份文档白名单例外（`.gitignore` 有注释说明原因）；`docs/漏洞流量证据.md` 仍保持忽略。

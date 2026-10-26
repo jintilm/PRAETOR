@@ -13,7 +13,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Autumn-27/praetor/db"
@@ -107,12 +109,29 @@ func (s *Store) writeBody(r io.Reader, expectedLength int64, expectedHash string
 	if err = os.Rename(f.Name(), path); err != nil {
 		return "", err
 	}
-	d, err := os.Open(filepath.Dir(path))
+	return hash, syncDir(filepath.Dir(path))
+}
+
+// syncDir 让目录项变更（rename/unlink）落盘。
+//
+// Windows 上目录句柄无法 flush：FlushFileBuffers 对只读目录句柄返回
+// ERROR_ACCESS_DENIED（实测 "sync ...: Access is denied."）。这里直接跳过——NTFS
+// 日志本身保证 rename 的元数据一致性；代价是极端掉电时可能丢一次 rename，而正文
+// 落库前会校验哈希，丢了也能重写，不会产生错数据。
+// 其它平台照常 fsync，并容忍 EINVAL（某些文件系统不支持目录 sync）。
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer d.Close()
-	return hash, d.Sync()
+	if err := d.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) {
+		return err
+	}
+	return nil
 }
 
 // StageFindingsExport freezes bindings/report versions and makes private body
