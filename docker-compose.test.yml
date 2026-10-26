@@ -1,0 +1,41 @@
+# 独立的【测试专用】PostgreSQL —— 与主栈 docker-compose.yml 完全隔离。
+#
+# 隔离手段（四层，缺一不可）：
+#   1. 独立 compose 项目名 artex-test  → 不共享 network / container / label
+#   2. 宿主端口 127.0.0.1:55432        → 容器内仍是 5432，不占用主栈的 5432
+#   3. 独立命名卷 artex-test-pgdata    → 数据与主栈 pgdata 物理隔离
+#   4. restart: "no"                   → 一次性环境，不会开机自启、不会常驻
+#
+# 用法（推荐走 ./test-with-db.sh，它会自动起停）：
+#   docker compose -f docker-compose.test.yml -p artex-test up -d --wait
+#   ARTEX_PG_DSN='postgres://artex:artexpw@127.0.0.1:55432/artex_test?sslmode=disable' go test ./...
+#   docker compose -f docker-compose.test.yml -p artex-test down -v
+#
+# 注意：库名必须以 _test 结尾。集成测试会建表并 DELETE 数据，
+# internal/testpg 会拒绝在非 *_test 库上运行，保护主栈的开发数据。
+name: artex-test
+
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: artex-test-pg
+    environment:
+      POSTGRES_USER: ${ARTEX_TEST_PG_USER:-artex}
+      POSTGRES_PASSWORD: ${ARTEX_TEST_PG_PASSWORD:-artexpw}
+      POSTGRES_DB: ${ARTEX_TEST_PG_DB:-artex_test}
+      # 测试库不需要持久可靠性，关掉 fsync 换速度；数据本身用完即弃。
+      POSTGRES_INITDB_ARGS: "--no-sync"
+    ports:
+      # 只绑回环，不对外暴露；宿主端口可用 ARTEX_TEST_PG_PORT 覆盖
+      - "127.0.0.1:${ARTEX_TEST_PG_PORT:-55432}:5432"
+    volumes:
+      - artex-test-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ARTEX_TEST_PG_USER:-artex} -d ${ARTEX_TEST_PG_DB:-artex_test}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: "no"
+
+volumes:
+  artex-test-pgdata:
