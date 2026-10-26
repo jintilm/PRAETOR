@@ -120,6 +120,27 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 
 **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
 
+### 1.9 基线跑分（P1-3）
+
+```bash
+git clone https://github.com/xbow-engineering/validation-benchmarks
+go run ./cmd/bench -root validation-benchmarks/benchmarks \
+  -api http://127.0.0.1:8797 -password "$PRAETOR_PASSWORD" \
+  -limit 5 -md report.md -out result.json
+```
+
+流程（每题）：`docker compose -p xben-<id> up -d --wait` → 解析发布端口 → 提交任务
+（描述里带目标 URL，`seed_first_intent=true` 省掉首轮 planner）→ 轮询到终态 → 在
+`/api/exploration/findings` 原文里找 **flag** → `down -v`。
+
+判分口径：**flag 出现即解出**，不做语义判断（flag 是唯一串，模型措辞不影响分）。
+
+关键取舍：
+- 端口挑选优先 80/8080/3000/5000/8000/8888 的**目标端口**，否则取最小发布端口——
+  一道题常有 db+web，取第一个会把 agent 指向数据库；
+- 单题失败不中断整轮（基准看通过率）；没有 `FLAG` 的题目计入 skipped，不进分母；
+- 等待有上限（默认 45m/题），超时记为未解出而不是卡死。
+
 ### 1.8 外部 MCP 接入（P1-1：hexstrike）
 
 MCP 服务器是 DB 驱动（`mcp_servers` 表 + `mcp_tools_cache` 工具缓存），所以「接入」= 注册一条记录。
@@ -239,6 +260,7 @@ go test ./... -count=1
 | 2026-10-26 | 修正 pack 里凭 grep 猜错的工具名：`add_finding`→`report_finding`；删掉不存在的 `coverage`/`asset_coverage`/`list_worker_traces`/`bind_finding_traffic`/`get_finding_traffic`/`goals`，换成真实存在的 `list_untested_assets`/`get_worker_trace`/`search_all_worker_traces` | 由 `TestDomainToolSeeds` 断言 pentest 域缺失集为空 |
 | 2026-10-26 | **改名 ARTEX → PRAETOR**：module path、二进制/镜像、前端品牌与偏好 key、登录用户名、文档全量更新；env 加 `PRAETOR_*` 优先 + `ARTEX_*` 兜底兼容层 | `go build ./...` OK；16 包全绿；`TestEnvPrefersNewPrefix` 锁定兼容顺序 |
 | 2026-10-26 | 沙箱方案定稿：形态 A（常驻工具容器 + `docker exec`）+ `PRAETOR_SANDBOX=required\|optional` 默认 required | 决策入档 §1.5 |
+| 2026-10-26 | **P1-3 骨架**：`bench/xbow`（Discover/ComposeCLI/FirstHTTPPort/FlagMatcher/Run/Summary.Markdown）+ `cmd/bench`（-dry-run/-only/-limit/-keep/-md/-out，支持密码换 token） | 10 个单测（发现/端口优先级/flag 匹配/编排三类结果/失败不提交/跳过计分母）；CLI dry-run 冒烟通过 |
 | 2026-10-26 | **P1-1**：`db.SeedMCPServer`（幂等预设播种，`ON CONFLICT DO NOTHING`，不覆盖用户配置）+ `server/mcp_presets.go`（hexstrike 预设构造/校验，未配置不写库） | `db` 2 个用例（真库幂等 + 入参校验）、`server` 3 个用例（构造/覆盖/拒绝缺失）；全仓绿 |
 | 2026-10-26 | **修真库测试红灯**：① 修真 bug `evidence` 目录 fsync（Windows 绑流量 422）② 修测试收尾泄漏 ③ 更新过时断言（coverage 已无 scope 字段）④ 唯一化跨轮数据 + `llmrec` 补 advisory lock + DB 套件 `-p 1` | 真库 `go test -p 1 ./...` 连跑 2 次全绿；无库 18 包全绿 |
 | 2026-10-26 | **P1-2 收口**：注册 `verify_finding`（仅 worker）+ 宿主侧 `NewEvidenceVerifier`（evidence.Store 适配 + 证据挑选 + 结论落库）+ `findings.verification_state` 四列；工具提示词要求「绑定后先验证」 | `agent` 5 个工具用例 + `server` 6 个验证器用例；golden 有意变更 `verify_finding→worker` 已按纪律重生成 |
