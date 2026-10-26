@@ -2,32 +2,23 @@ package config
 
 import "os"
 
-// 环境变量前缀。
+// 环境变量前缀。PRAETOR 是独立项目，**只读 PRAETOR_***，不兼容 ARTEX_*。
 //
-// PRAETOR 是项目名（fork 自 ARTEX 后改名）。为了不让既有部署与开发机的 .env /
-// shell 静默失效，读取顺序是「新前缀 → 旧前缀」：PRAETOR_X 优先，ARTEX_X 兜底。
-// 旧前缀只作为兼容层保留，不再出现在任何脚本与文档的推荐用法里。
-const (
-	envPrefix       = "PRAETOR_"
-	envLegacyPrefix = "ARTEX_"
-)
+// 这是一次有意的硬切：新旧两套栈各自部署、互不影响，配置也各管各的。
+// 之前的「PRAETOR_ 优先 + ARTEX_ 兜底」已移除——那种兼容看似安全，实际会让
+// 开发机 shell 里的旧变量悄悄污染新进程（同机两套栈并存时尤其危险）。
+const envPrefix = "PRAETOR_"
 
-// Env 读取配置项：先 PRAETOR_<key>，再 ARTEX_<key>，都没有返回空串。
-// key 不带前缀，例如 Env("PG_DSN") 对应 PRAETOR_PG_DSN / ARTEX_PG_DSN。
+// Env 读取配置项，key 不带前缀：Env("PG_DSN") 读 PRAETOR_PG_DSN。
 func Env(key string) string {
-	if v := os.Getenv(envPrefix + key); v != "" {
-		return v
-	}
-	return os.Getenv(envLegacyPrefix + key)
+	return os.Getenv(envPrefix + key)
 }
 
 // LookupEnv 是 Env 的布尔版，语义与 os.LookupEnv 一致（空值算未设置）。
 func LookupEnv(key string) (string, bool) {
-	if v, ok := os.LookupEnv(envPrefix + key); ok && v != "" {
-		return v, true
+	v, ok := os.LookupEnv(envPrefix + key)
+	if !ok || v == "" {
+		return "", false
 	}
-	if v, ok := os.LookupEnv(envLegacyPrefix + key); ok && v != "" {
-		return v, true
-	}
-	return "", false
+	return v, true
 }

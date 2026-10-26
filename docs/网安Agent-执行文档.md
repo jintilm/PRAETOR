@@ -74,13 +74,14 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 | 项目名 | ARTEX | **PRAETOR** | 文档标题、README、前端品牌全量更新 |
 | Go module | `github.com/Autumn-27/artex` | `github.com/Autumn-27/praetor` | 140 个文件 import 已改，`go build` 验证 |
 | 二进制 / 镜像 | `artex` | `praetor`（`cmd/praetor`） | `build.sh` / `Dockerfile` / compose 同步 |
-| 环境变量 | `ARTEX_*` | `PRAETOR_*` | **`config.Env` 先读新前缀、回落旧前缀**，现有 .env / shell 不用改 |
+| 环境变量 | `ARTEX_*` | `PRAETOR_*` | **硬切：只读 `PRAETOR_*`**。旧变量不再生效，两套栈配置物理隔离 |
 | 登录用户名 | `ARTEX` | `PRAETOR` | 前后端同步改（密码存 `auth.password_hash`，与用户名无关，不用重置） |
 | 前端偏好 key | `artex.*` / `artex_*` | `praetor.*` / `praetor_*` | 旧偏好不再读取（一次性丢失，可接受） |
-| 默认库名（仅新装） | `artex` | `praetor`（`config.example.json` / compose） | **既有库不动**：靠 `PRAETOR_PG_DSN` / `ARTEX_PG_DSN` 显式指定 |
+| 默认库名（仅新装） | `artex` | `praetor`（`config.example.json` / compose） | 只影响新装；连接串一律由 `PRAETOR_PG_DSN` 显式给出 |
 
-> 兼容层的副作用：`t.Setenv("PRAETOR_X","")` 不再等于「未设置」（会回落到 `ARTEX_X`）。
-> 测试里要用 `config` 包的 `unsetEnv(t, "X")` 助手同时清双前缀，否则开发机 shell 里的旧变量会污染断言。
+> 环境变量为什么硬切而不做兼容：同机并存两套栈时，回落到旧前缀会让新进程悄悄读到旧栈的
+> `PG_DSN`（最坏情况：新栈连上旧库并执行迁移/DELETE）。宁可启动时明确报「未配置」，
+> 也不要猜。`TestEnvReadsOnlyNewPrefix` 守着这条。
 
 ### 1.5 沙箱方案（P0-6 已定）
 
@@ -88,6 +89,28 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 - **降级策略**：`PRAETOR_SANDBOX=required|optional`，默认 `required`（Docker 不可用即拒绝执行）；本地调试显式设 `optional` 才允许宿主执行并打醒目告警。
 - **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
 - 后续若要一任务一容器（CTF 竞速/红队战役要干净环境），只需替换 `sandbox.Exec` 实现，不动上层调度。
+
+### 1.6 独立部署栈（不与旧 ARTEX 栈共存干扰）
+
+旧栈最常见的事故来源是 **compose 项目名默认取自目录名**：同一目录下 `docker compose up`
+会复用同名项目、同名卷、同名容器和同端口。新栈因此显式固定四件套：
+
+| 维度 | 旧 ARTEX 栈（不动） | PRAETOR 新栈 |
+| --- | --- | --- |
+| compose 项目 | `artex`（目录名推导） | **`praetor`**（`name:` 顶层固定） |
+| 容器 | `artex-postgres-1` / `artex-praetor-1` | **`praetor-pg` / `praetor-app`**（显式 `container_name`） |
+| 数据卷 | `artex_pgdata` | **`praetor-pgdata`** |
+| 宿主端口 | 8787 / 8788 | **8797 / 8798**（`PRAETOR_HTTP_PORT` / `PRAETOR_MCP_PORT` 可覆盖） |
+| 测试库 | — | `praetor-test` 项目 / `praetor-test-pg` 容器 / **55432** |
+
+`docker compose config` 已离线校验。启动：
+
+```bash
+cp .env.example .env && $EDITOR .env      # 至少填 POSTGRES_PASSWORD
+docker compose up -d --build
+```
+
+旧栈如需彻底清理（确认不再需要其数据后）：`docker compose -p artex down -v`。
 
 > 现状：Docker Desktop 守护进程当前未启动（`npipe:////./pipe/dockerDesktopLinuxEngine` 不存在），所以测试栈暂未拉起；`docker compose config` 语法已校验通过。
 

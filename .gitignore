@@ -63,3 +63,5 @@ Thumbs.db
 /bench/
 /Dockerfile.bench
 /Dockerfile.bench.v2
+# 本地一次性调研脚本/临时产物（不进版本库）
+.workbuddy/tmp/
