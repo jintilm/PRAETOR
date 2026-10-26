@@ -33,6 +33,8 @@ go test ./... -count=1        # 必须全 ok（无 PG 时 DB 相关用例 skip�
 
 2026-10-26 实测基线：**16 个包全 ok**。
 
+**新增环境变量**：`ARTEX_DOMAINS`（逗号分隔，默认 `pentest`）。决定哪些领域包参与启动期自检与「未接入工具」告警；未注册的 key 会被忽略并记日志。它**不影响**任务调度（任务领域目前恒为渗透，见 `DomainPackFor`）。
+
 ### 1.2 测试与数据库的关系（已统一）
 
 所有依赖 PG 的集成测试走同一个门：`internal/testpg`（只被 `_test.go` 引用，不进二进制）。
@@ -80,6 +82,7 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 | 2026-10-26 | **P0-3**：`agent/domain/adapter.go` — DomainPack → `subagent.Definition` + 工具白名单 + 预算合并 + 审批档位映射 + `Missing()` 装配期缺工具检测 | `go test ./agent/domain` 13 个用例全绿；`go build ./...` OK；全仓 16 包全绿 |
 | 2026-10-26 | **P0-4**：`toolcatalog` 拆出 `platformAgentOrder` / `mergeSeeds`（公共骨架）/ `DomainToolSeeds(pack)` / `UnresolvedDomainTools(pack)` / `platformToolIndex()`；平台绑定用 golden 锁定 | `TestBuiltinToolSeedsPlatformUnchanged`（golden 25 条逐条一致）+ `TestDomainToolSeeds` + `TestUnresolvedDomainTools` 全绿；16 包全 ok |
 | 2026-10-26 | 修正 pack 里凭 grep 猜错的工具名：`add_finding`→`report_finding`；删掉不存在的 `coverage`/`asset_coverage`/`list_worker_traces`/`bind_finding_traffic`/`get_finding_traffic`/`goals`，换成真实存在的 `list_untested_assets`/`get_worker_trace`/`search_all_worker_traces` | 由 `TestDomainToolSeeds` 断言 pentest 域缺失集为空 |
+| 2026-10-26 | **P0-5**：`server/engine_scheduler.go` — `DomainPackFor` / `SchedulerPlanFor` / `SchedulerPlan`；`Engine.Run` 改为「问领域包要调度拓扑」；启动期 `WarnUnresolvedDomainTools()`；新增 `ARTEX_DOMAINS` 环境变量（默认 `pentest`） | 6 个新测试全绿（explore 拓扑=1+N、非 explore 明确报错、默认域、env 解析）；全仓 16 包全 ok |
 
 ---
 
@@ -106,8 +109,14 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 > - `UnresolvedDomainTools(pack)` 供装配期告警：声明了但还解析不出实例的 key（待接入的 MCP 工具）。
 >
 > **踩到的坑（值得记）**：初版 pack 里 `add_finding` / `coverage` / `asset_coverage` / `list_worker_traces` / `bind_finding_traffic` 这些名字是我按 grep 猜的，真实清单里是 `report_finding` / `list_untested_assets` / `get_worker_trace` / `search_all_worker_traces`，其余根本不存在。`UnresolvedDomainTools` 第一次跑就把它们全抓出来了——这正是这个函数存在的理由。
-| P0-5 | engine 按 `Scheduler()` 选调度器；`explore` 复用现有 `plannerLoop`；装配期用 `domain.Missing()` 打「声明了但未接入」的工具警告 | 自研 | 现有渗透用例回归通过（行为不变）；启动日志能看到缺失工具清单 | 待做 |
+| P0-5 | engine 按 `Scheduler()` 选调度器；`explore` 复用现有 `plannerLoop`；启动期用 `agent.UnresolvedDomainTools()` 打「声明了但未接入」的工具警告 | 自研 | 现有渗透用例回归通过（行为不变）；启动日志能看到缺失工具清单 | 已完成 |
 | P0-6 | `sandbox/`：`Bash` 改容器 exec，出口走现有 MITM 代理 + `AllowEgress` | **复刻 PentAGI 的沙箱工具镜像思路**（MIT）+ Strix 容器分层（Apache-2.0） | 工具在容器内执行；出口流量仍被记录代理截获 | 待做 |
+
+> **P0-5 实现说明**：`Engine.Run` 现在第一件事是 `SchedulerPlanFor(DomainPackFor(t), m.Workers())`。
+> - `explore` → `{Planners:1, Workers:N}`，与改造前的 `1+workers` 例程账本逐字等价（`m.Workers()` 自身已有 >0 兜底，代码里的 clamp 只对直接调用生效，属防御而非行为变更）。
+> - 其它调度器 → 返回 `errSchedulerNotImplemented`，`Run` 记一条 ERROR 后 **不启动任何循环**。刻意不回落 explore：半成品静默跑歪比直接失败难查。
+> - `DomainPackFor` 目前恒返回渗透域（`tasks` 表还没有领域字段）；P1 加列后改为读库。
+> - 告警用的是 `agent.UnresolvedDomainTools(pack)`（面向 tools 表的视图），不是 `domain.Missing(pack, reg)`（面向一个具体 Registry）；后者留到真正装配 Registry 时用。
 
 ### P1 渗透对齐
 

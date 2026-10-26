@@ -221,6 +221,9 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 			log.Printf("[tools] seed %s 失败: %v", s.Key, err)
 		}
 	}
+	// 领域包（红队/CTF/逆向）声明的工具里，有一部分要等对应 MCP 接进来才存在。
+	// 启动时对【启用中的域】打一条告警：静默缺失会让 agent 手里没工具却照常开跑。
+	WarnUnresolvedDomainTools()
 	// Seed the traffic host tools so they're bindable per-agent like built-ins.
 	// Default binding = worker (preserves prior behavior). Their runtime availability
 	// is still gated by the global capture switch (hostTools() returns them only when

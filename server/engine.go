@@ -746,7 +746,14 @@ func (e *Engine) ReadyFor(t *Task) bool {
 // but no-op until an LLM is configured (so a task created while idle picks up
 // automatically once LLM is set from the UI).
 func (e *Engine) Run(ctx context.Context, t *Task) {
-	workers := e.m.Workers()
+	// 调度拓扑由任务所属领域包决定（P0-5）。explore = 1 planner + N worker，
+	// 与改造前完全一致；其它调度器尚未实现时直接拒绝启动，不悄悄退回 explore。
+	plan, err := SchedulerPlanFor(DomainPackFor(t), e.m.Workers())
+	if err != nil {
+		log.Printf("[engine] 任务 %s 未启动：%v", t.ID, err)
+		return
+	}
+	workers := plan.Workers
 	e.deleteMu.RLock()
 	if e.IsDeleting(t.ID) {
 		e.deleteMu.RUnlock()
@@ -757,9 +764,11 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 		t.Notify() // already running — just nudge a planning round
 		return
 	}
-	rt := e.registerTaskRoutines(ctx, t.ID, 1+workers)
+	rt := e.registerTaskRoutines(ctx, t.ID, plan.Planners+plan.Workers)
 	e.deleteMu.RUnlock()
 	e.touch(t.ID)
+	// plan.Planners 目前恒为 1（explore）：多 planner 拓扑随 campaign/race 一起实现，
+	// 这里先按计数登记，避免到时再改例程账本。
 	runTaskRoutine(rt, func(loopCtx context.Context) { e.plannerLoop(loopCtx, t) })
 	for i := 0; i < workers; i++ {
 		name := fmt.Sprintf("work#%d", i+1)
