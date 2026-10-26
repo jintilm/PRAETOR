@@ -646,6 +646,8 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		// list_findings 保留：报漏洞前先查本任务已确认漏洞，避免重复上报同一漏洞。
 		t.listFindings(),
 		t.addFinding(), t.recordFact(),
+		// verify_finding：确定性重放验证（P1-2）。只给 worker —— 它是唯一负责证据与复现的角色。
+		t.verifyFinding(),
 		// asset management (handlers guard nil store internally)。
 		// add_company_scope 不给 worker：定义企业资产范围属规划/主控/Auto 的职责，worker 只执行探索。
 		t.insertAssets(), t.listAssets(),

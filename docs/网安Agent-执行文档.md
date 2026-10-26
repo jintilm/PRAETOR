@@ -120,6 +120,27 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 
 **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
 
+### 1.7 漏洞验证状态（P1-2 落库模型）
+
+`findings` 新增 4 列，**与 `status`（人工处置）完全独立**，互不覆盖：
+
+| 列 | 取值 | 谁写 |
+| --- | --- | --- |
+| `verification_state` | `unverified`（默认）/ `verified` / `suspected` | `verify_finding` 工具经宿主 verifier |
+| `verification_similarity` | 0~1，`NULL` 表示无相似度可比 | 同上 |
+| `verification_note` | 一行结论 + reasons | 同上 |
+| `verified_at` | 最近一次验证时间 | 同上 |
+
+为什么分开存：人可以给一个无法复现的漏洞标「风险接受」，也可能修复前先把验证刷成 suspected；
+两个维度互相覆盖会让审计链断掉。
+
+`verify_finding(finding_id, binding_id?, min_similarity?)` 的行为：
+1. 取该漏洞绑定的证据（显式指定 > `proof` > `verification` > 最后一条）；
+2. `replay.Verify` 重放（状态码一致 + 长度 ±15% + 归一化响应体相似度 ≥0.85）；
+3. 落库：一致 → `verified`；不一致 / 无证据 / 重放失败 → `suspected`，`reasons` 说明原因。
+
+**没有证据也照样落 suspected**——「证据不足」本身就是结论，比报错更有用。
+
 ### 1.6 独立部署栈（不与旧 ARTEX 栈共存干扰）
 
 旧栈最常见的事故来源是 **compose 项目名默认取自目录名**：同一目录下 `docker compose up`
@@ -178,6 +199,7 @@ go run ./cmd/praetor
 | 2026-10-26 | 修正 pack 里凭 grep 猜错的工具名：`add_finding`→`report_finding`；删掉不存在的 `coverage`/`asset_coverage`/`list_worker_traces`/`bind_finding_traffic`/`get_finding_traffic`/`goals`，换成真实存在的 `list_untested_assets`/`get_worker_trace`/`search_all_worker_traces` | 由 `TestDomainToolSeeds` 断言 pentest 域缺失集为空 |
 | 2026-10-26 | **改名 ARTEX → PRAETOR**：module path、二进制/镜像、前端品牌与偏好 key、登录用户名、文档全量更新；env 加 `PRAETOR_*` 优先 + `ARTEX_*` 兜底兼容层 | `go build ./...` OK；16 包全绿；`TestEnvPrefersNewPrefix` 锁定兼容顺序 |
 | 2026-10-26 | 沙箱方案定稿：形态 A（常驻工具容器 + `docker exec`）+ `PRAETOR_SANDBOX=required\|optional` 默认 required | 决策入档 §1.5 |
+| 2026-10-26 | **P1-2 收口**：注册 `verify_finding`（仅 worker）+ 宿主侧 `NewEvidenceVerifier`（evidence.Store 适配 + 证据挑选 + 结论落库）+ `findings.verification_state` 四列；工具提示词要求「绑定后先验证」 | `agent` 5 个工具用例 + `server` 6 个验证器用例；golden 有意变更 `verify_finding→worker` 已按纪律重生成 |
 | 2026-10-26 | **P1-2（核心）**：`internal/replay` 重放判定（状态码/长度容差/归一化 4-gram Jaccard 相似度/易变值抹除）+ `agent.VerifyBinding` 快照适配（head 容错解析、body 走 `BodySource` 接口） | `replay` 14 个用例 + `agent` 6 个用例全绿；无响应体无哈希时 fail-closed |
 | 2026-10-26 | **P0-7 一任务一容器**：`sandbox/per_task.go` + `BackgroundRunner` + 代理注入 + 任务 ID 透传（`RunInfo.TaskID`）+ reaper；修复 Windows `docker -v` 反斜杠路径 | `sandbox` 18 个用例 + `server` 5 个接线用例全绿 |
 | 2026-10-26 | **P0-6**：`sandbox` 包 + worker Bash 装饰 + `praetor-sandbox` 容器；修复自测发现的 **fail-open bug**（docker exec 非零退出被当成成功，导致容器不存在也判可用） | `sandbox` 7 个用例 + `agent` 沙箱 8 个用例全绿；16 包全绿 |
@@ -223,7 +245,7 @@ go run ./cmd/praetor
 | ID | 任务 | 做法 / 复刻来源 | 验收 | 状态 |
 | --- | --- | --- | --- | --- |
 | P1-1 | 接 hexstrike MCP 工具面（外部进程，不复制代码） | 直接接入 `0x4m4/hexstrike-ai` | 至少 3 个工具可被 worker 调用 | 待做 |
-| P1-2 | 确定性验证器接流量重放：`internal/replay`（状态码 + 长度容差 + 归一化 4-gram 相似度）+ `agent.VerifyBinding`（快照→重放→判定） | **复刻 Pentest-Swarm 的 oracle 思路**（AGPL，只读思路，自行实现） | 核心与适配层已完成（20 个单测）；**待做**：注册 `verify_finding` 工具 + 无证据 finding 落「疑似」队列 | 进行中 |
+| P1-2 | 确定性验证闭环：`internal/replay` + `agent.VerifyBinding` + `verify_finding` 工具 + `verification_state` 落库（unverified/verified/suspected） | **复刻 Pentest-Swarm 的 oracle 思路**（AGPL，只读思路，自行实现） | 重放一致→verified；不一致/无证据/重放失败→suspected 并写明 reasons；**均有单测** | 已完成 |
 | P1-3 | benchmark runner | 接入 `xbow-engineering/validation-benchmarks`（104 题）+ `auto-pen-bench` | 出基线分并记录到本文件 | 待做 |
 
 ### P2 CTF

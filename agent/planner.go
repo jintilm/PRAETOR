@@ -22,6 +22,7 @@ import (
 // into the frontier. It is the sole intent generator.
 type Planner struct {
 	findingRecorder   FindingRecorder
+	findingVerifier   FindingVerifier // nil = 未启用确定性验证
 	prov              llm.Provider
 	model             string
 	tx                *transcript.Store                      // raw LLM conversation persistence (nil = off)
@@ -360,6 +361,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	p.compactor.OnPlannerRound(ctx, ts)
 	tsx := NewToolSet(ts, "planner")
 	tsx.SetFindingRecorder(p.findingRecorder)
+	tsx.SetFindingVerifier(p.findingVerifier)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
 	}

@@ -1108,6 +1108,15 @@ CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status, created_at DE
 -- 「按资产」视图靠 asset_ids @> '[<id>]' 反查发现,没有这个 GIN 索引就是全表扫。
 CREATE INDEX IF NOT EXISTS idx_findings_asset_ids ON findings USING GIN(asset_ids jsonb_path_ops);
 
+-- 确定性验证（P1-2）：把「模型说能复现」和「程序重放证实」分开落库。
+-- 与 status（人工处置）互不影响：验证只回答「证据是否仍成立」。
+--   unverified 未验证（默认）/ verified 已复现 / suspected 疑似（不一致或证据不足）
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_state TEXT NOT NULL DEFAULT 'unverified';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_note TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_similarity DOUBLE PRECISION;
+CREATE INDEX IF NOT EXISTS idx_findings_verification ON findings(verification_state, created_at DESC);
+
 -- 手动复测属于独立会话；结论与原漏洞处置状态分开保存。
 CREATE TABLE IF NOT EXISTS finding_retests (
     id BIGSERIAL PRIMARY KEY,
