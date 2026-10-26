@@ -81,7 +81,7 @@ func (redTeamPack) Roles() []RoleSpec {
 }
 
 func (redTeamPack) Tools() []string {
-	return []string{"add_intent", "add_hint", "list_facts", "record_fact", "add_finding"}
+	return []string{"add_intent", "add_hint", "list_facts", "record_fact", "report_finding"}
 }
 
 func (redTeamPack) MCP() []MCPRef {

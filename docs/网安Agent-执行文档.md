@@ -78,6 +78,8 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 | 2026-10-26 | 修 Windows 真 bug：`skillRelPath` 用 `filepath.Clean` 把 `scripts/run.py` 变成 `scripts\run.py`，改用 `path.Clean`（技能清单里存的是归档式斜杠路径） | `TestSkillRelPath` 由红转绿 |
 | 2026-10-26 | 建立回滚点：`git init` + 基线提交 `5c28544` | `git log` 可见 |
 | 2026-10-26 | **P0-3**：`agent/domain/adapter.go` — DomainPack → `subagent.Definition` + 工具白名单 + 预算合并 + 审批档位映射 + `Missing()` 装配期缺工具检测 | `go test ./agent/domain` 13 个用例全绿；`go build ./...` OK；全仓 16 包全绿 |
+| 2026-10-26 | **P0-4**：`toolcatalog` 拆出 `platformAgentOrder` / `mergeSeeds`（公共骨架）/ `DomainToolSeeds(pack)` / `UnresolvedDomainTools(pack)` / `platformToolIndex()`；平台绑定用 golden 锁定 | `TestBuiltinToolSeedsPlatformUnchanged`（golden 25 条逐条一致）+ `TestDomainToolSeeds` + `TestUnresolvedDomainTools` 全绿；16 包全 ok |
+| 2026-10-26 | 修正 pack 里凭 grep 猜错的工具名：`add_finding`→`report_finding`；删掉不存在的 `coverage`/`asset_coverage`/`list_worker_traces`/`bind_finding_traffic`/`get_finding_traffic`/`goals`，换成真实存在的 `list_untested_assets`/`get_worker_trace`/`search_all_worker_traces` | 由 `TestDomainToolSeeds` 断言 pentest 域缺失集为空 |
 
 ---
 
@@ -92,16 +94,18 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 | P0-1 | DomainPack 接口 + 4 域声明 | 自研（无现成可复刻） | `go test ./agent/domain` 绿 | 已完成 |
 | P0-2 | 测试基线统一门禁 | 自研（项目内既有 skip 惯例推广） | `go test ./...` 全绿 | 已完成 |
 | P0-3 | `agent/domain/adapter.go`：DomainPack → `[]subagent.Definition` + 工具白名单过滤 | **复刻 norma** `subagent.filterTools` 语义（与 SDK 完全一致：空=继承、未知丢弃） | 单测：给 pentest pack 生成 2 个 Definition，工具集与 `Roles()[].ToolKeys` 一致 | 已完成 |
-| P0-4 | `toolcatalog` 由 `domain.All()` 驱动**角色清单**（agent key + 每个角色可绑的工具 key），工具实例仍来自 `builtinToolsByAgent()` | 自研（原地重构） | 现有 `toolcatalog_test.go` 全绿；seed 出的 `(agent, tool)` 组合与改造前逐条一致；UI 绑定结果不变 | 待做 |
+| P0-4 | `toolcatalog`：拆出 `mergeSeeds` 公共骨架 + `DomainToolSeeds(pack)` + `UnresolvedDomainTools(pack)` + `platformToolIndex()`；平台 agent 绑定用 golden 锁定 | 自研（原地重构，公共骨架复用原有合并语义） | `TestBuiltinToolSeedsPlatformUnchanged` 逐条一致；`TestDomainToolSeeds` / `TestUnresolvedDomainTools` 通过 | 已完成 |
 
-> **P0-4 设计修正（2026-10-26）**：原计划「`builtinToolsByAgent()` 改由 `All()` 驱动」不可行，且会破坏两条既有约束：
+> **P0-4 设计修正（2026-10-26，已按此实现）**：原计划「`builtinToolsByAgent()` 改由 `All()` 驱动」不可行，且会破坏两条既有约束：
 > ① DomainPack 刻意**零依赖、只持字符串 key**（不 import `actool`），拿不到 `CoreTool` 实例；
 > ② 工具 handler 必须留在代码里（`toolcatalog` 的注释已明确「DB 只能改散文与默认值，改不了 handler」）。
 >
-> 正确切法：**实例由代码提供，清单由 pack 提供**。`builtinToolsByAgent()` 继续返回 `map[agentKey][]CoreTool`（这是 handler 的唯一定义处），
-> `BuiltinToolSeeds()` 改为遍历 `domain.All()`：角色 key 决定 agent 维度，`EffectiveTools(pack, role)` 决定该 agent 默认绑哪些工具，
-> 再按 key 从实例表里取。等价性由「seed 前后组合逐条比对」的测试保证。
-> 这样 pack 仍是纯声明，toolcatalog 仍拥有 handler，且新增域不需要改 toolcatalog。
+> 实际落地：**实例由代码提供，清单由 pack 提供，且分两条通道播种**。
+> - `BuiltinToolSeeds()` 保持原样（平台 6 个 agent，`mergeSeeds` 原逻辑抽出复用）→ 存量库与新装库的绑定**逐条不变**，由 `testdata/seeds_platform.golden` 锁定。
+> - `DomainToolSeeds(pack)` 单独展开某域的角色，**只在装配该域时调用**；不让四域的 agent 参与每次启动的全局播种（否则每个装了 ARTEX 的库都会多出 `ctf-lead`、`solver-pwn` 等用不到的 agent 行）。
+> - `UnresolvedDomainTools(pack)` 供装配期告警：声明了但还解析不出实例的 key（待接入的 MCP 工具）。
+>
+> **踩到的坑（值得记）**：初版 pack 里 `add_finding` / `coverage` / `asset_coverage` / `list_worker_traces` / `bind_finding_traffic` 这些名字是我按 grep 猜的，真实清单里是 `report_finding` / `list_untested_assets` / `get_worker_trace` / `search_all_worker_traces`，其余根本不存在。`UnresolvedDomainTools` 第一次跑就把它们全抓出来了——这正是这个函数存在的理由。
 | P0-5 | engine 按 `Scheduler()` 选调度器；`explore` 复用现有 `plannerLoop`；装配期用 `domain.Missing()` 打「声明了但未接入」的工具警告 | 自研 | 现有渗透用例回归通过（行为不变）；启动日志能看到缺失工具清单 | 待做 |
 | P0-6 | `sandbox/`：`Bash` 改容器 exec，出口走现有 MITM 代理 + `AllowEgress` | **复刻 PentAGI 的沙箱工具镜像思路**（MIT）+ Strix 容器分层（Apache-2.0） | 工具在容器内执行；出口流量仍被记录代理截获 | 待做 |
 
@@ -175,6 +179,8 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 5. `go test ./... -count=1` → 全 ok（提交前至少一次）
 6. 有 DB 相关改动 → `./test-with-db.sh` 跑一次真库验证
 7. 回填 §2 / §3 状态
+
+**golden 纪律**：`agent/testdata/seeds_platform.golden` 是平台工具绑定的快照，**不允许为「让测试变绿」而重写**。确属有意的绑定变更时，用 `go test ./agent/ -run TestBuiltinToolSeedsPlatformUnchanged -update-seed-golden` 重生成，并在提交信息里说明哪条绑定、为什么变。
 
 ---
 

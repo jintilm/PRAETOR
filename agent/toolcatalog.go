@@ -3,13 +3,17 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"sort"
 
+	"github.com/Autumn-27/artex/agent/domain"
 	actool "github.com/Autumn-27/norma/tool"
 )
 
 // 本文件把「内置工具」从纯代码变成可枚举、可被 DB 覆盖的目录：
-//   - BuiltinToolSeeds()：把三个执行 agent 的内置工具集展开成 seed 记录（key +
+//   - BuiltinToolSeeds()：把平台 agent 的内置工具集展开成 seed 记录（key +
 //     描述 + 参数 schema + 默认绑定的 agent），供服务端开机幂等播种进 tools 表。
+//   - DomainToolSeeds(pack)：把一个领域包的角色展开成同样的记录，只在装配该域时用；
+//     领域包的 agent 不参与全局播种，避免往库里塞用不到的绑定。
 //   - ToolResolve 钩子：运行时按 DB 里的 tools 行对已装配的工具做「按 agent 过滤 +
 //     覆盖描述/schema + 注入参数默认值」。key/handler 仍在代码层，DB 只改「散文与默认值」。
 // handler（Call 行为）永远来自代码——DB 改不了它，只能改模型看到的说明与缺省入参。
@@ -58,12 +62,108 @@ func builtinToolsByAgent() map[string][]actool.CoreTool {
 // 「prove_goal 标记最后一个目标 → 自动收官」重复,故默认不给任何 agent,需要时再手动绑。
 var defaultUnbound = map[string]bool{"goal_met": true}
 
-// BuiltinToolSeeds 把各 agent 的内置工具集去重合并成 seed 列表：同名工具（如 list_assets
-// 多个 agent 都有）合成一条，Agents 取并集；defaultUnbound 里的工具则强制绑定为空。
-func BuiltinToolSeeds() []ToolSeed {
-	byAgent := builtinToolsByAgent()
-	order := []string{"mainagent", "goals", "planner", "worker", "auto", "pentest"}
+// platformAgentOrder 是「平台级 agent」的固定维度，顺序决定 seed 的稳定顺序。
+//
+// 这些 agent 与具体领域无关：mainagent 是人在环路，goals 是目标拆解，auto/pentest
+// 是独立任务型 agent；planner/worker 虽是渗透域角色，但它们的默认绑定必须与存量库
+// 逐条一致（见 toolcatalog_seeds_test.go 的 golden），所以在 P1 逐域切换之前仍留在
+// 平台侧。领域包新增的角色由 DomainToolSeeds 单独展开，不参与这里。
+var platformAgentOrder = []string{"mainagent", "goals", "planner", "worker", "auto", "pentest"}
 
+// BuiltinToolSeeds 把各平台 agent 的内置工具集去重合并成 seed 列表：同名工具（如
+// list_assets 多个 agent 都有）合成一条，Agents 取并集；defaultUnbound 里的工具则
+// 强制绑定为空。
+//
+// 领域包（红队/CTF/逆向）的 agent 不在这里播种：它们只在对应任务形态下才存在，
+// 全量播种会往库里塞一堆用不到的绑定。装配某域时用 DomainToolSeeds 单独取。
+func BuiltinToolSeeds() []ToolSeed {
+	return mergeSeeds(builtinToolsByAgent(), platformAgentOrder)
+}
+
+// DomainToolSeeds 把一个领域包的角色展开成 seed 记录（语义与 BuiltinToolSeeds 一致：
+// 同名工具合并、Agents 取并集、defaultUnbound 强制留空）。
+//
+// 只解析「当前装配得出来」的工具：领域包里大量 key 要等对应 MCP 接进来才存在，
+// 静默丢弃会让 worker 手里没工具却照常开跑，所以缺失项由 UnresolvedDomainTools
+// 显式报出来（P0-5 装配期打警告）。
+func DomainToolSeeds(p domain.DomainPack) []ToolSeed {
+	if p == nil {
+		return nil
+	}
+	idx := platformToolIndex()
+	byAgent := make(map[string][]actool.CoreTool, len(p.Roles()))
+	order := make([]string, 0, len(p.Roles()))
+	for _, r := range p.Roles() {
+		seen := make(map[string]bool, len(r.ToolKeys))
+		var tools []actool.CoreTool
+		for _, k := range domain.EffectiveTools(p, r) {
+			t, ok := idx[k]
+			if !ok || seen[k] {
+				continue
+			}
+			seen[k] = true
+			tools = append(tools, t)
+		}
+		byAgent[r.Key] = tools
+		order = append(order, r.Key)
+	}
+	return mergeSeeds(byAgent, order)
+}
+
+// optionalSDKTools 是「由宿主按配置装配、不归 tools 表管」的 SDK 工具名。
+//
+// WebFetch/WebSearch 不在 actool.DefaultTools 里，要靠 EnableWebFetch / SetWebSearch
+// 显式打开（ARTEX 在 chat.go 里开，并指向记录代理）。它们对领域包是合法声明，
+// 但既不该被播种进 tools 表，也不该被报成「缺失」。
+var optionalSDKTools = map[string]bool{"WebFetch": true, "WebSearch": true}
+
+// UnresolvedDomainTools 返回该域「声明了、但当前工具集里没有」的 key，排序去重。
+// 供装配期告警：这类 key 通常要等 MCP server 接进来。
+func UnresolvedDomainTools(p domain.DomainPack) []string {
+	if p == nil {
+		return nil
+	}
+	idx := platformToolIndex()
+	seen := map[string]bool{}
+	var out []string
+	for _, r := range p.Roles() {
+		for _, k := range domain.EffectiveTools(p, r) {
+			if _, ok := idx[k]; ok || optionalSDKTools[k] || seen[k] {
+				continue
+			}
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// platformToolIndex 把「当前装配得出来的工具」铺平成 key→CoreTool，供领域包按 key 取 handler。
+//
+// 两个来源：
+//  1. 平台 agent 的领域工具实例（builtinToolsByAgent）——handler 永远来自代码；
+//  2. SDK 默认工具（Read/Write/Edit/Bash/…）——它们刻意不进 tools 表（每个 agent 都有），
+//     但对领域包来说是完全合法的声明，所以也要能解析，否则会被误报成「缺失」。
+func platformToolIndex() map[string]actool.CoreTool {
+	idx := make(map[string]actool.CoreTool, 64)
+	for _, t := range actool.DefaultTools() {
+		idx[t.Name()] = t
+	}
+	byAgent := builtinToolsByAgent()
+	for _, tools := range byAgent {
+		for _, t := range tools {
+			if _, ok := idx[t.Name()]; !ok {
+				idx[t.Name()] = t
+			}
+		}
+	}
+	return idx
+}
+
+// mergeSeeds 是 BuiltinToolSeeds / DomainToolSeeds 的公共骨架：按 order 展开、
+// 同名工具合并（Agents 取并集，保持出现顺序）、defaultUnbound 强制清空绑定。
+func mergeSeeds(byAgent map[string][]actool.CoreTool, order []string) []ToolSeed {
 	type acc struct {
 		tool   actool.CoreTool
 		agents []string
