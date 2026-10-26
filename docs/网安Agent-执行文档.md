@@ -155,6 +155,10 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 | 数据库端口 | 5432（容器 `artex-pg`） | **55433**（容器 `praetor-pg`，`PRAETOR_PG_PORT` 可覆盖） |
 | 测试库 | — | `praetor-test` 项目 / `praetor-test-pg` 容器 / **55432** |
 
+**当前实测状态（2026-10-26）**：`praetor-pg` 已运行（PostgreSQL 16.15，`127.0.0.1:55433->5432`，库 `praetor` + `praetor_test`），
+`praetor` 库已建 51 张表、`findings` 19 列（含 4 个验证列）；旧 `artex-pg` 仍为 Exited，未被触碰。
+`.env` 由 `.env.example` 生成（密码随机化，已 gitignore）。
+
 `docker compose config` 已离线校验。启动：
 
 ```bash
@@ -162,12 +166,26 @@ cp .env.example .env && $EDITOR .env      # 至少填 POSTGRES_PASSWORD
 docker compose up -d --build              # 全栈（应用 + 数据库）
 ```
 
-只起数据库、在宿主机跑 Go 二进制（开发常用，不动任何已有环境变量）：
+只起数据库、在宿主机跑服务（推荐；`dev.sh` 已自动装配 DSN，无需手敲）：
 
 ```bash
-docker compose up -d postgres             # praetor-pg，宿主 127.0.0.1:55433
-export PRAETOR_PG_DSN='postgres://praetor:change-me-please@127.0.0.1:55433/praetor?sslmode=disable'
-go run ./cmd/praetor
+docker compose up -d postgres   # praetor-pg，宿主 127.0.0.1:55433
+./dev.sh                        # 读 .env → 自动 export PRAETOR_PG_DSN → 后端 :8797 / 代理 :8798
+```
+
+手工方式：
+
+```bash
+export PRAETOR_PG_DSN="postgres://praetor:$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2)@127.0.0.1:55433/praetor?sslmode=disable"
+go run ./cmd/praetor -addr :8797 -proxy 127.0.0.1:8798
+```
+
+跑集成测试（必须用 `*_test` 库）：
+
+```bash
+docker exec praetor-pg createdb -U praetor praetor_test   # 首次
+export PRAETOR_PG_DSN="postgres://praetor:$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2)@127.0.0.1:55433/praetor_test?sslmode=disable"
+go test ./... -count=1
 ```
 
 **清理边界（重要）**：
@@ -334,4 +352,11 @@ go run ./cmd/praetor
 1. 改名那一轮做过一次全仓 `gofmt -w`，历史上未格式化的 4 个文件（`db/asset_intercept.go`、`db/assets_test.go`、`db/config.go`、`db/task_scope_test.go`）已一并格式化。此遗留项关闭。
 2. `guardPanic` 在 recover 后会用 `log.Printf` 打印完整 panic 栈（`agent/assembly.go:82`）。这是**预期行为**（生产需要现场），但测试输出里看起来像崩溃——排查时先看 `--- FAIL` 行，别被栈骗。
 3. Docker Desktop 守护进程当前未启动；测试栈已就绪但未拉起。
-4. 上游 `.gitignore` 原本忽略整个 `/docs/`，导致本文件与选型报告不进版本库。已改为 `/docs/*` + 两份文档白名单例外（`.gitignore` 有注释说明原因）；`docs/漏洞流量证据.md` 仍保持忽略。
+4. **真库跑测试暴露的既有问题（非本轮引入）**：接上真实 PG 后，`server` 包整包运行会有 6~7 个用例失败
+   （`TestFindingTrafficAPIAndExport`、`TestFindingWorkflow*`、`TestMgmtAPI`、`TestTaskMetadataPatchReturnsRenameAndPin`、
+   `TestInheritedActivityDetailAndRelationDeletion`、`TestChatUnavailableReasonDistinguishesStates`），
+   但**每个用例单独 `-run` 都能通过**；两次连跑失败数从 7 变 6，`tasks` 表累积到 53 行 ——
+   典型的用例间共享库未清理（此前没有可用 PG，这些用例一直被 skip，问题被掩盖）。
+   修法（待排期）：`server` 包 `TestMain` 启动前 `TRUNCATE ... RESTART IDENTITY CASCADE` 可变表，
+   或让断言只按本次创建的 id 过滤，不做全局列表断言。
+5. 上游 `.gitignore` 原本忽略整个 `/docs/`，导致本文件与选型报告不进版本库。已改为 `/docs/*` + 两份文档白名单例外（`.gitignore` 有注释说明原因）；`docs/漏洞流量证据.md` 仍保持忽略。
