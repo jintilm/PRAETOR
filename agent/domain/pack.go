@@ -1,6 +1,6 @@
 // Package domain 定义「领域包（Domain Pack）」抽象。
 //
-// 背景：ARTEX 目前是单域（渗透）系统，角色 mainagent/planner/worker 写死在
+// 背景：PRAETOR 目前是单域（渗透）系统，角色 mainagent/planner/worker 写死在
 // agent/ 里。要扩到渗透 / 红队 / CTF / 逆向四域，四者的执行模型差异极大：
 //
 //	渗透  深度优先，单链推进（frontier 领取意图）
@@ -39,7 +39,7 @@ const (
 type SchedulerKind string
 
 const (
-	// ScheduleExplore 复用 ARTEX 现有 plannerLoop + frontier：图变唤醒 planner，
+	// ScheduleExplore 复用 PRAETOR 现有 plannerLoop + frontier：图变唤醒 planner，
 	// planner 派意图，worker 领取执行写回。适用于渗透。
 	ScheduleExplore SchedulerKind = "explore"
 	// ScheduleCampaign 按阶段 DAG 派发，前置未满足不下发；收尾必须执行 cleanup。

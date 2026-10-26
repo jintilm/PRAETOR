@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"sort"
 
-	"github.com/Autumn-27/artex/agent/domain"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/Autumn-27/praetor/agent/domain"
 )
 
 // 本文件把「内置工具」从纯代码变成可枚举、可被 DB 覆盖的目录：
@@ -34,7 +34,7 @@ type ToolSeed struct {
 // 刻意【不含】SDK 通用工具 actool.DefaultTools()（Read/Write/Edit/MultiEdit/LS/Glob/
 // Grep/Bash）：它们每个 agent 都固定拥有、没有「绑定到谁」的取舍，且说明大多在 Prompt()
 // 里（本表只覆盖 Description()，会造成半覆盖误导）。不 seed → 无 DB 行 → ToolResolve
-// 原样放行、不覆盖，行为与从前一致。只有 artex 自己的领域工具入表可管。
+// 原样放行、不覆盖，行为与从前一致。只有 praetor 自己的领域工具入表可管。
 func builtinToolsByAgent() map[string][]actool.CoreTool {
 	ts := NewToolSet(nil, "")
 	return map[string][]actool.CoreTool{
@@ -113,7 +113,7 @@ func DomainToolSeeds(p domain.DomainPack) []ToolSeed {
 // optionalSDKTools 是「由宿主按配置装配、不归 tools 表管」的 SDK 工具名。
 //
 // WebFetch/WebSearch 不在 actool.DefaultTools 里，要靠 EnableWebFetch / SetWebSearch
-// 显式打开（ARTEX 在 chat.go 里开，并指向记录代理）。它们对领域包是合法声明，
+// 显式打开（PRAETOR 在 chat.go 里开，并指向记录代理）。它们对领域包是合法声明，
 // 但既不该被播种进 tools 表，也不该被报成「缺失」。
 var optionalSDKTools = map[string]bool{"WebFetch": true, "WebSearch": true}
 

@@ -11,8 +11,8 @@
 //  3. 服务连不上        → skip
 //
 // 规则 2 是数据安全红线：这些集成测试会建表 + DELETE 行。仓库默认的
-// ARTEX_PG_DSN 指向开发库 artex（见 config），一旦拿它跑测试就会清掉开发数据。
-// 逃生口仅用于一次性实例：ARTEX_TEST_ALLOW_NON_TEST_DB=1。
+// PRAETOR_PG_DSN 指向开发库 praetor（见 config），一旦拿它跑测试就会清掉开发数据。
+// 逃生口仅用于一次性实例：PRAETOR_TEST_ALLOW_NON_TEST_DB=1。
 //
 // 本包只被 _test.go 引用，不会被任何生产代码 import，因此不会进二进制。
 package testpg
@@ -22,12 +22,11 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/config"
+	"github.com/Autumn-27/praetor/config"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -39,10 +38,10 @@ func DSN() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("no database config: %w", err)
 	}
-	if name := DBName(dsn); !strings.HasSuffix(name, "_test") && os.Getenv("ARTEX_TEST_ALLOW_NON_TEST_DB") != "1" {
+	if name := DBName(dsn); !strings.HasSuffix(name, "_test") && config.Env("TEST_ALLOW_NON_TEST_DB") != "1" {
 		return "", fmt.Errorf("拒绝在非测试库 %q 上运行（来源：%s）：这些用例会建表并 DELETE 数据。"+
-			"请把 ARTEX_PG_DSN 指向独立的 *_test 库（如 .../artex_test，db.Open 会自动建库），"+
-			"或显式设 ARTEX_TEST_ALLOW_NON_TEST_DB=1", name, src)
+			"请把 PRAETOR_PG_DSN 指向独立的 *_test 库（如 .../praetor_test，db.Open 会自动建库），"+
+			"或显式设 PRAETOR_TEST_ALLOW_NON_TEST_DB=1", name, src)
 	}
 	return dsn, nil
 }

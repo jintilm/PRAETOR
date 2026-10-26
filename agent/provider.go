@@ -1,5 +1,5 @@
 // Package agent wires real LLM-driven planner and work agents (on top of the
-// agent-core SDK) to the dual SQLite graph. See docs/ARTEX-架构设计.md
+// agent-core SDK) to the dual SQLite graph. See docs/PRAETOR-架构设计.md
 // §4.3 (planner) and §4.4 (work agent).
 //
 // Provider configuration is read from the environment so the system runs with
@@ -18,14 +18,16 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/Autumn-27/praetor/config"
 	"time"
 
-	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/compaction"
 	"github.com/Autumn-27/norma/llm"
 	acperm "github.com/Autumn-27/norma/permission"
 	"github.com/Autumn-27/norma/transcript"
+	"github.com/Autumn-27/praetor/llmrec"
 )
 
 // Config describes the LLM backend resolved from the environment.
@@ -137,13 +139,13 @@ func compactionConfig(windowTokens int) *compaction.Config {
 
 // FromEnv resolves the LLM provider config:
 //
-//	ARTEX_LLM_PROVIDER = anthropic|openai (default: inferred from keys)
-//	ARTEX_LLM_MODEL    = model id        (default: per provider)
-//	ARTEX_LLM_BASE_URL = endpoint        (optional)
-//	ARTEX_LLM_PROXY    = proxy URL        (optional; http/https/socks5)
+//	PRAETOR_LLM_PROVIDER = anthropic|openai (default: inferred from keys)
+//	PRAETOR_LLM_MODEL    = model id        (default: per provider)
+//	PRAETOR_LLM_BASE_URL = endpoint        (optional)
+//	PRAETOR_LLM_PROXY    = proxy URL        (optional; http/https/socks5)
 //	ANTHROPIC_API_KEY / OPENAI_API_KEY         = credentials
 func FromEnv() (Config, bool) {
-	prov := os.Getenv("ARTEX_LLM_PROVIDER")
+	prov := config.Env("LLM_PROVIDER")
 	anthKey := os.Getenv("ANTHROPIC_API_KEY")
 	oaiKey := os.Getenv("OPENAI_API_KEY")
 
@@ -159,11 +161,11 @@ func FromEnv() (Config, bool) {
 	}
 
 	c := Config{
-		BaseURL: os.Getenv("ARTEX_LLM_BASE_URL"),
-		Model:   os.Getenv("ARTEX_LLM_MODEL"),
-		Proxy:   strings.TrimSpace(os.Getenv("ARTEX_LLM_PROXY")),
-		// 默认流式;ARTEX_LLM_STREAM=false/0/off 显式关闭走非流式。
-		Stream: !isFalsy(os.Getenv("ARTEX_LLM_STREAM")),
+		BaseURL: config.Env("LLM_BASE_URL"),
+		Model:   config.Env("LLM_MODEL"),
+		Proxy:   strings.TrimSpace(config.Env("LLM_PROXY")),
+		// 默认流式;PRAETOR_LLM_STREAM=false/0/off 显式关闭走非流式。
+		Stream: !isFalsy(config.Env("LLM_STREAM")),
 	}
 	switch prov {
 	case "openai":

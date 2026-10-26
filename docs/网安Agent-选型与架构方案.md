@@ -2,7 +2,7 @@
 
 > 面向「渗透测试 / 红队 / CTF / 逆向」四大板块 + 子 Agent 协作
 > 调研数据抓取日期：**2026-10-26**（GitHub REST/Search API + 各仓库 README 原文）
-> 参考坐标：当前工作区 `E:/Code/pentest/ARTEX`（Go + Next.js，AGPLv3）
+> 参考坐标：当前工作区 `E:/Code/pentest/PRAETOR`（Go + Next.js，AGPLv3）
 
 ---
 
@@ -10,21 +10,21 @@
 
 | 决策点 | 结论 | 理由 |
 | --- | --- | --- |
-| **要不要舍弃 ARTEX** | **不要舍弃，建议 fork 改造** | 已有 9.3 万行 Go + 5.6 万行 TS 的可用骨架：双图（资产图/探索图）、planner→worker 事件驱动闭环、工具审批门、MITM 全流量留痕、工具目录按 agent 绑定。这三样是**四个板块共用**的底座，重写成本远大于改造 |
-| **执行内核** | 直接复用 `norma` SDK（ARTEX 的依赖） | 它已内置 `subagent`（Agent 工具 + 递归深度保护）、`coordinator`（分解 + `RunParallel` 扇出）、`skill`（SKILL.md）、`mcp`、`permission`（四段式）、`hook`（8 个生命周期）、`compaction`。**子 Agent 协作不需要自研调度器** |
+| **要不要舍弃 PRAETOR（原 ARTEX）** | **不要舍弃，建议 fork 改造** | 已有 9.3 万行 Go + 5.6 万行 TS 的可用骨架：双图（资产图/探索图）、planner→worker 事件驱动闭环、工具审批门、MITM 全流量留痕、工具目录按 agent 绑定。这三样是**四个板块共用**的底座，重写成本远大于改造 |
+| **执行内核** | 直接复用 `norma` SDK（PRAETOR 的依赖） | 它已内置 `subagent`（Agent 工具 + 递归深度保护）、`coordinator`（分解 + `RunParallel` 扇出）、`skill`（SKILL.md）、`mcp`、`permission`（四段式）、`hook`（8 个生命周期）、`compaction`。**子 Agent 协作不需要自研调度器** |
 | **改造主线** | 把「单域渗透系统」升级为「**领域包（Domain Pack）插件化**的多域平台」 | 四域执行模型差异极大（渗透=探索、红队=战役 DAG、CTF=竞速抢旗、逆向=证据链），必须靠接口隔离，不能靠一套 prompt 硬扛 |
 | **重点借鉴的 5 个项目** | Strix（图编排+沙箱）、PentAGI（分层记忆+沙箱工具镜像）、Pentest-Swarm（黑板+确定性验证器）、Veria ctf-agent（coordinator+solver 竞速）、REA / open-reverselab / GhidraMCP（逆向工具面） | 分别解决：多 agent 拓扑、记忆与隔离、降误报、CTF 并行、逆向接入 |
 | **不要自研的红队件** | C2 / implant / AD 攻击链 全用开源成熟件（Sliver / Mythic / Caldera / Atomic Red Team / BloodHound / NetExec） | 自研 C2 既无必要也踩合规红线；Agent 只做「编排 + 决策 + 留证」 |
 | **必须有的验收** | 从第一天就接 benchmark（XBOW validation-104 / AutoPenBench / Cybench / NYU CTF Bench / CyberGym） | 「好用」必须可量化，否则多 agent 只是堆 token |
-| **许可证红线** | ARTEX 自身是 **AGPLv3**；Shannon / T3MP3ST / Pentest-Swarm / Dark-Moon / open-reverselab 为 AGPL/GPL | 若要做**闭源商用或 SaaS**，这些代码只能「读思路」，不能复制粘贴；可安全吸收的是 MIT / Apache-2.0 项目（Strix、PentAGI、Veria ctf-agent、REA） |
+| **许可证红线** | PRAETOR 自身是 **AGPLv3**；Shannon / T3MP3ST / Pentest-Swarm / Dark-Moon / open-reverselab 为 AGPL/GPL | 若要做**闭源商用或 SaaS**，这些代码只能「读思路」，不能复制粘贴；可安全吸收的是 MIT / Apache-2.0 项目（Strix、PentAGI、Veria ctf-agent、REA） |
 
 ---
 
-## 1. 本地项目 ARTEX 体检
+## 1. 本地项目 PRAETOR 体检
 
 ### 1.1 现状盘点
 
-| 能力 | ARTEX 现状 | 四域可复用度 | 缺口 |
+| 能力 | PRAETOR 现状 | 四域可复用度 | 缺口 |
 | --- | --- | --- | --- |
 | **双图世界模型** | 资产图（root_domain→subdomain→service→endpoint，全局共享）+ 探索图（goal/intent/fact/finding/hint + 血缘边）+ anchors 锚定 | ★★★★★ 通用「黑板」 | 逆向/CTF 的节点类型缺失（binary/function/flag/patch） |
 | **执行闭环** | engine 每任务 1 个 plannerLoop + N worker；图变→debounce→唤醒 planner→派意图→worker 领取→写回 | ★★★★★ 渗透域直接可用 | 红队战役的「阶段依赖 + 时序」；CTF 的「多题并行 + 抢旗仲裁」 |
@@ -32,7 +32,7 @@
 | **审批门** | `guard` / `intercept`：工具级 allow/deny/ask + 人在环路对话 + 审批记录 | ★★★★★ **四域强制保留** | 需要「按目标 scope + 动作危险等级」的细粒度策略 |
 | **留痕** | MITM 记录代理（CA 签发 + HTTPS 校验）+ 每步 activity | ★★★★☆ 渗透/CTF-Web 通用 | 逆向域需要「二进制证据链」（哈希/反编译片段/动态 trace） |
 | **工具目录** | `toolcatalog` 把内置工具 seed 进 DB，可按 agent 绑定/改描述/schema | ★★★★★ **天然的子 Agent 能力路由** | 无第三方 MCP 池的统一注册与隔离 |
-| **子 Agent** | 依赖的 `norma` 已有 `subagent` + `coordinator`，**但 ARTEX 目前只用了 planner/worker 固定角色** | ★★★★★ | 缺「动态派生子 Agent」「子 Agent 生命周期/预算/回收」的产品层 |
+| **子 Agent** | 依赖的 `norma` 已有 `subagent` + `coordinator`，**但 PRAETOR 目前只用了 planner/worker 固定角色** | ★★★★★ | 缺「动态派生子 Agent」「子 Agent 生命周期/预算/回收」的产品层 |
 | **沙箱** | 未见容器级隔离（Bash 直出） | ★★☆☆☆ | 四域都必须有容器沙箱 + 出口白名单 + 资源限额 |
 | **评测** | 无 | ☆☆☆☆☆ | 无 benchmark 回归 = 无法迭代 |
 
@@ -64,16 +64,16 @@
 | [Armur-Ai/Pentest-Swarm-AI](https://github.com/Armur-Ai/Pentest-Swarm-AI) | 3.0k | Go | **AGPL-3.0** | 蜂群架构：信息素黑板去中心化协作 + JEV 打分 + **非 LLM oracle 复核** | 两个点非常关键：①黑板式协作；②**确定性验证器**（非 LLM）二次确认高危发现 → 直接降误报 |
 | [ASCIT31/Dark-Moon](https://github.com/ASCIT31/Dark-Moon) | 1.1k | Python | GPL-3.0 | 50 个 specialist agent，覆盖 Web/云/AD/K8s，本地模型 + 隐私网关 | 「specialist 清单」可直接抄成我们的 role 目录；隐私网关思路适合本地模型场景 |
 | [aliasrobotics/cai](https://github.com/aliasrobotics/cai) | 9.8k | Python | — | ⚠️ **已于 2026-08 归档**（18 篇论文、30+ CVE 的研究artifact） | 只作参考读物，**不要作为基座**（无维护） |
-| [oritera/Cairn](https://github.com/oritera/Cairn) | 2.5k | Python | — | 通用状态空间搜索引擎做自主渗透 | ARTEX README 已参考，思路同源 |
+| [oritera/Cairn](https://github.com/oritera/Cairn) | 2.5k | Python | — | 通用状态空间搜索引擎做自主渗透 | PRAETOR README 已参考，思路同源 |
 | [mukul975/Anthropic-Cybersecurity-Skills](https://github.com/mukul975/Anthropic-Cybersecurity-Skills) | 32k | Markdown | — | 817 个结构化网络安全 skill，映射 MITRE ATT&CK / CIS / OWASP / NIST 等 6 框架 | **能力层白捡**：SKILL.md 格式与 `norma/skill` 兼容，直接当领域知识包 |
 | [Yeti-791/Awesome-Offensive-AI-Agentic-Landscape](https://github.com/Yeti-791/Awesome-Offensive-AI-Agentic-Landscape) | 398 | — | — | 46 个开源 Agent + 11 个安全专用模型 + MCP/Skill/116 篇论文/13 个 benchmark 全景 | **持续跟踪的唯一入口**，建议每个迭代周期扫一次 |
 
 ### 2.2 渗透测试（Web / API / 内网）
 
-优先级：**能力直接接 → Strix + HexStrike + ARTEX 本体**；**架构借鉴 → PentAGI（记忆）+ Pentest-Swarm（验证器）**。
+优先级：**能力直接接 → Strix + HexStrike + PRAETOR 本体**；**架构借鉴 → PentAGI（记忆）+ Pentest-Swarm（验证器）**。
 不建议把 Shannon / T3MP3ST 作为代码基座（AGPL）。
 
-关键结论：**渗透域不需要新写执行内核**。ARTEX 的 planner/worker 已经解决了「一条串行利用链在事件驱动 + 无状态会话下稳定推进」这个最难的工程问题（共享 todolist + 前置依赖判定）。
+关键结论：**渗透域不需要新写执行内核**。PRAETOR 的 planner/worker 已经解决了「一条串行利用链在事件驱动 + 无状态会话下稳定推进」这个最难的工程问题（共享 todolist + 前置依赖判定）。
 
 ### 2.3 红队 / 对手模拟
 
@@ -98,7 +98,7 @@
 | 项目 | Star | 语言 | 许可 | 定位 | 用法 |
 | --- | --- | --- | --- | --- | --- |
 | [verialabs/ctf-agent](https://github.com/verialabs/ctf-agent) | 757 | Python | MIT | **Coordinator + Solver Swarm 竞速**，CTFd 接入，BSidesSF 2026 **52/52 全胜** | ⭐ **CTF 域首选范式**：一个 coordinator 管全场，每道题起多个 solver（不同模型并行），先解出者胜；沙箱镜像自带工具链 |
-| [chainreactors/tinyctfer](https://github.com/chainreactors/tinyctfer) | 174 | Python | — | 「intent 即一切」：antix 微型意图运行时 + 元工具 | 国内实战（腾讯云黑客松第 4）；**意图/元工具**设计与 ARTEX 的 intent 模型同构，最易融合 |
+| [chainreactors/tinyctfer](https://github.com/chainreactors/tinyctfer) | 174 | Python | — | 「intent 即一切」：antix 微型意图运行时 + 元工具 | 国内实战（腾讯云黑客松第 4）；**意图/元工具**设计与 PRAETOR 的 intent 模型同构，最易融合 |
 | [NYU-LLM-CTF/nyuctf_agents](https://github.com/NYU-LLM-CTF/nyuctf_agents) | 161 | Python | — | D-CIPHER 多 agent（Commander / Planner / Solver） | 三角色分层与我们的三层架构同构，可直接对齐 |
 | [andyzorigin/cybench](https://github.com/andyzorigin/cybench) | 317 | Python | — | 40 道专业 CTF（4 场大赛，17 子任务，Unguided/Subtask 双模式） | **CTF 能力验收基准** |
 | [NYU-LLM-CTF/NYU_CTF_Bench](https://github.com/NYU-LLM-CTF/NYU_CTF_Bench) | 171 | Python | — | 200 题正式 + 55 开发集，Docker 化 | 大样本回归 |
@@ -109,7 +109,7 @@
 | [bee-san/Ciphey](https://github.com/bee-san/Ciphey) | 21.7k | Python | — | 自动解密/解码 | Crypto 类题的确定性兜底工具 |
 | [0ca/BoxPwnr](https://github.com/0ca/BoxPwnr) | 450 | Python | — | 15 个平台统一基准（HTB/THM/picoCTF/Cybench/XBOW） | **统一评测框架**，省掉自己写 harness |
 
-**CTF 域的核心判断**：CTF 与渗透是**两种完全不同的执行模型**——渗透是「深度优先、单链推进」，CTF 是「广度优先、多题并发、抢旗仲裁」。ARTEX 现在的 planner（唯一意图生成者、串行 todolist）**不适合直接跑 CTF**，必须新增一个「**竞速调度器**」（多解法并行 + 首个 flag 命中即收敛 + 失败题回退换模型）。
+**CTF 域的核心判断**：CTF 与渗透是**两种完全不同的执行模型**——渗透是「深度优先、单链推进」，CTF 是「广度优先、多题并发、抢旗仲裁」。PRAETOR 现在的 planner（唯一意图生成者、串行 todolist）**不适合直接跑 CTF**，必须新增一个「**竞速调度器**」（多解法并行 + 首个 flag 命中即收敛 + 失败题回退换模型）。
 
 ### 2.5 逆向工程
 
@@ -131,7 +131,7 @@
 | [albertan017/LLM4Decompile](https://github.com/albertan017/LLM4Decompile) | ~1k | Python | MIT | 反编译专用 LLM（汇编→C） | 自建本地模型时的基座 |
 | [airbus-seclab/bincat](https://github.com/airbus-seclab/bincat) | ~1.5k | Python | GPL-3 | 二进制相似性/补丁分析（IR） | 漏洞定位、补丁差分 |
 
-**逆向域的核心判断**：逆向不是「一次对话」，是「**长时程、可验证的证据链**」。Agent 的产出必须落成结构化证据（函数签名、调用图、字符串、交叉引用、动态 trace、结论 + 置信度），否则人无法复核。这正好用 ARTEX 的「探索图 + anchor」承载，但要新增 `binary / function / sample / evidence` 节点类型。
+**逆向域的核心判断**：逆向不是「一次对话」，是「**长时程、可验证的证据链**」。Agent 的产出必须落成结构化证据（函数签名、调用图、字符串、交叉引用、动态 trace、结论 + 置信度），否则人无法复核。这正好用 PRAETOR 的「探索图 + anchor」承载，但要新增 `binary / function / sample / evidence` 节点类型。
 
 ### 2.6 评测基准（务必从一开始就接）
 
@@ -193,16 +193,16 @@
 
 1. **Agent 之间不自由对话，只读写黑板。**
    自由对话会导致 token 爆炸 + 幻觉互相污染。信息交换一律是**结构化条目**（fact/artifact/evidence + 来源 intent_id），需要定向沟通时用 mailbox（单条消息 + 明确 payload schema）。
-   > ARTEX 已有的 `search_all_worker_traces` / `get_worker_trace` 就是正确做法：**按需检索他人过程**，而不是广播。
+   > PRAETOR 已有的 `search_all_worker_traces` / `get_worker_trace` 就是正确做法：**按需检索他人过程**，而不是广播。
 
 2. **每个 Specialist = 独立上下文 + 独立预算 + 工具子集。**
    `norma/subagent` 天然隔离上下文。Domain Lead 派生 specialist 时必须带 `{scope, 预算上限, 允许工具白名单, 产出 schema, 终止条件}`，禁止继承全量工具。
 
 3. **高危动作必须过门；高危发现必须过确定性校验。**
-   沿用 ARTEX `guard/intercept`；发现（finding）落库前先跑**非 LLM oracle**（重放 PoC、比对响应差异、CVSS 打分器），拿不到可复现证据的只能进「疑似」队列——这是 Pentest-Swarm 的思路，直接解决误报这个最大痛点。
+   沿用 PRAETOR `guard/intercept`；发现（finding）落库前先跑**非 LLM oracle**（重放 PoC、比对响应差异、CVSS 打分器），拿不到可复现证据的只能进「疑似」队列——这是 Pentest-Swarm 的思路，直接解决误报这个最大痛点。
 
 4. **失败的收敛路径必须显式。**
-   specialist 连续 N 次无新事实 → 上报 Lead；Lead 判定「方向穷尽」→ 换策略（换工具/换模型/降级为人工）；全局预算耗尽 → 强制 wrapup（ARTEX 已有 `wrapup`、`terminalreason`）。
+   specialist 连续 N 次无新事实 → 上报 Lead；Lead 判定「方向穷尽」→ 换策略（换工具/换模型/降级为人工）；全局预算耗尽 → 强制 wrapup（PRAETOR 已有 `wrapup`、`terminalreason`）。
 
 ### 3.3 四域执行模型对照（这是必须插件化的根本原因）
 
@@ -247,7 +247,7 @@ type Scheduler interface {
 }
 ```
 
-配套改动（在 ARTEX 上）：
+配套改动（在 PRAETOR 上）：
 
 | 改动点 | 位置 | 说明 |
 | --- | --- | --- |
@@ -265,7 +265,7 @@ type Scheduler interface {
 
 | 阶段 | 内容 | 验收标准 |
 | --- | --- | --- |
-| **P0 骨架（1~2 周）** | DomainPack 接口 + 角色插件化 + `norma/subagent` 接入 + Docker 沙箱 + 预算/回收 | 现有 ARTEX 渗透任务在新架构下 **行为不变**（回归通过）；能派生一个 specialist 并在限额内回收 |
+| **P0 骨架（1~2 周）** | DomainPack 接口 + 角色插件化 + `norma/subagent` 接入 + Docker 沙箱 + 预算/回收 | 现有 PRAETOR 渗透任务在新架构下 **行为不变**（回归通过）；能派生一个 specialist 并在限额内回收 |
 | **P1 渗透对齐（2~3 周）** | 接 hexstrike MCP 工具面 + 确定性验证器（PoC 重放）+ bench runner | **XBOW validation-104** 跑出基线分；AutoPenBench ≥ 论文 baseline |
 | **P2 CTF（2~3 周）** | raceScheduler + CTFd 答题 + pwn/rev/crypto 沙箱工具链 + ctf-skills 技能包 | **Cybench 40 题** & NYU CTF Bench 子集出分；对标 verialabs（52/52 为上限参考） |
 | **P3 逆向（3 周）** | REA / open-reverselab / GhidraMCP 接入 + 证据链 schema + 可续跑 | 给定 3 个 CTF-rev 题 + 1 个开源样本，产出**可复核证据链**（人抽检通过率 ≥ 80%） |
@@ -278,12 +278,12 @@ type Scheduler interface {
 ## 5. 合规与许可（必须前置决策）
 
 1. **许可证传染**
-   - ARTEX 本体 **AGPL-3.0**：若对外提供网络服务（SaaS），AGPL 要求向使用者提供修改后的源码。**闭源商业化前必须先决策**：要么接受开源、要么 clean-room 重写受影响部分、要么仅内部使用。
+   - PRAETOR 本体 **AGPL-3.0**：若对外提供网络服务（SaaS），AGPL 要求向使用者提供修改后的源码。**闭源商业化前必须先决策**：要么接受开源、要么 clean-room 重写受影响部分、要么仅内部使用。
    - 可直接吸收（MIT/Apache-2.0）：Strix、PentAGI、Veria ctf-agent、REA、GhidraMCP、Caldera、Atomic Red Team、IDAPython-MCP。
    - 只读思路（AGPL/GPL）：Shannon、T3MP3ST、Pentest-Swarm、Dark-Moon、open-reverselab、Sliver、BloodHound。
 
 2. **授权与 scope 强制**
-   - 目标必须在 scope 表内，否则工具层直接 fail-closed（ARTEX `guard` 已有基础）。
+   - 目标必须在 scope 表内，否则工具层直接 fail-closed（PRAETOR `guard` 已有基础）。
    - 三层限速：单目标 QPS / 单任务总请求 / 全局并发；越界即熔断并记录。
    - 所有动作留痕（谁、何时、对哪个目标、什么 payload），与 7 天流量留痕配套，用于事后审计与免责举证。
 
@@ -299,7 +299,7 @@ type Scheduler interface {
 
 ## 6. 一句话总结
 
-> **底座用 ARTEX（别丢），调度用 norma（别造），架构抄 Strix + PentAGI（图编排 + 分层记忆），降误报抄 Pentest-Swarm（确定性验证器），CTF 抄 Veria ctf-agent（协调者 + 求解器竞速），逆向靠 MCP（REA / GhidraMCP）而不是自己写反编译，红队只编排不自研 C2。**
+> **底座用 PRAETOR（原 ARTEX，别丢），调度用 norma（别造），架构抄 Strix + PentAGI（图编排 + 分层记忆），降误报抄 Pentest-Swarm（确定性验证器），CTF 抄 Veria ctf-agent（协调者 + 求解器竞速），逆向靠 MCP（REA / GhidraMCP）而不是自己写反编译，红队只编排不自研 C2。**
 
 ---
 
@@ -309,7 +309,7 @@ type Scheduler interface {
 - 技能包：https://github.com/mukul975/Anthropic-Cybersecurity-Skills ・ https://github.com/ljagiello/ctf-skills
 - 工具面（MCP）：https://github.com/0x4m4/hexstrike-ai ・ https://github.com/morluto/rea ・ https://github.com/LaurieWired/GhidraMCP ・ https://github.com/portswigger/mcp-server ・ https://github.com/FuzzingLabs/mcp-security-hub
 - 靶场：https://github.com/Orange-Cyberdefense/GOAD ・ https://github.com/CTFd/CTFd ・ https://github.com/0ca/BoxPwnr
-- 本仓库：`github.com/Autumn-27/artex` ・ SDK `github.com/Autumn-27/norma`
+- 本仓库：`github.com/Autumn-27/praetor` ・ SDK `github.com/Autumn-27/norma`
 
 ---
 

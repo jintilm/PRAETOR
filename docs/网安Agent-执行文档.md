@@ -3,7 +3,8 @@
 > 本文件是唯一的执行依据。**任何实现开始前先在这里建条目，做完更新状态**。
 > 文档与代码不一致时，以「门禁通过」为准，并立即修文档。
 >
-> 起点：2026-10-26 · 基座：ARTEX（fork 改造）· 形态：内部自用 · 模型：混合（逆向本地，其余云 API）
+> 项目代号：**PRAETOR**（`praetor`，统帅 → 将领 → 百夫长，对应 Commander → 域 Lead → Specialist 三级）
+> 起点：2026-10-26 · 基座：PRAETOR（fork 自 ARTEX）· 形态：内部自用 · 模型：混合（逆向本地，其余云 API）
 
 ---
 
@@ -15,7 +16,7 @@
 | R2 | **不影响完成度与性能** | 每步必须可独立验证、可回滚；不引入影响启动时间的依赖，不在热路径上加锁/加 IO；新增 MCP 一律外部进程，不塞进主进程。 |
 | R3 | **文档先行** | 先在本文件建任务条目（含验收标准），再写代码；代码完成即回填状态与本日验证结果。 |
 | R4 | **许可证红线** | 复制代码前先看 LICENSE：MIT / Apache-2.0 / BSD 可复制（保留版权头）；**AGPL / GPL 只读思路，不复制代码**。 |
-| R5 | **不碰主栈数据** | 见 §1.3：绝不连 `artex` 库跑测试，绝不 `down -v` 主栈。 |
+| R5 | **不碰主栈数据** | 见 §1.3：绝不连 `praetor` 库跑测试，绝不 `down -v` 主栈。 |
 
 ---
 
@@ -24,7 +25,7 @@
 ### 1.1 唯一可信的基线命令
 
 ```bash
-cd E:/Code/pentest/ARTEX
+cd E:/Code/pentest/PRAETOR
 gofmt -l <本次改动的文件>     # 必须为空（仓库有 4 个历史未格式化文件，见 §7.1，不在范围内）
 go vet ./<改动的包>/...
 go build ./...                # 必须 BUILD_OK
@@ -33,7 +34,7 @@ go test ./... -count=1        # 必须全 ok（无 PG 时 DB 相关用例 skip�
 
 2026-10-26 实测基线：**16 个包全 ok**。
 
-**新增环境变量**：`ARTEX_DOMAINS`（逗号分隔，默认 `pentest`）。决定哪些领域包参与启动期自检与「未接入工具」告警；未注册的 key 会被忽略并记日志。它**不影响**任务调度（任务领域目前恒为渗透，见 `DomainPackFor`）。
+**新增环境变量**：`PRAETOR_DOMAINS`（逗号分隔，默认 `pentest`）。决定哪些领域包参与启动期自检与「未接入工具」告警；未注册的 key 会被忽略并记日志。它**不影响**任务调度（任务领域目前恒为渗透，见 `DomainPackFor`）。
 
 ### 1.2 测试与数据库的关系（已统一）
 
@@ -50,10 +51,10 @@ go test ./... -count=1        # 必须全 ok（无 PG 时 DB 相关用例 skip�
 | | 主栈（已有，**不要动**） | 测试栈（本文件新增） |
 | --- | --- | --- |
 | compose 文件 | `docker-compose.yml` | `docker-compose.test.yml` |
-| compose 项目名 | 默认（目录名） | `artex-test` |
-| 容器名 | `postgres` | `artex-test-pg` |
+| compose 项目名 | 默认（目录名） | `praetor-test` |
+| 容器名 | `postgres` | `praetor-test-pg` |
 | 宿主端口 | 5432 | **55432**（容器内仍 5432） |
-| 卷 | `pgdata` | `artex-test-pgdata`（独立） |
+| 卷 | `pgdata` | `praetor-test-pgdata`（独立） |
 | 生命周期 | 常驻 | `restart: "no"`，用完即拆 |
 
 跑真集成测试（会起库、跑完拆库）：
@@ -64,7 +65,29 @@ go test ./... -count=1        # 必须全 ok（无 PG 时 DB 相关用例 skip�
 KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 ```
 
-**禁止清单**：`docker compose up`（主栈）、`docker compose -p artex-test down -v` 之外的 down、把 `ARTEX_PG_DSN` 指向 `.../artex`、在 `artex` 库上跑 `go test`。
+**禁止清单**：`docker compose up`（主栈）、`docker compose -p praetor-test down -v` 之外的 down、把 `PRAETOR_PG_DSN` 指向 `.../praetor`、在 `praetor` 库上跑 `go test`。
+
+### 1.4 改名对照（ARTEX → PRAETOR）
+
+| 项 | 旧 | 新 | 兼容处理 |
+| --- | --- | --- | --- |
+| 项目名 | ARTEX | **PRAETOR** | 文档标题、README、前端品牌全量更新 |
+| Go module | `github.com/Autumn-27/artex` | `github.com/Autumn-27/praetor` | 140 个文件 import 已改，`go build` 验证 |
+| 二进制 / 镜像 | `artex` | `praetor`（`cmd/praetor`） | `build.sh` / `Dockerfile` / compose 同步 |
+| 环境变量 | `ARTEX_*` | `PRAETOR_*` | **`config.Env` 先读新前缀、回落旧前缀**，现有 .env / shell 不用改 |
+| 登录用户名 | `ARTEX` | `PRAETOR` | 前后端同步改（密码存 `auth.password_hash`，与用户名无关，不用重置） |
+| 前端偏好 key | `artex.*` / `artex_*` | `praetor.*` / `praetor_*` | 旧偏好不再读取（一次性丢失，可接受） |
+| 默认库名（仅新装） | `artex` | `praetor`（`config.example.json` / compose） | **既有库不动**：靠 `PRAETOR_PG_DSN` / `ARTEX_PG_DSN` 显式指定 |
+
+> 兼容层的副作用：`t.Setenv("PRAETOR_X","")` 不再等于「未设置」（会回落到 `ARTEX_X`）。
+> 测试里要用 `config` 包的 `unsetEnv(t, "X")` 助手同时清双前缀，否则开发机 shell 里的旧变量会污染断言。
+
+### 1.5 沙箱方案（P0-6 已定）
+
+- **形态 A**：常驻工具容器 `praetor-sandbox`，`Bash` 走 `docker exec`，按任务挂工作目录。
+- **降级策略**：`PRAETOR_SANDBOX=required|optional`，默认 `required`（Docker 不可用即拒绝执行）；本地调试显式设 `optional` 才允许宿主执行并打醒目告警。
+- **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
+- 后续若要一任务一容器（CTF 竞速/红队战役要干净环境），只需替换 `sandbox.Exec` 实现，不动上层调度。
 
 > 现状：Docker Desktop 守护进程当前未启动（`npipe:////./pipe/dockerDesktopLinuxEngine` 不存在），所以测试栈暂未拉起；`docker compose config` 语法已校验通过。
 
@@ -82,7 +105,9 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 | 2026-10-26 | **P0-3**：`agent/domain/adapter.go` — DomainPack → `subagent.Definition` + 工具白名单 + 预算合并 + 审批档位映射 + `Missing()` 装配期缺工具检测 | `go test ./agent/domain` 13 个用例全绿；`go build ./...` OK；全仓 16 包全绿 |
 | 2026-10-26 | **P0-4**：`toolcatalog` 拆出 `platformAgentOrder` / `mergeSeeds`（公共骨架）/ `DomainToolSeeds(pack)` / `UnresolvedDomainTools(pack)` / `platformToolIndex()`；平台绑定用 golden 锁定 | `TestBuiltinToolSeedsPlatformUnchanged`（golden 25 条逐条一致）+ `TestDomainToolSeeds` + `TestUnresolvedDomainTools` 全绿；16 包全 ok |
 | 2026-10-26 | 修正 pack 里凭 grep 猜错的工具名：`add_finding`→`report_finding`；删掉不存在的 `coverage`/`asset_coverage`/`list_worker_traces`/`bind_finding_traffic`/`get_finding_traffic`/`goals`，换成真实存在的 `list_untested_assets`/`get_worker_trace`/`search_all_worker_traces` | 由 `TestDomainToolSeeds` 断言 pentest 域缺失集为空 |
-| 2026-10-26 | **P0-5**：`server/engine_scheduler.go` — `DomainPackFor` / `SchedulerPlanFor` / `SchedulerPlan`；`Engine.Run` 改为「问领域包要调度拓扑」；启动期 `WarnUnresolvedDomainTools()`；新增 `ARTEX_DOMAINS` 环境变量（默认 `pentest`） | 6 个新测试全绿（explore 拓扑=1+N、非 explore 明确报错、默认域、env 解析）；全仓 16 包全 ok |
+| 2026-10-26 | **改名 ARTEX → PRAETOR**：module path、二进制/镜像、前端品牌与偏好 key、登录用户名、文档全量更新；env 加 `PRAETOR_*` 优先 + `ARTEX_*` 兜底兼容层 | `go build ./...` OK；16 包全绿；`TestEnvPrefersNewPrefix` 锁定兼容顺序 |
+| 2026-10-26 | 沙箱方案定稿：形态 A（常驻工具容器 + `docker exec`）+ `PRAETOR_SANDBOX=required\|optional` 默认 required | 决策入档 §1.5 |
+| 2026-10-26 | **P0-5**：`server/engine_scheduler.go` — `DomainPackFor` / `SchedulerPlanFor` / `SchedulerPlan`；`Engine.Run` 改为「问领域包要调度拓扑」；启动期 `WarnUnresolvedDomainTools()`；新增 `PRAETOR_DOMAINS` 环境变量（默认 `pentest`） | 6 个新测试全绿（explore 拓扑=1+N、非 explore 明确报错、默认域、env 解析）；全仓 16 包全 ok |
 
 ---
 
@@ -105,12 +130,12 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 >
 > 实际落地：**实例由代码提供，清单由 pack 提供，且分两条通道播种**。
 > - `BuiltinToolSeeds()` 保持原样（平台 6 个 agent，`mergeSeeds` 原逻辑抽出复用）→ 存量库与新装库的绑定**逐条不变**，由 `testdata/seeds_platform.golden` 锁定。
-> - `DomainToolSeeds(pack)` 单独展开某域的角色，**只在装配该域时调用**；不让四域的 agent 参与每次启动的全局播种（否则每个装了 ARTEX 的库都会多出 `ctf-lead`、`solver-pwn` 等用不到的 agent 行）。
+> - `DomainToolSeeds(pack)` 单独展开某域的角色，**只在装配该域时调用**；不让四域的 agent 参与每次启动的全局播种（否则每个装了 PRAETOR 的库都会多出 `ctf-lead`、`solver-pwn` 等用不到的 agent 行）。
 > - `UnresolvedDomainTools(pack)` 供装配期告警：声明了但还解析不出实例的 key（待接入的 MCP 工具）。
 >
 > **踩到的坑（值得记）**：初版 pack 里 `add_finding` / `coverage` / `asset_coverage` / `list_worker_traces` / `bind_finding_traffic` 这些名字是我按 grep 猜的，真实清单里是 `report_finding` / `list_untested_assets` / `get_worker_trace` / `search_all_worker_traces`，其余根本不存在。`UnresolvedDomainTools` 第一次跑就把它们全抓出来了——这正是这个函数存在的理由。
 | P0-5 | engine 按 `Scheduler()` 选调度器；`explore` 复用现有 `plannerLoop`；启动期用 `agent.UnresolvedDomainTools()` 打「声明了但未接入」的工具警告 | 自研 | 现有渗透用例回归通过（行为不变）；启动日志能看到缺失工具清单 | 已完成 |
-| P0-6 | `sandbox/`：`Bash` 改容器 exec，出口走现有 MITM 代理 + `AllowEgress` | **复刻 PentAGI 的沙箱工具镜像思路**（MIT）+ Strix 容器分层（Apache-2.0） | 工具在容器内执行；出口流量仍被记录代理截获 | 待做 |
+| P0-6 | `sandbox/`：常驻 `praetor-sandbox` 容器 + `docker exec`；`Bash` 改走沙箱；出口走现有 MITM 代理 + `AllowEgress`；`PRAETOR_SANDBOX=required\|optional`（默认 required，Docker 不可用即拒绝） | **复刻 PentAGI 的沙箱工具镜像思路**（MIT）+ Strix 容器分层（Apache-2.0） | 工具在容器内执行；出口流量仍被记录代理截获；Docker 不可用时 required 模式明确拒绝、optional 模式告警降级 | 待做 |
 
 > **P0-5 实现说明**：`Engine.Run` 现在第一件事是 `SchedulerPlanFor(DomainPackFor(t), m.Workers())`。
 > - `explore` → `{Planners:1, Workers:N}`，与改造前的 `1+workers` 例程账本逐字等价（`m.Workers()` 自身已有 >0 兜底，代码里的 clamp 只对直接调用生效，属防御而非行为变更）。
@@ -197,9 +222,9 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 
 | 风险 | 触发条件 | 处置 |
 | --- | --- | --- |
-| 误连开发库清数据 | `ARTEX_PG_DSN` 指向 `artex` | 已被 `internal/testpg` 拦下（非 `_test` 库直接 skip）；如需临时放行才设 `ARTEX_TEST_ALLOW_NON_TEST_DB=1` |
-| 端口冲突 | 55432 被占用 | `ARTEX_TEST_PG_PORT=55433 ./test-with-db.sh` |
-| 重构破坏渗透主流程 | P0-4/P0-5 | `explore` 调度器先复用原 `plannerLoop`，包一层开关（`ARTEX_DOMAIN_PACKS=0` 回退旧路径） |
+| 误连开发库清数据 | `PRAETOR_PG_DSN` 指向 `praetor` | 已被 `internal/testpg` 拦下（非 `_test` 库直接 skip）；如需临时放行才设 `PRAETOR_TEST_ALLOW_NON_TEST_DB=1` |
+| 端口冲突 | 55432 被占用 | `PRAETOR_TEST_PG_PORT=55433 ./test-with-db.sh` |
+| 重构破坏渗透主流程 | P0-4/P0-5 | `explore` 调度器先复用原 `plannerLoop`，包一层开关（`PRAETOR_DOMAIN_PACKS=0` 回退旧路径） |
 | 许可污染 | 复制 AGPL/GPL 代码 | 提交前过 §4 表；不确定就只读思路、自行实现 |
 | 沙箱拖慢主流程 | P0-6 | 沙箱只在 worker 执行 domain 工具时启用，planner 与只读工具不进容器 |
 
@@ -209,7 +234,7 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 
 ## 7. 已知遗留
 
-1. 仓库有 4 个文件历史上未 `gofmt`：`db/asset_intercept.go`、`db/assets_test.go`、`db/config.go`、`db/task_scope_test.go`。**不在任何任务范围内**，改动它们会污染 diff；若某个任务必须改，只格式化改动块。
+1. 改名那一轮做过一次全仓 `gofmt -w`，历史上未格式化的 4 个文件（`db/asset_intercept.go`、`db/assets_test.go`、`db/config.go`、`db/task_scope_test.go`）已一并格式化。此遗留项关闭。
 2. `guardPanic` 在 recover 后会用 `log.Printf` 打印完整 panic 栈（`agent/assembly.go:82`）。这是**预期行为**（生产需要现场），但测试输出里看起来像崩溃——排查时先看 `--- FAIL` 行，别被栈骗。
 3. Docker Desktop 守护进程当前未启动；测试栈已就绪但未拉起。
 4. 上游 `.gitignore` 原本忽略整个 `/docs/`，导致本文件与选型报告不进版本库。已改为 `/docs/*` + 两份文档白名单例外（`.gitignore` 有注释说明原因）；`docs/漏洞流量证据.md` 仍保持忽略。

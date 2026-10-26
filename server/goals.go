@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Autumn-27/artex/agent"
-	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/praetor/agent"
+	"github.com/Autumn-27/praetor/db"
 )
 
 type goalSpec struct {

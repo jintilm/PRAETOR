@@ -3,11 +3,11 @@ package server
 import (
 	"fmt"
 	"log"
-	"os"
 	"strings"
 
-	"github.com/Autumn-27/artex/agent"
-	"github.com/Autumn-27/artex/agent/domain"
+	"github.com/Autumn-27/praetor/agent"
+	"github.com/Autumn-27/praetor/agent/domain"
+	"github.com/Autumn-27/praetor/config"
 )
 
 // 本文件是「领域包 → 引擎调度拓扑」的唯一接缝（P0-5）。
@@ -39,7 +39,7 @@ func (e errSchedulerNotImplemented) Error() string {
 
 // DomainPackFor 返回任务所属的领域包。
 //
-// 目前所有任务都是渗透域：tasks 表还没有领域字段，任务从创建到执行都走 ARTEX
+// 目前所有任务都是渗透域：tasks 表还没有领域字段，任务从创建到执行都走 PRAETOR
 // 既有的探索流程。P1 增加 domain 列后，这里改为读任务字段并回落到 Pentest。
 func DomainPackFor(_ *Task) domain.DomainPack {
 	if p, ok := domain.Get(domain.Pentest); ok {
@@ -67,10 +67,10 @@ func SchedulerPlanFor(p domain.DomainPack, workers int) (SchedulerPlan, error) {
 	}
 }
 
-// enabledDomainKeys 解析启用中的领域：环境变量 ARTEX_DOMAINS（逗号分隔），
+// enabledDomainKeys 解析启用中的领域：环境变量 PRAETOR_DOMAINS（逗号分隔），
 // 默认只有 pentest。未注册的 key 会被忽略并记一条日志——配置写错不该让进程起不来。
 func enabledDomainKeys() []domain.Key {
-	raw := strings.TrimSpace(os.Getenv("ARTEX_DOMAINS"))
+	raw := strings.TrimSpace(config.Env("DOMAINS"))
 	if raw == "" {
 		return []domain.Key{domain.Pentest}
 	}
@@ -82,7 +82,7 @@ func enabledDomainKeys() []domain.Key {
 			continue
 		}
 		if _, ok := domain.Get(k); !ok {
-			log.Printf("[domain] ARTEX_DOMAINS 中的 %q 未注册，已忽略", k)
+			log.Printf("[domain] PRAETOR_DOMAINS 中的 %q 未注册，已忽略", k)
 			continue
 		}
 		seen[k] = true
