@@ -23,6 +23,10 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-praetor}
     volumes:
       - praetor-pgdata:/var/lib/postgresql/data
+    ports:
+      # 只为「在宿主机直接跑二进制」时用；容器间走内部网络，不经过这里。
+      # 默认 55433：避开旧 ARTEX 的 5432 和测试栈的 55432，三套互不干扰。
+      - "127.0.0.1:${PRAETOR_PG_PORT:-55433}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-praetor} -d ${POSTGRES_DB:-praetor}"]
       interval: 5s

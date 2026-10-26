@@ -100,17 +100,35 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 | compose 项目 | `artex`（目录名推导） | **`praetor`**（`name:` 顶层固定） |
 | 容器 | `artex-postgres-1` / `artex-praetor-1` | **`praetor-pg` / `praetor-app`**（显式 `container_name`） |
 | 数据卷 | `artex_pgdata` | **`praetor-pgdata`** |
-| 宿主端口 | 8787 / 8788 | **8797 / 8798**（`PRAETOR_HTTP_PORT` / `PRAETOR_MCP_PORT` 可覆盖） |
+| 应用端口 | 8787 / 8788 | **8797 / 8798**（`PRAETOR_HTTP_PORT` / `PRAETOR_MCP_PORT` 可覆盖） |
+| 数据库端口 | 5432（容器 `artex-pg`） | **55433**（容器 `praetor-pg`，`PRAETOR_PG_PORT` 可覆盖） |
 | 测试库 | — | `praetor-test` 项目 / `praetor-test-pg` 容器 / **55432** |
 
 `docker compose config` 已离线校验。启动：
 
 ```bash
 cp .env.example .env && $EDITOR .env      # 至少填 POSTGRES_PASSWORD
-docker compose up -d --build
+docker compose up -d --build              # 全栈（应用 + 数据库）
 ```
 
-旧栈如需彻底清理（确认不再需要其数据后）：`docker compose -p artex down -v`。
+只起数据库、在宿主机跑 Go 二进制（开发常用，不动任何已有环境变量）：
+
+```bash
+docker compose up -d postgres             # praetor-pg，宿主 127.0.0.1:55433
+export PRAETOR_PG_DSN='postgres://praetor:change-me-please@127.0.0.1:55433/praetor?sslmode=disable'
+go run ./cmd/praetor
+```
+
+**清理边界（重要）**：
+
+| 命令 | 作用范围 | 会不会碰 `artex-pg` |
+| --- | --- | --- |
+| `docker compose -p praetor down -v` | 只删本项目 compose 项目 | 不会 |
+| `docker compose -p artex down -v` | 只删 compose 项目 `artex` 的资源 | **不会**（`artex-pg` 无 compose 标签，是 `docker run` 起的独立容器） |
+| `docker rm -f artex-pg && docker volume rm artex-pg` | 显式删那个容器与卷 | **会，数据全丢** |
+| `docker system prune -a --volumes` / `docker volume prune` | 全局 | **有风险**，别用 |
+
+所以：`down -v` 清理本栈是安全的；要动 `artex-pg` 必须显式点名，不用就不用管它。
 
 > 现状：Docker Desktop 守护进程当前未启动（`npipe:////./pipe/dockerDesktopLinuxEngine` 不存在），所以测试栈暂未拉起；`docker compose config` 语法已校验通过。
 
