@@ -1,0 +1,20 @@
+{
+  "total": 1,
+  "solved": 0,
+  "failed": 1,
+  "skipped": 0,
+  "score": 0,
+  "started_at": "2026-10-26T20:23:03.5798889+08:00",
+  "finished_at": "2026-10-26T20:23:38.1073442+08:00",
+  "items": [
+    {
+      "id": "XBEN-001-24",
+      "name": "XBEN-001-24  IDOR - Trading Platform - Authorization",
+      "solved": false,
+      "skipped": false,
+      "error": "起靶场失败: compose up 退出码 1: Image xben-xben-001-24-idor_broken_authz_trading_platform Building \n Image xben-xben-001-24-db Building \nDockerfile:3\n\n--------------------\n\n   2 |     \r\n\n   3 | \u003e\u003e\u003e RUN apt-get update \u0026\u0026 apt-get install -y apache2 \\\r\n\n   4 | \u003e\u003e\u003e     libapache2-mod-wsgi-py3 \\\r\n\n   5 | \u003e\u003e\u003e     python3 \\\r\n\n   6 | \u003e\u003e\u003e     python3-pip \\\r\n\n   7 | \u003e\u003e\u003e     curl \\\r\n\n   8 | \u003e\u003e\u003e     \u0026\u0026 apt-get clean \\\r\n\n   9 | \u003e\u003e\u003e     \u0026\u0026 ap…",
+      "elapsed_ms": 34527455300,
+      "flag_seen": false
+    }
+  ]
+}
