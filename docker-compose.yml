@@ -51,7 +51,13 @@ services:
       # 沙箱默认 required：容器内没有 Docker socket 时必须显式设为 optional，
       # 否则 agent 的 Bash 会拒绝执行（P0-6 接入后生效）。
       PRAETOR_SANDBOX: ${PRAETOR_SANDBOX:-required}
+      # per-task（默认）= 一任务一容器；shared = 常驻 praetor-sandbox
+      PRAETOR_SANDBOX_ISOLATION: ${PRAETOR_SANDBOX_ISOLATION:-per-task}
+      PRAETOR_SANDBOX_IMAGE: ${PRAETOR_SANDBOX_IMAGE:-praetor/sandbox:latest}
       PRAETOR_SANDBOX_CONTAINER: praetor-sandbox
+      # 任务工作区根（宿主），每个任务一个子目录
+      PRAETOR_SANDBOX_WORK_ROOT: ${PRAETOR_SANDBOX_WORK_ROOT:-/app/data/work}
+      PRAETOR_SANDBOX_IDLE_TTL: ${PRAETOR_SANDBOX_IDLE_TTL:-30m}
     ports:
       - "${PRAETOR_HTTP_PORT:-8797}:8787"
       - "127.0.0.1:${PRAETOR_MCP_PORT:-8798}:8788"
@@ -69,7 +75,8 @@ services:
       # - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
-  # 工具沙箱：常驻，agent 的 Bash 通过 `docker exec` 落到这里。
+  # 常驻工具沙箱：仅 PRAETOR_SANDBOX_ISOLATION=shared 时使用。
+  # per-task 模式（默认）不依赖它，每个任务用同一镜像现场起容器。
   # 刻意限制：不给 privileged、不挂宿主根目录、不挂 docker.sock。
   sandbox:
     build:

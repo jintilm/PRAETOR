@@ -56,6 +56,19 @@ type Request struct {
 	WorkDir string            // 容器内工作目录；空 = Runner 默认
 	Timeout time.Duration     // 0 = 默认 120s
 	Env     map[string]string // 额外环境变量
+	// TaskID 决定「在哪个隔离单元里执行」。per-task 模式据此选容器 + 挂载目录；
+	// 常驻容器模式忽略它。空值表示无任务上下文（退化为共享容器）。
+	TaskID string
+	// Background 为 true 时要求「立即返回、后台继续跑」。
+	// 只有实现了 BackgroundRunner 的 Runner 才支持，否则调用方应明确拒绝。
+	Background bool
+}
+
+// BackgroundRunner 是可选的增强能力：支持后台执行。
+// 不支持时 Bash 装饰器会明确拒绝 run_in_background，绝不回落宿主。
+type BackgroundRunner interface {
+	Runner
+	ExecBackground(ctx context.Context, req Request) (Result, error)
 }
 
 // Result 是执行结果。故意只暴露合并前后都有的字段，调用方不需要关心底层是 docker 还是宿主。

@@ -316,6 +316,9 @@ func (m *Manager) SetConcurrency(enabled bool, limit int) error {
 
 // Workers returns the configured concurrent work-agent count (default 3). Read
 // per-task at engine.Run, so a change applies to tasks started afterwards.
+// DataDir 返回数据根目录（沙箱任务工作区挂在它下面的 work/）。
+func (m *Manager) DataDir() string { return m.dir }
+
 func (m *Manager) Workers() int {
 	v, ok, err := m.pg.GetSetting(settingWorkers)
 	if err != nil || !ok {

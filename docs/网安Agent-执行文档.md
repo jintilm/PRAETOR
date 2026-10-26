@@ -83,27 +83,40 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 > `PG_DSN`（最坏情况：新栈连上旧库并执行迁移/DELETE）。宁可启动时明确报「未配置」，
 > 也不要猜。`TestEnvReadsOnlyNewPrefix` 守着这条。
 
-### 1.5 沙箱（P0-6 已实现）
+### 1.5 沙箱（P0-6 基础 + P0-7 一任务一容器）
 
-**形态 A**：常驻容器 `praetor-sandbox` + `docker exec`。代码在 `sandbox/`（接口 + Docker/Host 两个 Runner），
-`agent/sandbox.go` 是唯一装饰点，接在 `AugmentTools` 里，**只包 worker 的 Bash**。
+两种隔离模式，同一套 `sandbox.Runner` 接口：
+
+| 模式 | 实现 | 隔离粒度 | 后台任务 | 适用 |
+| --- | --- | --- | --- | --- |
+| **per-task（默认）** | `sandbox.PerTaskRunner`：首次调用 `docker run -d` 建任务容器，宿主 `data/work/<taskID>` 挂到 `/work`，空闲 30m 回收 | **任务级**（文件/进程/后台任务各自独立） | ✅ `docker exec -d` + 日志文件 | 渗透/红队/CTF（默认） |
+| shared | `sandbox.DockerRunner`：常驻 `praetor-sandbox` + `docker exec` | 全部任务共享 | ❌ 明确拒绝 | 省资源的低配部署 |
+
+`agent/sandbox.go` 是唯一装饰点（接在 `AugmentTools`），**只包 worker 的 Bash**。
 
 | 变量 | 默认 | 语义 |
 | --- | --- | --- |
-| `PRAETOR_SANDBOX` | `required` | `required` Docker 不可用 → Bash **明确拒绝**（fail-closed）；`optional` → 告警一次后降级宿主；`off` → 不包 Bash（改造前行为） |
-| `PRAETOR_SANDBOX_CONTAINER` | `praetor-sandbox` | 目标容器名 |
-| `PRAETOR_WORK_DIR` | `./data/work` | 挂到容器 `/work` 的宿主机目录 |
+| `PRAETOR_SANDBOX` | `required` | 不可用 → Bash 明确拒绝（fail-closed）；`optional` 降级宿主；`off` 不包 Bash |
+| `PRAETOR_SANDBOX_ISOLATION` | `per-task` | `per-task` / `shared` |
+| `PRAETOR_SANDBOX_IMAGE` | `praetor/sandbox:latest` | 任务容器镜像 |
+| `PRAETOR_SANDBOX_WORK_ROOT` | `<data>/work` | 任务工作区根，每任务一个子目录 |
+| `PRAETOR_SANDBOX_IDLE_TTL` | `30m` | 空闲回收阈值（reaper 每 5m 扫一次） |
+| `PRAETOR_SANDBOX_PROXY` | 空 | 注入容器的 `HTTP(S)_PROXY`，走宿主记录代理需填 `http://host.docker.internal:<port>` |
+| `PRAETOR_SANDBOX_NETWORK` | 空 | 任务容器加入的 docker 网络（打靶场时用） |
 
-**为什么只包 worker**：worker 是唯一对目标发真实流量的角色。若把 planner/mainagent 的 Bash 也搬进容器，
-会出现「Read 读宿主、Bash 在容器」的路径错位（模型看到 `/work/x` 但 Read 打不开），反而更危险。
-等 P1 有统一容器工作区视图后再一起搬。
+**P0-7 解掉的两条限制**：
 
-**已知限制（写在代码里，不是遗漏）**：
+1. **后台执行**：`PerTaskRunner` 实现 `BackgroundRunner`，用 `docker exec -d` + `nohup sh -lc '<cmd>' > .praetor-bg/<id>.log`，
+   立即返回「容器内日志路径 + 宿主日志路径」。命令经单引号转义（有测试覆盖），进程随任务容器一起回收。
+2. **出网留痕**：任务容器可注入 `PRAETOR_SANDBOX_PROXY`，让容器内流量回到宿主 MITM 代理（`host.docker.internal`）。
 
-1. `run_in_background` 在沙箱下**明确拒绝**——后台任务由宿主进程管理，无法复用；绝不悄悄回落宿主。
-2. `stdout` 与 `stderr` 分管道收集后按「stdout → stderr」拼接，与宿主 Bash 的「同一缓冲区」在交错顺序上可能不同。
-3. 容器内的出网不走记录代理（容器网络与宿主 MITM 代理不同源）；要做全流量留痕需给沙箱配 `HTTP_PROXY` 指向 `host.docker.internal`，P1 处理。
-4. 全容器化部署时，应用容器需挂 `/var/run/docker.sock` 才能 exec 沙箱，等于把宿主 Docker 控制权交给应用（≈root）。**compose 里默认注释掉**，推荐「应用跑宿主 + 沙箱跑容器」的组合。
+**仍未解决（写下来，别当没看见）**：
+
+1. **文件工具仍在宿主**：`Read/Write/Glob/Grep` 读的是宿主路径。per-task 模式下 Bash 的 `/work` 与宿主 `<data>/work/<taskID>` 是同一份文件，
+   但模型若把容器路径 `/work/x` 直接喂给 `Read` 会打不开。下一步（P1）给文件工具加一层 host↔container 前缀映射。
+2. **全容器化仍需 socket**：应用跑在容器里时 `docker run` 需要 `/var/run/docker.sock`（≈root）。compose 默认注释掉；
+   推荐「应用宿主 + 沙箱容器」。要全容器化请用 `docker-socket-proxy` 收敛权限，别挂裸 socket。
+3. 任务容器**不复用**（每任务一个），冷启动成本约 1~2s（`docker run` + 镜像已在本地）。任务多时注意磁盘/容器数量，reaper 兜底。
 
 **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
 
@@ -165,6 +178,7 @@ go run ./cmd/praetor
 | 2026-10-26 | 修正 pack 里凭 grep 猜错的工具名：`add_finding`→`report_finding`；删掉不存在的 `coverage`/`asset_coverage`/`list_worker_traces`/`bind_finding_traffic`/`get_finding_traffic`/`goals`，换成真实存在的 `list_untested_assets`/`get_worker_trace`/`search_all_worker_traces` | 由 `TestDomainToolSeeds` 断言 pentest 域缺失集为空 |
 | 2026-10-26 | **改名 ARTEX → PRAETOR**：module path、二进制/镜像、前端品牌与偏好 key、登录用户名、文档全量更新；env 加 `PRAETOR_*` 优先 + `ARTEX_*` 兜底兼容层 | `go build ./...` OK；16 包全绿；`TestEnvPrefersNewPrefix` 锁定兼容顺序 |
 | 2026-10-26 | 沙箱方案定稿：形态 A（常驻工具容器 + `docker exec`）+ `PRAETOR_SANDBOX=required\|optional` 默认 required | 决策入档 §1.5 |
+| 2026-10-26 | **P0-7 一任务一容器**：`sandbox/per_task.go` + `BackgroundRunner` + 代理注入 + 任务 ID 透传（`RunInfo.TaskID`）+ reaper；修复 Windows `docker -v` 反斜杠路径 | `sandbox` 18 个用例 + `server` 5 个接线用例全绿 |
 | 2026-10-26 | **P0-6**：`sandbox` 包 + worker Bash 装饰 + `praetor-sandbox` 容器；修复自测发现的 **fail-open bug**（docker exec 非零退出被当成成功，导致容器不存在也判可用） | `sandbox` 7 个用例 + `agent` 沙箱 8 个用例全绿；16 包全绿 |
 | 2026-10-26 | **P0-5**：`server/engine_scheduler.go` — `DomainPackFor` / `SchedulerPlanFor` / `SchedulerPlan`；`Engine.Run` 改为「问领域包要调度拓扑」；启动期 `WarnUnresolvedDomainTools()`；新增 `PRAETOR_DOMAINS` 环境变量（默认 `pentest`） | 6 个新测试全绿（explore 拓扑=1+N、非 explore 明确报错、默认域、env 解析）；全仓 16 包全 ok |
 
@@ -194,7 +208,8 @@ go run ./cmd/praetor
 >
 > **踩到的坑（值得记）**：初版 pack 里 `add_finding` / `coverage` / `asset_coverage` / `list_worker_traces` / `bind_finding_traffic` 这些名字是我按 grep 猜的，真实清单里是 `report_finding` / `list_untested_assets` / `get_worker_trace` / `search_all_worker_traces`，其余根本不存在。`UnresolvedDomainTools` 第一次跑就把它们全抓出来了——这正是这个函数存在的理由。
 | P0-5 | engine 按 `Scheduler()` 选调度器；`explore` 复用现有 `plannerLoop`；启动期用 `agent.UnresolvedDomainTools()` 打「声明了但未接入」的工具警告 | 自研 | 现有渗透用例回归通过（行为不变）；启动日志能看到缺失工具清单 | 已完成 |
-| P0-6 | `sandbox/` 包（Runner 接口 + Docker/Host 实现 + `Failing` fail-closed）+ `agent/sandbox.go` 装饰器 + `sandbox/Dockerfile` + compose `sandbox` 服务；只包 worker 的 Bash | **复刻 PentAGI 的沙箱工具镜像思路**（MIT）+ Strix 容器分层（Apache-2.0） | Docker 不可用时 required 明确拒绝、optional 告警降级、off 不改行为（均有单测）；出口接 MITM 留到 P1 | 已完成（出口代理留 P1） |
+| P0-6 | `sandbox/` 包（Runner 接口 + Docker/Host 实现 + `Failing` fail-closed）+ `agent/sandbox.go` 装饰器 + `sandbox/Dockerfile` + compose `sandbox` 服务；只包 worker 的 Bash | **复刻 PentAGI 的沙箱工具镜像思路**（MIT）+ Strix 容器分层（Apache-2.0） | Docker 不可用时 required 明确拒绝、optional 告警降级、off 不改行为 | 已完成 |
+| P0-7 | **一任务一容器**：`PerTaskRunner`（惰性创建/复用/空闲回收/Release）+ 后台执行 `docker exec -d` + 代理注入 | 参考 Strix 的「任务级容器 + 工作区挂载」、PentAGI 的标签化容器管理 | 10 个单测（隔离/并发单建/复用/回收/后台/引号转义/镜像缺失）；全仓 17 包绿 | 已完成 |
 
 > **P0-5 实现说明**：`Engine.Run` 现在第一件事是 `SchedulerPlanFor(DomainPackFor(t), m.Workers())`。
 > - `explore` → `{Planners:1, Workers:N}`，与改造前的 `1+workers` 例程账本逐字等价（`m.Workers()` 自身已有 >0 兜底，代码里的 clamp 只对直接调用生效，属防御而非行为变更）。

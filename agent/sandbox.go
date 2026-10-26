@@ -57,10 +57,20 @@ func (b *sandboxedBash) Call(ctx context.Context, in json.RawMessage, tc *actool
 	if strings.TrimSpace(req.Command) == "" {
 		return actool.Errorf("Error: command is required"), nil
 	}
-	// 后台执行依赖 SDK 的任务管理器（在宿主进程里 fork），沙箱模式下无法复用；
-	// 明确拒绝而不是悄悄回退宿主执行——后者会让「沙箱」形同虚设。
+	taskID := taskIDFromCtx(ctx)
+
+	// 后台执行：per-task 容器实现了 BackgroundRunner（docker exec -d + 日志文件），
+	// 交给它立即返回；常驻容器没有该能力时明确拒绝，绝不悄悄回退宿主执行。
 	if req.RunInBackground {
-		return actool.Errorf("沙箱模式下不支持 run_in_background（后台任务由宿主进程管理）。请改为前台执行，或拆分命令。"), nil
+		br, ok := SandboxExec.(sandbox.BackgroundRunner)
+		if !ok {
+			return actool.Errorf(fmt.Sprintf("当前沙箱后端不支持 run_in_background（%s）。请改为前台执行，或改用 per-task 隔离模式。", SandboxExec.Name())), nil
+		}
+		res, err := br.ExecBackground(ctx, sandbox.Request{Cmd: req.Command, TaskID: taskID})
+		if err != nil {
+			return actool.Errorf(fmt.Sprintf("后台启动失败：%v", err)), nil
+		}
+		return actool.Text(res.Stdout), nil
 	}
 
 	timeout := 120 * time.Second
@@ -71,7 +81,7 @@ func (b *sandboxedBash) Call(ctx context.Context, in json.RawMessage, tc *actool
 		}
 	}
 
-	res, err := SandboxExec.Exec(ctx, sandbox.Request{Cmd: req.Command, Timeout: timeout})
+	res, err := SandboxExec.Exec(ctx, sandbox.Request{Cmd: req.Command, Timeout: timeout, TaskID: taskID})
 	// Bash 的既有语义是 stdout+stderr 合并回显；沙箱分管道收集，这里按 stdout→stderr 拼接。
 	out := actool.Capture(tc, res.Stdout+res.Stderr)
 
@@ -91,4 +101,14 @@ func (b *sandboxedBash) Call(ctx context.Context, in json.RawMessage, tc *actool
 		return actool.Errorf(fmt.Sprintf("%s\n\n[exit code %d]", out, res.ExitCode)), nil
 	}
 	return actool.Text(out), nil
+}
+
+// taskIDFromCtx 取当前 worker run 的任务 id，用于 per-task 隔离。
+// 没有任务上下文（chat 等）时返回空串，per-task 会落到 shared 容器。
+func taskIDFromCtx(ctx context.Context) string {
+	ri := RunInfoFrom(ctx)
+	if ri.TaskID <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d", ri.TaskID)
 }
