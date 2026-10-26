@@ -51,6 +51,7 @@ services:
       # 沙箱默认 required：容器内没有 Docker socket 时必须显式设为 optional，
       # 否则 agent 的 Bash 会拒绝执行（P0-6 接入后生效）。
       PRAETOR_SANDBOX: ${PRAETOR_SANDBOX:-required}
+      PRAETOR_SANDBOX_CONTAINER: praetor-sandbox
     ports:
       - "${PRAETOR_HTTP_PORT:-8797}:8787"
       - "127.0.0.1:${PRAETOR_MCP_PORT:-8798}:8788"
@@ -61,6 +62,28 @@ services:
       # 项目根目录的 skills 挂进容器（覆盖镜像内置的 /app/skills）：
       # 改 skill 无需重建镜像。
       - ./skills:/app/skills
+      # ⚠️ 只有把 /var/run/docker.sock 挂进应用容器，容器内的 PRAETOR 才能 `docker exec`
+      # 到 praetor-sandbox。但这等于把宿主 Docker 的控制权交给应用容器（≈root 权限）。
+      # 默认注释掉，采用更安全的组合：**应用跑在宿主机（二进制），沙箱跑在容器里**。
+      # 必须全容器化部署、且接受该风险时再打开：
+      # - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  # 工具沙箱：常驻，agent 的 Bash 通过 `docker exec` 落到这里。
+  # 刻意限制：不给 privileged、不挂宿主根目录、不挂 docker.sock。
+  sandbox:
+    build:
+      context: .
+      dockerfile: sandbox/Dockerfile
+    image: praetor/sandbox:${PRAETOR_TAG:-latest}
+    container_name: praetor-sandbox
+    command: ["sleep", "infinity"]
+    working_dir: /work
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      # 任务工作目录：容器内 /work 与宿主 data/work 对应，产物可直接在宿主机查看
+      - ${PRAETOR_WORK_DIR:-./data/work}:/work
     restart: unless-stopped
 
 volumes:

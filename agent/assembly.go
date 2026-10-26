@@ -61,6 +61,9 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 		out = ToolResolve(ctx, agentKey, out)
 	}
 	out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
+	// 沙箱：只把 worker 的 Bash 换成容器执行（SandboxExec 为 nil 时完全不动）。
+	// 放在 guardPanic 之前，让 panic 兜底覆盖到装饰后的工具。
+	out = ApplySandbox(agentKey, out)
 	for i, t := range out {
 		out[i] = guardPanic(t)
 	}
