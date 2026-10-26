@@ -178,6 +178,7 @@ go run ./cmd/praetor
 | 2026-10-26 | 修正 pack 里凭 grep 猜错的工具名：`add_finding`→`report_finding`；删掉不存在的 `coverage`/`asset_coverage`/`list_worker_traces`/`bind_finding_traffic`/`get_finding_traffic`/`goals`，换成真实存在的 `list_untested_assets`/`get_worker_trace`/`search_all_worker_traces` | 由 `TestDomainToolSeeds` 断言 pentest 域缺失集为空 |
 | 2026-10-26 | **改名 ARTEX → PRAETOR**：module path、二进制/镜像、前端品牌与偏好 key、登录用户名、文档全量更新；env 加 `PRAETOR_*` 优先 + `ARTEX_*` 兜底兼容层 | `go build ./...` OK；16 包全绿；`TestEnvPrefersNewPrefix` 锁定兼容顺序 |
 | 2026-10-26 | 沙箱方案定稿：形态 A（常驻工具容器 + `docker exec`）+ `PRAETOR_SANDBOX=required\|optional` 默认 required | 决策入档 §1.5 |
+| 2026-10-26 | **P1-2（核心）**：`internal/replay` 重放判定（状态码/长度容差/归一化 4-gram Jaccard 相似度/易变值抹除）+ `agent.VerifyBinding` 快照适配（head 容错解析、body 走 `BodySource` 接口） | `replay` 14 个用例 + `agent` 6 个用例全绿；无响应体无哈希时 fail-closed |
 | 2026-10-26 | **P0-7 一任务一容器**：`sandbox/per_task.go` + `BackgroundRunner` + 代理注入 + 任务 ID 透传（`RunInfo.TaskID`）+ reaper；修复 Windows `docker -v` 反斜杠路径 | `sandbox` 18 个用例 + `server` 5 个接线用例全绿 |
 | 2026-10-26 | **P0-6**：`sandbox` 包 + worker Bash 装饰 + `praetor-sandbox` 容器；修复自测发现的 **fail-open bug**（docker exec 非零退出被当成成功，导致容器不存在也判可用） | `sandbox` 7 个用例 + `agent` 沙箱 8 个用例全绿；16 包全绿 |
 | 2026-10-26 | **P0-5**：`server/engine_scheduler.go` — `DomainPackFor` / `SchedulerPlanFor` / `SchedulerPlan`；`Engine.Run` 改为「问领域包要调度拓扑」；启动期 `WarnUnresolvedDomainTools()`；新增 `PRAETOR_DOMAINS` 环境变量（默认 `pentest`） | 6 个新测试全绿（explore 拓扑=1+N、非 explore 明确报错、默认域、env 解析）；全仓 16 包全 ok |
@@ -222,7 +223,7 @@ go run ./cmd/praetor
 | ID | 任务 | 做法 / 复刻来源 | 验收 | 状态 |
 | --- | --- | --- | --- | --- |
 | P1-1 | 接 hexstrike MCP 工具面（外部进程，不复制代码） | 直接接入 `0x4m4/hexstrike-ai` | 至少 3 个工具可被 worker 调用 | 待做 |
-| P1-2 | 确定性验证器接流量重放（`bind_finding_traffic` → 重放 → 比对差异） | **复刻 Pentest-Swarm 的 oracle 思路**（AGPL，只读思路，自行实现） | 无流量证据的 finding 进「疑似」队列 | 待做 |
+| P1-2 | 确定性验证器接流量重放：`internal/replay`（状态码 + 长度容差 + 归一化 4-gram 相似度）+ `agent.VerifyBinding`（快照→重放→判定） | **复刻 Pentest-Swarm 的 oracle 思路**（AGPL，只读思路，自行实现） | 核心与适配层已完成（20 个单测）；**待做**：注册 `verify_finding` 工具 + 无证据 finding 落「疑似」队列 | 进行中 |
 | P1-3 | benchmark runner | 接入 `xbow-engineering/validation-benchmarks`（104 题）+ `auto-pen-bench` | 出基线分并记录到本文件 | 待做 |
 
 ### P2 CTF
