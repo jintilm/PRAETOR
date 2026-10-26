@@ -83,17 +83,32 @@ const (
 	RoleSpecialist RoleKind = "specialist"
 )
 
+// ApprovalMode 声明角色的审批档位（域内抽象，避免 pack 直接依赖 norma 类型）。
+// 具体含义映射到 norma/permission.Mode：default / auto / plan。
+type ApprovalMode string
+
+const (
+	// ApprovalDefault 非只读工具默认需要确认（与 norma ModeDefault 一致）。
+	ApprovalDefault ApprovalMode = ""
+	// ApprovalAuto 不打断执行，放行工具自身的 allow 判定。仅用于隔离环境
+	// （CTF 容器），绝不能用在真实目标上。
+	ApprovalAuto ApprovalMode = "auto"
+	// ApprovalPlan 只读，用于纯规划/侦察阶段的角色。
+	ApprovalPlan ApprovalMode = "plan"
+)
+
 // RoleSpec 声明一个角色。engine 装配时把它翻译成 subagent.Definition +
 // 工具白名单 + 预算，不需要为每个角色写一份 Go 代码。
 type RoleSpec struct {
-	Key           string   // 角色唯一 key，同时是 Agent 工具的 agent_type
-	Kind          RoleKind // lead / specialist
-	Description   string   // 给父 agent 看的一句话（进 Agent 工具提示词）
-	PromptSection string   // 追加到系统提示词的片段
-	ToolKeys      []string // 允许的工具 key（空 = 继承该域 Tools()）
-	Skills        []string // 允许加载的 SKILL.md 目录
-	MaxTurns      int      // 单次运行最大轮次
-	Budget        Budget   // 该角色预算；零值 = 继承域预算
+	Key           string       // 角色唯一 key，同时是 Agent 工具的 agent_type
+	Kind          RoleKind     // lead / specialist
+	Description   string       // 给父 agent 看的一句话（进 Agent 工具提示词）
+	PromptSection string       // 追加到系统提示词的片段
+	ToolKeys      []string     // 允许的工具 key（空 = 继承该域 Tools()）
+	Skills        []string     // 允许加载的 SKILL.md 目录
+	MaxTurns      int          // 单次运行最大轮次
+	Approval      ApprovalMode // 审批档位；空 = ApprovalDefault
+	Budget        Budget       // 该角色预算；零值 = 继承域预算
 }
 
 // PolicyAction 对齐 norma/permission 的三态语义。

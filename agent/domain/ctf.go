@@ -35,6 +35,7 @@ func (ctfPack) Roles() []RoleSpec {
 				"优先派能快速拿分的题。每题记录已尝试的思路，避免多个 solver 重复踩坑。",
 			ToolKeys: []string{"Read", "Bash", "ctfd_list_challenges", "ctfd_submit_flag", "add_intent", "add_hint"},
 			MaxTurns: 25,
+			Approval: ApprovalAuto,
 			Budget:   Budget{MaxParallel: 8},
 		},
 		{
@@ -43,6 +44,7 @@ func (ctfPack) Roles() []RoleSpec {
 			Description:   "Web 题：注入/SSRF/反序列化/模板/文件上传/JWT",
 			ToolKeys:      []string{"Bash", "Read", "Write", "curl_run", "burp_repeater"},
 			MaxTurns:      40,
+			Approval:      ApprovalAuto,
 			PromptSection: "先在容器内本地复现，再打远端实例；注意实例有重置次数限制。",
 		},
 		{
@@ -51,6 +53,7 @@ func (ctfPack) Roles() []RoleSpec {
 			Description:   "Pwn 题：栈/堆利用、格式化字符串、ROP、沙箱逃逸",
 			ToolKeys:      []string{"Bash", "Read", "Write", "Edit", "pwntools_run", "gdb_run", "checksec"},
 			MaxTurns:      60,
+			Approval:      ApprovalAuto,
 			PromptSection: "先 checksec 定性，再用 pwndbg 定位；写 exp 时保留调试日志作为证据。",
 		},
 		{
@@ -59,6 +62,7 @@ func (ctfPack) Roles() []RoleSpec {
 			Description:   "逆向题：静态反编译 + 动态调试，还原校验逻辑",
 			ToolKeys:      []string{"Bash", "Read", "Write", "ghidra_decompile", "rizin_analyze", "gdb_run"},
 			MaxTurns:      60,
+			Approval:      ApprovalAuto,
 			PromptSection: "优先动态验证假设，别在反编译结果里空想；关键函数要留地址与伪代码片段。",
 		},
 		{
@@ -67,6 +71,7 @@ func (ctfPack) Roles() []RoleSpec {
 			Description:   "密码学题：古典密码、RSA/ECC 误用、格、PRNG 预测",
 			ToolKeys:      []string{"Bash", "Write", "sagemath_run", "ciphey_decode"},
 			MaxTurns:      50,
+			Approval:      ApprovalAuto,
 			PromptSection: "先判断是「实现错误」还是「数学困难」；前者写脚本，后者先降维试小参数。",
 		},
 		{
@@ -75,6 +80,7 @@ func (ctfPack) Roles() []RoleSpec {
 			Description:   "取证/流量/隐写/misc：pcap、内存镜像、文件格式、编码",
 			ToolKeys:      []string{"Bash", "Read", "tshark_run", "binwalk_run", "zsteg_run", "volatility_run"},
 			MaxTurns:      50,
+			Approval:      ApprovalAuto,
 			PromptSection: "先 file/binwalk 摸清格式，再决定深挖方向；保留每一步的命令与输出。",
 		},
 	}
