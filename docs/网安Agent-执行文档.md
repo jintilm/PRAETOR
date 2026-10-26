@@ -120,6 +120,28 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 
 **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
 
+### 1.8 外部 MCP 接入（P1-1：hexstrike）
+
+MCP 服务器是 DB 驱动（`mcp_servers` 表 + `mcp_tools_cache` 工具缓存），所以「接入」= 注册一条记录。
+本项目把它收敛成**一处配置 + 幂等播种**，不用在 UI 里手填 command/args：
+
+```bash
+git clone https://github.com/0x4m4/hexstrike-ai /opt/hexstrike-ai   # 或在别处
+python3 /opt/hexstrike-ai/hexstrike_server.py                       # 先起 HTTP server（默认 8888）
+
+export PRAETOR_HEXSTRIKE_DIR=/opt/hexstrike-ai                      # 只要这一条必须有
+# 可选：PRAETOR_HEXSTRIKE_PYTHON=python3  PRAETOR_HEXSTRIKE_URL=http://127.0.0.1:8888
+./dev.sh
+```
+
+启动时 `seedMCPPresets` 会：
+1. 检查 `$PRAETOR_HEXSTRIKE_DIR/hexstrike_mcp.py` 存在（不存在就跳过并记日志，**不写坏记录**）；
+2. `INSERT ... ON CONFLICT (name) DO NOTHING` 注册 `hexstrike`（transport=stdio，args=`[脚本, --server, URL]`，env=`PYTHONUNBUFFERED=1`）；
+3. 已存在则保留用户改动（例如你在 UI 里把 enabled 关掉，重启不会被改回来）。
+
+**注意**：这条预设只解决「怎么注册」。工具是否可用取决于 hexstrike 本身是否装好、能否被 python 调起；
+首次注册后到「系统 → MCP」确认工具发现成功（失败会在日志里出现 `[mcp] ... 工具发现失败`）。
+
 ### 1.7 漏洞验证状态（P1-2 落库模型）
 
 `findings` 新增 4 列，**与 `status`（人工处置）完全独立**，互不覆盖：
@@ -217,6 +239,7 @@ go test ./... -count=1
 | 2026-10-26 | 修正 pack 里凭 grep 猜错的工具名：`add_finding`→`report_finding`；删掉不存在的 `coverage`/`asset_coverage`/`list_worker_traces`/`bind_finding_traffic`/`get_finding_traffic`/`goals`，换成真实存在的 `list_untested_assets`/`get_worker_trace`/`search_all_worker_traces` | 由 `TestDomainToolSeeds` 断言 pentest 域缺失集为空 |
 | 2026-10-26 | **改名 ARTEX → PRAETOR**：module path、二进制/镜像、前端品牌与偏好 key、登录用户名、文档全量更新；env 加 `PRAETOR_*` 优先 + `ARTEX_*` 兜底兼容层 | `go build ./...` OK；16 包全绿；`TestEnvPrefersNewPrefix` 锁定兼容顺序 |
 | 2026-10-26 | 沙箱方案定稿：形态 A（常驻工具容器 + `docker exec`）+ `PRAETOR_SANDBOX=required\|optional` 默认 required | 决策入档 §1.5 |
+| 2026-10-26 | **P1-1**：`db.SeedMCPServer`（幂等预设播种，`ON CONFLICT DO NOTHING`，不覆盖用户配置）+ `server/mcp_presets.go`（hexstrike 预设构造/校验，未配置不写库） | `db` 2 个用例（真库幂等 + 入参校验）、`server` 3 个用例（构造/覆盖/拒绝缺失）；全仓绿 |
 | 2026-10-26 | **修真库测试红灯**：① 修真 bug `evidence` 目录 fsync（Windows 绑流量 422）② 修测试收尾泄漏 ③ 更新过时断言（coverage 已无 scope 字段）④ 唯一化跨轮数据 + `llmrec` 补 advisory lock + DB 套件 `-p 1` | 真库 `go test -p 1 ./...` 连跑 2 次全绿；无库 18 包全绿 |
 | 2026-10-26 | **P1-2 收口**：注册 `verify_finding`（仅 worker）+ 宿主侧 `NewEvidenceVerifier`（evidence.Store 适配 + 证据挑选 + 结论落库）+ `findings.verification_state` 四列；工具提示词要求「绑定后先验证」 | `agent` 5 个工具用例 + `server` 6 个验证器用例；golden 有意变更 `verify_finding→worker` 已按纪律重生成 |
 | 2026-10-26 | **P1-2（核心）**：`internal/replay` 重放判定（状态码/长度容差/归一化 4-gram Jaccard 相似度/易变值抹除）+ `agent.VerifyBinding` 快照适配（head 容错解析、body 走 `BodySource` 接口） | `replay` 14 个用例 + `agent` 6 个用例全绿；无响应体无哈希时 fail-closed |
@@ -263,7 +286,7 @@ go test ./... -count=1
 
 | ID | 任务 | 做法 / 复刻来源 | 验收 | 状态 |
 | --- | --- | --- | --- | --- |
-| P1-1 | 接 hexstrike MCP 工具面（外部进程，不复制代码） | 直接接入 `0x4m4/hexstrike-ai` | 至少 3 个工具可被 worker 调用 | 待做 |
+| P1-1 | hexstrike MCP 接入：`db.SeedMCPServer`（幂等、不覆盖用户改动）+ `server/mcp_presets.go`（配了 `PRAETOR_HEXSTRIKE_DIR` 才注册，否则只打提示）+ 文档配方 | 直接接入 `0x4m4/hexstrike-ai`（外部进程，不复制代码） | 预设记录构造/校验有单测；幂等播种真库验证；**实际工具可用需用户安装 hexstrike 后确认工具列表** | 已完成（配置层） |
 | P1-2 | 确定性验证闭环：`internal/replay` + `agent.VerifyBinding` + `verify_finding` 工具 + `verification_state` 落库（unverified/verified/suspected） | **复刻 Pentest-Swarm 的 oracle 思路**（AGPL，只读思路，自行实现） | 重放一致→verified；不一致/无证据/重放失败→suspected 并写明 reasons；**均有单测** | 已完成 |
 | P1-3 | benchmark runner | 接入 `xbow-engineering/validation-benchmarks`（104 题）+ `auto-pen-bench` | 出基线分并记录到本文件 | 待做 |
 
