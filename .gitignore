@@ -25,7 +25,12 @@ web/next-env.d.ts
 *.swo
 
 # docs
-/docs/
+# 上游默认忽略整个 docs/（内部笔记不入库）。本项目的两份治理文档需要版本化，
+# 因此改成「忽略 docs 下所有内容，但白名单放出这两份」。
+# 注意：不能只写 !/docs/xxx.md —— 父目录被排除时例外不生效，必须先 /docs/*。
+/docs/*
+!/docs/网安Agent-选型与架构方案.md
+!/docs/网安Agent-执行文档.md
 
 # os
 .DS_Store
