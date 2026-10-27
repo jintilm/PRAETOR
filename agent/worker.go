@@ -403,7 +403,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// worker 刻意不给 MultiEdit/Glob/Grep：文件精改用 Edit、检索走 Bash(grep/find)，
 	// 收敛工具面、减少低价值调用。其余 SDK 默认工具(Read/Write/Edit/LS/Bash/Sleep)照常。
 	base = append(base, defaultToolsExcept("MultiEdit", "Glob", "Grep")...)
-	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
+	// Worker 名一并带进去：竞速拓扑下两路要跑不同模型（server/llm_lane.go），
+	// 而 runinfo 是唯一能跨到 LLM 解析层的每-run 身份。
+	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID, Worker: name})
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
 

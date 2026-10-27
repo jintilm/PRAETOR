@@ -20,6 +20,10 @@ type RunInfo struct {
 	ExplorationID int64  // exploration id; 0 when unknown
 	IntentID      int64  // worker's intent node; 0 for planner/mainagent/chat
 	SessionID     string // chat conversation id; empty for task runs
+	// Worker 是跑这次 run 的 worker 协程名（engine 传下来的 "work#1" / "work#2"）。
+	// planner / mainagent / chat 为空。竞速拓扑靠它区分"这是第几路"——
+	// 两路用同一个模型时，它们会犯同一个错，换起点也救不回来（见 server/llm_lane.go）。
+	Worker string
 }
 
 // explorationID reads a store's exploration id, tolerating a nil store (planner and

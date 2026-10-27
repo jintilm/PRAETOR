@@ -96,7 +96,9 @@ type taskLLMSelection struct {
 }
 
 type taskLLMStreamHooks struct {
-	current    func() (taskLLMSelection, error)
+	// current 带 ctx：模型选择已经是**每 run** 的决策（竞速两路要跑不同模型，见
+	// llm_lane.go），而 run 身份只在 ctx 里。
+	current    func(context.Context) (taskLLMSelection, error)
 	exhaust    func(taskLLMSelection, error) (db.TaskLLMTransition, error)
 	transition func(taskLLMSelection, db.TaskLLMTransition, error)
 }
@@ -107,7 +109,7 @@ type taskLLMStreamHooks struct {
 // 构建失败时才降级到任务链，任务链为空时再降级到全局配置。
 // 返回的 profile id 只有走任务链时才非零 —— streamTaskLLM 以此判断额度错误是否
 // 应该推进任务的故障转移状态（绑定/全局路径不改任务链状态，沿用既有语义）。
-func (r *taskLLMRuntime) current() (taskLLMSelection, error) {
+func (r *taskLLMRuntime) current(ctx context.Context) (taskLLMSelection, error) {
 	taskNum, err := parseTaskID(r.taskID)
 	if err != nil {
 		return taskLLMSelection{}, err
@@ -127,6 +129,17 @@ func (r *taskLLMRuntime) current() (taskLLMSelection, error) {
 		return sel, nil
 	}
 	if len(pt.LLMProfileIDs) > 0 {
+		// 竞速分模型：两路各拿一个不同模型（只在 race + ≥2 个可用模型时生效）。
+		// 路由不到/模型不可解析一律回落下面的游标逻辑——路由是锦上添花，
+		// 不能因为它把原本能跑的任务搞挂。
+		if id, ok := r.laneProfileFor(ctx, t, taskNum); ok {
+			if prov, cfg, ok := r.s.providerForProfile(id); ok {
+				sel.profileID, sel.provider, sel.retry = id, prov, cfg.Retry
+				return sel, nil
+			}
+			log.Printf("[llm] task %s 第 %d 路选中的模型 #%d 不可用，回落任务游标",
+				r.taskID, laneOrDefault(ctx)+1, id)
+		}
 		if pt.ActiveLLMProfileID == nil {
 			return sel, &taskLLMError{taskID: r.taskID, chainExhausted: true, cause: errors.New("all selected profiles are quota exhausted")}
 		}
@@ -236,7 +249,7 @@ func (r *taskLLMRuntime) Complete(ctx context.Context, req llm.CompletionRequest
 
 func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest, hooks taskLLMStreamHooks) (llm.Message, string, llm.Usage, error) {
 	for {
-		selection, err := hooks.current()
+		selection, err := hooks.current(ctx)
 		if err != nil {
 			return llm.Message{}, "", llm.Usage{}, err
 		}
@@ -287,7 +300,7 @@ func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionReque
 func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest, hooks taskLLMStreamHooks) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
 		for {
-			selection, err := hooks.current()
+			selection, err := hooks.current(ctx)
 			if err != nil {
 				yield(llm.StreamEvent{}, err)
 				return

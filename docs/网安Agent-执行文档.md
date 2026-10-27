@@ -124,6 +124,51 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 
 **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
 
+### 1.21 竞速分模型（P2-5）：两路换的不是起点，是脑子
+
+race 之前的两条路换的是**起点**（另一条攻击面），模型是同一个。问题在于：
+同一个模型在同一道题上会犯**同一个错**——两条路都没想到 filter 绕过，加第三条也一样。
+让两路跑在不同模型上，才有"一个卡住、另一个想到"的可能。
+
+**判定（不需要新开关）**：`race` 拓扑 + **≥2 个可用模型**（`task_llm_profiles` 里 `status='ready'`）就分。
+race 这个调度器的语义就是"两路竞速"，把它跑成"两路同模型"等于只有一路。
+反悔只需把任务模型链缩短到 1 个（链本来就可编辑），或者设 `PRAETOR_LANE_MODELS=off`。
+
+| `PRAETOR_LANE_MODELS` | 行为 |
+| --- | --- |
+| `auto`（默认） | 只有 race 拓扑分模型 |
+| `off` | 全关，两路同模型（退回 P2-1 行为） |
+| `force` | 任何领域只要 ≥2 个可用模型就分（**调试/验证用**，没有 CTF 题库时也能验证路由本身） |
+
+**选法**：`ready[lane % len(ready)]`，`lane` 从 worker 协程名（`work#1` → 0）。
+取模而不是"越界退回第一个"：链比 lane 少时绕回去共享，链比 lane 多时（3 模型 2 路）
+多出来的那个留给"某路额度耗尽后重选"。
+
+**只影响 worker 的单次 run**。planner / mainagent / 摘要压缩仍走任务游标
+（`active_llm_profile_id`）——规划者跟着换模型会让"这一轮为什么这么规划"变得无法复盘。
+实现上靠 `agent.RunInfo.Worker`（run 身份唯一能跨到 LLM 解析层的地方），
+planner 的 run 没有 worker 名，天然不参与。
+
+**失败路回退**：某路撞额度墙 → 该模型被标 `quota_exhausted` → 下一次解析时它已不在
+`ready` 里 → 该路自动重选。只有一种结局需要人管：**全链耗尽**（`ready` 为空），
+这时 `current()` 返回 `chainExhausted`，任务按既有逻辑收尾。
+
+为什么不用内存计数器记"第几路试过哪个模型"：状态放 DB 就天然跨重启、跨进程、
+并发安全——重启后不会去重试一个已知没额度的模型。
+
+**验证**：`server/llm_lane_test.go` 用真库 + 真 provider 构造，断言
+`current(第1路) ≠ current(第2路)` 且 `current(planner)` 仍等于链首。
+这条用例替代了"起服务真跑一道题看日志"——后者要烧掉一整轮 planner 的 token，
+而断言的其实是同一个函数、同一份数据。
+
+**已知限制**：
+
+1. **模型链变更会影响进行中的 run**：链是每次调用现读的，不是 run 开始时快照的。
+   改链本来就是"立刻生效"的语义，但意味着跑到一半换链会让这一路换模型。
+2. **3 模型 2 路时，某路耗尽会让另一路换模型**：`ready` 缩短后 `lane % n` 的结果会变。
+   想避免就只配 2 个模型（两路各一个，耗尽就共同降级）。
+3. **不解决"两个模型都很弱"**：分模型只去相关，不提高单模型能力。
+
 ### 1.20 CTF 题目优先级与放弃（P2-6）：把"该做哪道"算出来，而不是让模型猜
 
 **问题**：多题任务里模型看不到全局——它不知道还有哪些题、各值多少分、自己已经花了多少，
@@ -759,6 +804,7 @@ go test ./... -count=1
 | 2026-10-27 | **P2-2 `ctf_submit` + 去重表 + 双判分 + 收敛**：`agent/ctf_tools.go`（工具 + `CTFSubmitter` 接口）、`db/ctf_submit.go`（`ctf_submissions`，主键=flag sha256，`ON CONFLICT DO NOTHING` 仲裁并发）、`server/ctf_submit.go`（offline/ctfd 两个 judge；判对调 `ConvergeTask`；判题失败不落库）；**工具面按领域裁剪**：`ToolSet.SetDomain` + `domainTools()`，`re_evidence` 从无条件改为 reverse 专属，索引补 `domainScopedTools()` | agent 5 用例（后端缺失/形状校验/verdict 透传/后端错误/未接入清单）+ 领域裁剪 3 态断言；server 4 用例（离线精确比对/去重与不复投/判题失败不落库/配置解析）；golden 仅 `re_evidence→worker` 一行移除；真库 `go test -p 1 ./...` **22 包全绿** |
 | 2026-10-27 | **P2-2b `ctf_challenge`**：`agent/ctf_challenge.go`（接口 + 工具，只回路径；长题面截断 + `truncated`）；`server/ctf_challenge.go`（离线目录来源 + CTFd 来源，附件落盘、HTML 去标签、文件名 sanitize）；接线到 worker（仅 ctf 域） | agent 3 用例（未配置不可用/只回路径不回正文/截断与 resets=-1）；server 4 用例（离线目录元信息与附件过滤/CTFd 下载与鉴权头/路径穿越/配置解析）；`TestCTFResolvesAllTools` 断言 CTF 未接入清单**为空**且工具面仍是 2 个；真库 `go test -p 1 ./...` **22 包全绿** |
 | 2026-10-27 | **修全新库建不起来的真 bug（P3-1 遗留）**：`db/schema.sql` 里 `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS domain` 被放在 `CREATE TABLE tasks` **之前**，空库上整份 schema 的 Exec 以 `42P01 relation "tasks" does not exist` 整体失败 → `db.Open` 直接报 `apply schema:` 错，**全新安装根本起不来**。存量库因为 tasks 早已存在而从不触发，正是这次跑门禁（`test-with-db.sh` 每次 `down -v` 重建）才暴露 | 全新库整份应用：50 张表、`tasks.domain` 默认 `'pentest'`、零报错；真库全量 **23 包全绿** |
+| 2026-10-27 | **P2-5 竞速分模型**：`agent.RunInfo.Worker`（worker 协程名进 run 身份）；`server/llm_lane.go`（`laneIndexOf` / `pickLaneProfile` / `laneChoice` 纯判定 + `readyProfileIDs` 只取 `status=ready` 的链项 + 每路一次变更日志）；`taskLLMRuntime.current(ctx)` 增加 lane 分支（拿不到身份/单模型/模型不可解析一律回落游标）；`db.TaskLLMProfileStatusReady|Exhausted` 常量 | 纯函数 4 用例（名字解析含非法输入、取模与绕回、7 种矩阵含 force/off/渗透、env 解析含拼错）；真库 2 用例（耗尽模型从可用链消失；**真 provider 构造下** `current(work#1)` ≠ `current(work#2)` 且 planner 仍为链首）；**验收不需烧 token**：断言的是同一函数同一份数据，而不是起服务跑一道题 |
 | 2026-10-27 | **P2-6 题目优先级与放弃**：`internal/ctfplan`（纯函数决策内核：`Estimate`/`Score`/`Build`，easy-first 与 value-first 自动选并可强制；单题切片 = 剩余预算÷题数×1.25，下限 120K；`Budget.exhaustReason` 区分"钱用完"与"时间到"）；`db/ctf_progress.go`（逐题状态机 new/active/solved/abandoned，激活记 token 基线）；`agent/ctf_board.go`（`ctf_board` 工具：看板 + give_up，**空原因拒绝**）；`server/ctf_board.go`（离线目录/CTFd 两种 `List`、`meta.json` 分值/解出数/预估、`GET /api/tasks/{id}/ctf/board`）；`ctf_submit` 判对时写 solved；跑分器 `-order`/`-budget` 并**每跑完一题按实际花费重排** | ctfplan 12 用例（估算修正/两种策略/预算不够不开工/切片放弃/耗尽原因 3 分支/排序确定性）；`db` 真库用例；`server` 6 用例（题库识别/单题目录/放弃落库并带原因/未知题拒绝/判对移出待做/Fetch 激活）；`agent` 3 用例（未配置不可用/空原因拒绝/看板渲染精简）；`bench/ctf` 4 用例（meta 生效/预算紧按性价比排序/预算不足全跳过/asis 保序）；真机：`points/solves/category` 正确带出、`est` 随解出数修正、过截止时间原因精确、abandoned/solved 渲染正确 |
 | 2026-10-27 | **P2-4 CTF 基准跑分器**：`bench/ctf`（`challenge.go` 发现 / `client.go` HTTP 客户端含 Login·CreateTask·ConfigureCTF·Solved·Done·**Stats** / `runner.go` 逐题跑 + `Summary.Score`/`Markdown`）+ `cmd/ctfbench` CLI；`server/ctf_api.go`（`POST/GET /api/tasks/{id}/ctf`、`GET /api/ctf/submissions`，校验领域/flag 形状/目录存在）；`db` 新增 `task_id` 列 + `ListCTFSubmissions` + `AcceptedFlagForTask` | 判分**唯一口径**=平台 `accepted`（不看任务状态、不看模型自述）；提示词**不含期望 flag**（用例断言）；每题同时记 input tokens，报告出 `分数 + 成本`；`solved` 判定收敛到 `AcceptedFlagForTask` 一处；`-compose` 默认开（题目自带靶场没起=跑分器的错，不是模型的分）；真机六条负例（非 ctf 任务/flag 形状/目录不存在/任务不存在/缺 task_id）+ 正向 solved 翻转全部符合预期 |
 
@@ -922,7 +968,7 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 | P2-2b | `ctf_challenge`：题面/附件/实例地址拉取，**附件落盘只回路径** | 离线目录约定（`name.txt`/`README.md`/`connection.txt` + 其余文件当附件）或 CTFd API | ✅ 两种来源都实现；离线支持子目录（`<root>/<id>/`）；HTML 题面去标签；附件名先 basename 再过滤（防 `../` 写穿）；长题面截断并标 `truncated`；平台不提供重置次数时返回 -1 并说明 | ✅ 已完成 |
 | P2-3 | CTF 沙箱镜像：基础层 + crypto 可选层 | 按 `CTFToolchain()` 构建；重依赖不进基础层 | 基础镜像 ≤12 项且能跑通 1 道 pwn + 1 道 forensics；`angr/sage` 按需装 | 待做 |
 | P2-4 | CTF 基准跑分器（复用 `bench/xbow` 结构：Discover / Run / Summary） | 接入 benchmark，**离线判分**（唯一口径：平台 `accepted`） | ✅ `bench/ctf` 三件套 + `cmd/ctfbench` CLI；发现只认含 `flag.txt` 的子目录；跑完必 `compose down`；提示词不写期望 flag；任务级 CTF 配置接口（写/读/查提交）；`solved` 由 accepted 记录推导 | ✅ **跑分器完成**（题库自备，基线分待有题库机器上跑出后回填） |
-| P2-5 | **per-intent 模型路由**（换模型竞速） | 自研：模型现在是任务级 profile 链（`task_llm.go` 的 `ActiveLLMProfileID`），要做 per-intent 需改解析层 | 同一题两路可用不同 profile；失败路回退换模型 | 待做 |
+| P2-5 | **per-intent 模型路由**（换模型竞速） | 自研：把 run 身份（`agent.RunInfo.Worker`）带进 `taskLLMRuntime.current()`，按 lane 从「可用模型链」取一个 | ✅ race + ≥2 可用模型时两路自动分模型（`ready[lane % n]`）；planner/mainagent 仍走任务游标；撞额度墙的模型被标 `quota_exhausted` 后该路自动重选，全链耗尽才收尾；`PRAETOR_LANE_MODELS=off/auto/force` 可关可强开 | ✅ 已完成 |
 | P2-6 | 题目优先级与放弃策略（按分值/剩余时间/预算动态排序） | 自研；参考 ctf-agent 的"先易后难 + 限时放弃" | ✅ `internal/ctfplan` 纯函数决策（easy-first / value-first 自动选，可强制）；单题切片 1.25 倍宽限 + 120K 下限；`ctf_progress` 逐题状态机（Fetch 即激活并记 token 基线）；`ctf_board` 工具（看板 + 放弃，**空原因拒绝**）；`GET /api/tasks/{id}/ctf/board` 与工具同一份计算；跑分器 `-order/-budget` 每跑完一题按实际花费重排 | ✅ 已完成 |
 
 **已知限制（写在这里，别当成已实现）**

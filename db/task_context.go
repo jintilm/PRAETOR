@@ -11,6 +11,13 @@ import (
 const IntentBlockedLLMQuota = "llm_quota_exhausted"
 
 // TaskLLMProfile is one ordered entry in a task's explicit failover chain.
+// 任务模型链的条目状态。ready = 可用；quota_exhausted = 额度耗尽（不再选它）。
+// 只有这两种：其它状态（例如"临时失败"）没有可靠的判定依据，不要凭空加。
+const (
+	TaskLLMProfileStatusReady     = "ready"
+	TaskLLMProfileStatusExhausted = "quota_exhausted"
+)
+
 type TaskLLMProfile struct {
 	ProfileID   int64      `json:"profile_id"`
 	Position    int        `json:"position"`
