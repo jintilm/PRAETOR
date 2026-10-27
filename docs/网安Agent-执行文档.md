@@ -1323,7 +1323,10 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 
 闸门放在 `add_intent` 的**创建之前**而不是落库之后：被拒的方向连节点都不留下，图上不会出现"一条永远不该存在的路"。阶段本身存在意图 payload 的 `phase` 里（不新开列），判定时按 `state=done` 折叠成"哪些阶段已完成"——`blocked/exhausted` 不算，那表示这一步没做成。
 
-| P4-2 | Caldera / Atomic Red Team 编排接入 | 直接接入（Apache-2.0 / MIT） | 能下发一条 ability 并回收结果 | 待做 |
+
+**为什么 Caldera 只接 REST 不接 MCP**：红队域在 `MCP()` 里声明过 caldera（`http://127.0.0.1:8888`），但 Caldera 的 MCP 会把 abilities/agents/operations/planners/objectives 几十个端点铺进上下文。模型真正要的只有三件：看有哪些 ability、下发一条、回收结果 —— 三个 REST 端点、一个 schema 就够。Atomic Red Team 的接入路径由此打通：Caldera 的 atomic 插件把 ART 的 atomics 变成 ability，我们只需「按名字下发」，不必再引一套 YAML 解析。
+
+| P4-2 | Caldera / Atomic Red Team 编排接入 | 直接接入 REST（Apache-2.0 / MIT），**不接 MCP** | ✅ `internal/caldera`（abilities/operations 三个端点）+ 工具 `caldera_operation(action=list/start/status)`：下发 ad-hoc operation 并把 links 折成「哪条链、什么状态、命令与输出片段」；`status=0`（未回收）不被说成完成；未配 `PRAETOR_CALDERA_URL` 时点名配置项而不是「请求失败」 | ✅ 已完成 |
 | P4-3 | Sliver / NetExec / BloodHound 接入（独立服务 + MCP） | 直接接入（Sliver GPL 只做外部服务，不复制） | 会话列表可读、路径可查 | 待做 |
 | P4-4 | GOAD 靶场跑通一条端到端战役 | 靶场 `Orange-Cyberdefense/GOAD` | 有证据链 + 有 cleanup 记录 | 待做 |
 

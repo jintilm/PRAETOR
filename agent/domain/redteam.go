@@ -32,7 +32,7 @@ func (redTeamPack) Roles() []RoleSpec {
 				"每轮只下发「前置已完成」的下一步。战役结束前必须下发 cleanup 并核验结果。",
 			ToolKeys: []string{
 				"READ_GRAPH", "add_intent", "add_hint", "list_facts",
-				"bloodhound_shortest_path", "caldera_operation_status",
+				"bloodhound_shortest_path", "caldera_operation",
 			},
 			MaxTurns: 20,
 		},
@@ -81,7 +81,9 @@ func (redTeamPack) Roles() []RoleSpec {
 }
 
 func (redTeamPack) Tools() []string {
-	return []string{"add_intent", "add_hint", "list_facts", "record_fact", "report_finding"}
+	// caldera_operation 是唯一"执行外部动作"的工具：一个 schema 覆盖 list/start/status，
+	// 不把 Caldera 的几十个端点铺成工具面（理由见 agent/caldera_tools.go 头注）。
+	return []string{"add_intent", "add_hint", "list_facts", "record_fact", "report_finding", "caldera_operation"}
 }
 
 func (redTeamPack) MCP() []MCPRef {

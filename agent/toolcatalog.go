@@ -186,6 +186,7 @@ func domainOwnedTools() map[string]actool.CoreTool {
 	list := []actool.CoreTool{
 		ts.reTriage(),
 		ts.reRecipe(),
+		calderaTool(),
 	}
 	m := make(map[string]actool.CoreTool, len(list))
 	for _, t := range list {
