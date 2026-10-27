@@ -10,10 +10,12 @@
 //	<dir>/name.txt        可选，题目名
 //	<dir>/README.md       可选，题面
 //	<dir>/connection.txt  可选，目标地址（起完靶场后模型要打的地方）
+//	<dir>/meta.json       可选，分值/解出人数/预估成本（P2-6 排序用；缺省也能跑）
 //	<dir>/*               其余当附件
 package ctf
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -29,6 +31,11 @@ type Challenge struct {
 	Dir        string `json:"dir"`
 	Flag       string `json:"-"` // 期望 flag：不落盘、不进报告
 	HasCompose bool   `json:"has_compose"`
+	// 以下三项来自可选的 meta.json，只影响**排序**（先做哪题），不影响判分。
+	Category  string `json:"category,omitempty"`
+	Points    int    `json:"points,omitempty"`
+	Solves    int    `json:"solves,omitempty"`     // -1/0 = 未知
+	EstTokens int64  `json:"est_tokens,omitempty"` // 0 = 用分类基线
 }
 
 // ErrNoFlag 表示该目录不是一道可判分的题（缺 flag.txt）。
@@ -64,10 +71,36 @@ func Discover(root string) ([]Challenge, error) {
 		if fileExists(filepath.Join(dir, "docker-compose.yml")) || fileExists(filepath.Join(dir, "compose.yml")) {
 			c.HasCompose = true
 		}
+		applyMeta(&c, filepath.Join(dir, "meta.json"))
 		out = append(out, c)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
+}
+
+// applyMeta 读可选的 meta.json（分值/解出人数/预估成本）。
+//
+// 读坏了就当没有：题库元信息只影响排序策略，不该让整轮跑分失败。
+func applyMeta(c *Challenge, path string) {
+	raw := readTrim(path)
+	if raw == "" {
+		return
+	}
+	var m struct {
+		Category  string `json:"category"`
+		Points    int    `json:"points"`
+		Solves    int    `json:"solves"`
+		EstTokens int64  `json:"est_tokens"`
+	}
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return
+	}
+	if m.Category != "" {
+		c.Category = m.Category
+	}
+	c.Points = m.Points
+	c.Solves = m.Solves
+	c.EstTokens = m.EstTokens
 }
 
 func readTrim(p string) string {

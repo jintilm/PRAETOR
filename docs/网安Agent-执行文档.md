@@ -124,6 +124,78 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 
 **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
 
+### 1.20 CTF 题目优先级与放弃（P2-6）：把"该做哪道"算出来，而不是让模型猜
+
+**问题**：多题任务里模型看不到全局——它不知道还有哪些题、各值多少分、自己已经花了多少，
+于是最常见的行为是**死磕第一道看到的题直到预算烧光**。这是比赛里最贵的错误：
+分数不看"谁最努力"，只看"解出几道"。
+
+**三层分工**（改任何一层都不该动另外两层）：
+
+| 层 | 文件 | 只管什么 |
+| --- | --- | --- |
+| 决策 | `internal/ctfplan` | 纯函数：排序、切片、放弃。不读库、不发 HTTP、不看真实时钟 |
+| 取数与落库 | `server/ctf_board.go` | 题目清单（离线目录 / CTFd）、逐题进度、任务用量 |
+| 渲染 | `agent/ctf_board.go` | 把结论压成模型能直接执行的字段 |
+
+**规则顺序**（先硬后软，每条都能单独解释）：
+
+1. 已解出 → 不排、不再花预算；
+2. 已放弃 → 不回头（反复回到同一道废题是最大浪费，除非人手动改状态）；
+3. 预算/时间已耗尽 → 整场收工（`Exhausted`），不是"再挤一点"；
+4. 剩余预算 < 该题预估 → **不开工**（开了也做不完，等于把钱扔进黑洞）；
+5. 在做的题已花 ≥ 单题切片 → 放弃换题；
+6. 其余按策略排序。
+
+**单题切片**：剩余预算 ÷ 待做题数 × **1.25**，下限 120K。
+用 1.25 而不是恰好均分，是因为"马上要出结果"的题被硬砍掉是最亏的，多花 25% 是最便宜的容错。
+
+**策略**（自动选，也能强制）：
+
+| 策略 | 何时 | 排序 |
+| --- | --- | --- |
+| `easy-first` | 预算相对总预估宽裕 | 预估成本升序（先把分拿到手，减少后续不确定性） |
+| `value-first` | 预算/时间相对总预估紧张 | 性价比 = 分值 ÷ 预估成本 降序 |
+
+**成本模型**（`Estimate`）：分类基线（web 420K / pwn 600K / rev 560K / crypto 480K / forensics 380K / misc 340K）
+→ 按解出人数修正（≥300 打折 30%，≥80 打 85 折，<20 加价 30%）→ **用已花校准**（已经超了说明确实比想的贵）。
+这些是**排序用的相对值**，不是精确预测；结论必须带 `Reason`，"为什么放弃"比"放弃了"重要得多。
+
+**状态机**：`new → active → solved | abandoned`（表 `ctf_progress`，主键 `(task_id, challenge_id)`）。
+`ctf_challenge` 每次 `Fetch` 时自动把该题标 `active` 并记下**当时任务累计 token 作为基线**——
+模型不用自报"我在做哪道"。某题花费 = 任务累计 − 基线（账本只有任务级，但"花了 1M 还是 100K"这个量级足够决策）。
+
+**`ctf_board` 工具**（CTF 域第 3 个工具，也是最后一个）：
+- 不传参 = 查看板（排序 + `recommend` + 每题预估/已花 + 剩余预算 + 策略）；
+- 传 `give_up=<id>` + `reason=<试过什么、卡在哪>` = 记录放弃并返回刷新后的看板。
+- **空原因的放弃直接被拒**：没有原因的记录，下一轮（或换人接手）看到什么也学不到。
+- 为什么不是两个工具：schema 是每轮都要付的钱。
+
+**`GET /api/tasks/{id}/ctf/board`**：与工具**同一份计算**。面板上看到的顺序就是模型看到的顺序，
+否则"人以为它在做 A、其实它在磨 B"这种偏差根本没法解释。
+
+**题库元信息**（可选，两个消费方共用同一份 `meta.json`）：
+
+```json
+{"name":"弱口令后台","category":"web","points":100,"solves":420,"est_tokens":0}
+```
+
+**跑分器新增两个开关**：`-order auto|easy-first|value-first|asis`（`asis` = 目录顺序，对照组；
+预算紧时**每跑完一题就用实际花费重算一次顺序**，而不是开局排一次）与 `-budget`（整轮 token 预算，
+装不下的题直接跳过并写明原因）。
+
+**真机验证**（ctf 任务 + 三题题库）：`points/solves/category` 正确带出；`est` 随解出人数修正
+（web 420K×70%=294K、crypto 480K×130%=624K）；过截止时间时 `exhausted=true` 且原因是
+"任务已过截止时间"（不是笼统的"预算或时间已用尽"）；写入 abandoned 后该题带着原因与冻结花费进 `give_up`、
+写入 solved 后进 `solved` 且不再被推荐。
+
+**已知限制**：
+
+1. **逐题花费是近似**：账本只有任务级，用差值算；同时在做两道题（race 第二路）时会互相串账。
+2. **只有 ctf 域有**：渗透/逆向的任务没有"题目"概念，硬套会把意图排序搞乱。
+3. **放弃是粘性的**：`ctf_board` 不会自动复活已放弃的题，要重新做只能人改库或重新建任务。
+   （`ActivateCTFChallenge` 允许重新激活并保留上次的放弃原因，但没有任何路径会主动这么做。）
+
 ### 1.19 CTF 基准跑分（P2-4）：分数只从"平台认不认"来
 
 跑分器的全部意义是**别信 agent 的自述**。所以 `bench/ctf` 的判分口径只有一条：
@@ -163,6 +235,8 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 ```bash
 go run ./cmd/ctfbench -root /path/to/corpus -dry-run        # 只看发现了哪些题，不烧 token
 go run ./cmd/ctfbench -root /path/to/corpus -limit 3        # 真跑前 3 题
+go run ./cmd/ctfbench -root /path/to/corpus -budget 3000000 -order auto   # 带预算，按性价比动态排序
+go run ./cmd/ctfbench -root /path/to/corpus -order asis    # 对照组：目录顺序，不排序
 go run ./cmd/ctfbench -root /path/to/corpus -api http://127.0.0.1:8797 -token <JWT>
 ```
 
@@ -685,6 +759,7 @@ go test ./... -count=1
 | 2026-10-27 | **P2-2 `ctf_submit` + 去重表 + 双判分 + 收敛**：`agent/ctf_tools.go`（工具 + `CTFSubmitter` 接口）、`db/ctf_submit.go`（`ctf_submissions`，主键=flag sha256，`ON CONFLICT DO NOTHING` 仲裁并发）、`server/ctf_submit.go`（offline/ctfd 两个 judge；判对调 `ConvergeTask`；判题失败不落库）；**工具面按领域裁剪**：`ToolSet.SetDomain` + `domainTools()`，`re_evidence` 从无条件改为 reverse 专属，索引补 `domainScopedTools()` | agent 5 用例（后端缺失/形状校验/verdict 透传/后端错误/未接入清单）+ 领域裁剪 3 态断言；server 4 用例（离线精确比对/去重与不复投/判题失败不落库/配置解析）；golden 仅 `re_evidence→worker` 一行移除；真库 `go test -p 1 ./...` **22 包全绿** |
 | 2026-10-27 | **P2-2b `ctf_challenge`**：`agent/ctf_challenge.go`（接口 + 工具，只回路径；长题面截断 + `truncated`）；`server/ctf_challenge.go`（离线目录来源 + CTFd 来源，附件落盘、HTML 去标签、文件名 sanitize）；接线到 worker（仅 ctf 域） | agent 3 用例（未配置不可用/只回路径不回正文/截断与 resets=-1）；server 4 用例（离线目录元信息与附件过滤/CTFd 下载与鉴权头/路径穿越/配置解析）；`TestCTFResolvesAllTools` 断言 CTF 未接入清单**为空**且工具面仍是 2 个；真库 `go test -p 1 ./...` **22 包全绿** |
 | 2026-10-27 | **修全新库建不起来的真 bug（P3-1 遗留）**：`db/schema.sql` 里 `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS domain` 被放在 `CREATE TABLE tasks` **之前**，空库上整份 schema 的 Exec 以 `42P01 relation "tasks" does not exist` 整体失败 → `db.Open` 直接报 `apply schema:` 错，**全新安装根本起不来**。存量库因为 tasks 早已存在而从不触发，正是这次跑门禁（`test-with-db.sh` 每次 `down -v` 重建）才暴露 | 全新库整份应用：50 张表、`tasks.domain` 默认 `'pentest'`、零报错；真库全量 **23 包全绿** |
+| 2026-10-27 | **P2-6 题目优先级与放弃**：`internal/ctfplan`（纯函数决策内核：`Estimate`/`Score`/`Build`，easy-first 与 value-first 自动选并可强制；单题切片 = 剩余预算÷题数×1.25，下限 120K；`Budget.exhaustReason` 区分"钱用完"与"时间到"）；`db/ctf_progress.go`（逐题状态机 new/active/solved/abandoned，激活记 token 基线）；`agent/ctf_board.go`（`ctf_board` 工具：看板 + give_up，**空原因拒绝**）；`server/ctf_board.go`（离线目录/CTFd 两种 `List`、`meta.json` 分值/解出数/预估、`GET /api/tasks/{id}/ctf/board`）；`ctf_submit` 判对时写 solved；跑分器 `-order`/`-budget` 并**每跑完一题按实际花费重排** | ctfplan 12 用例（估算修正/两种策略/预算不够不开工/切片放弃/耗尽原因 3 分支/排序确定性）；`db` 真库用例；`server` 6 用例（题库识别/单题目录/放弃落库并带原因/未知题拒绝/判对移出待做/Fetch 激活）；`agent` 3 用例（未配置不可用/空原因拒绝/看板渲染精简）；`bench/ctf` 4 用例（meta 生效/预算紧按性价比排序/预算不足全跳过/asis 保序）；真机：`points/solves/category` 正确带出、`est` 随解出数修正、过截止时间原因精确、abandoned/solved 渲染正确 |
 | 2026-10-27 | **P2-4 CTF 基准跑分器**：`bench/ctf`（`challenge.go` 发现 / `client.go` HTTP 客户端含 Login·CreateTask·ConfigureCTF·Solved·Done·**Stats** / `runner.go` 逐题跑 + `Summary.Score`/`Markdown`）+ `cmd/ctfbench` CLI；`server/ctf_api.go`（`POST/GET /api/tasks/{id}/ctf`、`GET /api/ctf/submissions`，校验领域/flag 形状/目录存在）；`db` 新增 `task_id` 列 + `ListCTFSubmissions` + `AcceptedFlagForTask` | 判分**唯一口径**=平台 `accepted`（不看任务状态、不看模型自述）；提示词**不含期望 flag**（用例断言）；每题同时记 input tokens，报告出 `分数 + 成本`；`solved` 判定收敛到 `AcceptedFlagForTask` 一处；`-compose` 默认开（题目自带靶场没起=跑分器的错，不是模型的分）；真机六条负例（非 ctf 任务/flag 形状/目录不存在/任务不存在/缺 task_id）+ 正向 solved 翻转全部符合预期 |
 
 ---
@@ -848,7 +923,7 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 | P2-3 | CTF 沙箱镜像：基础层 + crypto 可选层 | 按 `CTFToolchain()` 构建；重依赖不进基础层 | 基础镜像 ≤12 项且能跑通 1 道 pwn + 1 道 forensics；`angr/sage` 按需装 | 待做 |
 | P2-4 | CTF 基准跑分器（复用 `bench/xbow` 结构：Discover / Run / Summary） | 接入 benchmark，**离线判分**（唯一口径：平台 `accepted`） | ✅ `bench/ctf` 三件套 + `cmd/ctfbench` CLI；发现只认含 `flag.txt` 的子目录；跑完必 `compose down`；提示词不写期望 flag；任务级 CTF 配置接口（写/读/查提交）；`solved` 由 accepted 记录推导 | ✅ **跑分器完成**（题库自备，基线分待有题库机器上跑出后回填） |
 | P2-5 | **per-intent 模型路由**（换模型竞速） | 自研：模型现在是任务级 profile 链（`task_llm.go` 的 `ActiveLLMProfileID`），要做 per-intent 需改解析层 | 同一题两路可用不同 profile；失败路回退换模型 | 待做 |
-| P2-6 | 题目优先级与放弃策略（按分值/剩余时间/预算动态排序） | 自研；参考 ctf-agent 的"先易后难 + 限时放弃" | 预算紧时优先高分易题；放弃的题有记录 | 待做 |
+| P2-6 | 题目优先级与放弃策略（按分值/剩余时间/预算动态排序） | 自研；参考 ctf-agent 的"先易后难 + 限时放弃" | ✅ `internal/ctfplan` 纯函数决策（easy-first / value-first 自动选，可强制）；单题切片 1.25 倍宽限 + 120K 下限；`ctf_progress` 逐题状态机（Fetch 即激活并记 token 基线）；`ctf_board` 工具（看板 + 放弃，**空原因拒绝**）；`GET /api/tasks/{id}/ctf/board` 与工具同一份计算；跑分器 `-order/-budget` 每跑完一题按实际花费重排 | ✅ 已完成 |
 
 **已知限制（写在这里，别当成已实现）**
 

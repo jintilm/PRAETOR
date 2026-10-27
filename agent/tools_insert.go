@@ -675,10 +675,12 @@ func (t *ToolSet) domainTools() []actool.CoreTool {
 		// re_evidence：逆向域唯一结论出口（证据节点 + 领域判定器）
 		return []actool.CoreTool{t.reEvidence()}
 	case t.isCTF():
-		// CTF 域的工具面就是这两个（设计约束：≤2）：
+		// CTF 域的工具面是这三个（设计约束：≤3，加之前先问"能不能塞进沙箱"）：
 		//   ctf_challenge 拉题面/附件（落盘，只回路径）
+		//   ctf_board     题目排序与放弃决策（P2-6：多题任务里"先做哪道"）
 		//   ctf_submit    唯一提交出口（去重 + 判题 + 首解收敛）
-		return []actool.CoreTool{t.ctfChallengeTool(), t.ctfSubmit()}
+		// 前两个是**协调**（选题/放弃），最后一个是**结论出口**；真正的解题能力仍在沙箱。
+		return []actool.CoreTool{t.ctfChallengeTool(), t.ctfBoardTool(), t.ctfSubmit()}
 	}
 	return nil
 }

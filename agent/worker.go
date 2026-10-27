@@ -76,7 +76,9 @@ type Worker struct {
 	ctfSubmitter CTFSubmitter
 	// ctfChallenge 是题面来源（仅 ctf 域注入）。
 	ctfChallenge CTFChallengeSource
-	extraTools   []actool.CoreTool
+	// ctfBoard 是题目看板/放弃记录（仅 ctf 域注入）。
+	ctfBoard   CTFBoardProvider
+	extraTools []actool.CoreTool
 	// injectConstraints resolves whether this task's operation constraints get
 	// injected into the worker system prompt. Read per run so the settings toggle
 	// takes effect without rebuilding the agent. nil = inject (default).
@@ -129,6 +131,9 @@ func (w *Worker) SetCTFSubmitter(s CTFSubmitter) { w.ctfSubmitter = s }
 
 // SetCTFChallengeSource 注入题面来源（nil = ctf_challenge 明确报不可用）。
 func (w *Worker) SetCTFChallengeSource(s CTFChallengeSource) { w.ctfChallenge = s }
+
+// SetCTFBoard 注入题目看板（nil = ctf_board 明确报不可用）。
+func (w *Worker) SetCTFBoard(b CTFBoardProvider) { w.ctfBoard = b }
 
 func (w *Worker) SetNonStreaming(fn func() bool) { w.nonStreamingFn = fn }
 
@@ -379,6 +384,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	tsx.SetDomain(w.domain) // 领域专属工具按任务领域裁剪（逆向/CTF 工具不进渗透任务）
 	tsx.SetCTFSubmitter(w.ctfSubmitter)
 	tsx.SetCTFChallengeSource(w.ctfChallenge)
+	tsx.SetCTFBoard(w.ctfBoard)
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetFindingVerifier(w.findingVerifier)
 	tsx.SetTaskID(taskID)

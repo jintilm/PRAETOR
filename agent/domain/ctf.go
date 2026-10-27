@@ -76,12 +76,15 @@ func (ctfPack) Roles() []RoleSpec {
 			Key:         "ctf-lead",
 			Kind:        RoleLead,
 			Description: "读题面与附件，判类型、分配预算、竞速仲裁、决定放弃哪题",
-			PromptSection: "先枚举全部题目并按「类型 × 预期难度 × 剩余时间」排序，优先派能快速拿分的题。" +
+			PromptSection: "开局先调 ctf_board 拿排序（它按分值/难度/剩余预算算好了该先做哪道），" +
+				"再按 recommend 派活——不要凭题面印象随手挑一道。" +
 				"每题维护一份「已尝试思路」清单，避免第二个 solver 重踩。" +
-				"某一题连续多轮没有新事实时，起第二路换起点（另一条攻击面），而不是让同一个 solver 继续磨。",
+				"某一题连续多轮没有新事实时：要么起第二路换起点，要么用 ctf_board 的 give_up 记下" +
+				"「试过什么、卡在哪」后换题——**死磕一道做不出的题是最贵的浪费**。" +
+				"看板说 exhausted 时就收工，不要挤预算。",
 			// add_intent/add_hint 是真实存在的平台工具：lead 的"分派"就是靠它建意图；
 			// 没有它 lead 只能空谈策略（race 调度器建初始意图，后续换起点仍由 lead 决定）。
-			ToolKeys: []string{"Read", "Bash", "ctf_challenge", "ctf_submit", "add_intent", "add_hint"},
+			ToolKeys: []string{"Read", "Bash", "ctf_challenge", "ctf_board", "ctf_submit", "add_intent", "add_hint"},
 			MaxTurns: 25,
 			Approval: ApprovalAuto,
 			Budget:   Budget{MaxParallel: 2}, // 延迟竞速：单路先跑，停滞才起第二路
@@ -139,12 +142,16 @@ func (ctfPack) Roles() []RoleSpec {
 	}
 }
 
-// Tools 是域级声明的工具面：**2 个**。
+// Tools 是域级声明的工具面：**3 个**。
 //
-// 与逆向域同理，这两个 key 在 P2-2 落地前会被 `UnresolvedDomainTools` 报「声明了但未接入」，
+// 与逆向域同理，这些 key 在接入前会被 `UnresolvedDomainTools` 报「声明了但未接入」，
 // 由 `TestCTFDeclaredToolsAreDesignSet` 锁成已知清单。
+//
+// 为什么允许从 2 个加到 3 个（P2-6）：这两个协调工具解决的是**比赛里最贵的错误**——
+// 死磕一道做不出的题直到预算烧光。它们不提供任何"解题能力"（能力仍在沙箱镜像里），
+// 只是把"还有哪些题、各值多少分、我花了多少"摊开。仍然封顶 3：再加就得先进沙箱。
 func (ctfPack) Tools() []string {
-	return []string{"ctf_challenge", "ctf_submit"}
+	return []string{"ctf_challenge", "ctf_board", "ctf_submit"}
 }
 
 // MCP 返回空：**刻意不接**，连 CTFd 也不走 MCP。

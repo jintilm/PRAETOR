@@ -35,6 +35,8 @@ func main() {
 		// 那种"未解出"是跑分器的错，不是模型的分。题目目录没有 compose 文件时此项无影响。
 		compose  = flag.Bool("compose", true, "起/停题目自带的 docker compose")
 		keep     = flag.Bool("keep", false, "保留靶场（排查用）")
+		order    = flag.String("order", "auto", "排序策略：auto（按预算紧松自动）/ easy-first / value-first / asis（目录顺序，对照组）")
+		budget   = flag.Int64("budget", 0, "整轮 token 预算（0=不限）；装不下的题会跳过并写明原因")
 		mdPath   = flag.String("md", "", "Markdown 报告输出路径")
 		jsonPath = flag.String("out", "", "JSON 结果输出路径")
 		dryRun   = flag.Bool("dry-run", false, "只列题，不跑")
@@ -89,6 +91,7 @@ func main() {
 		Root: *root, Only: ids, Limit: *limit,
 		TaskTimeout: *taskTO, WaitTimeout: *waitTO, Poll: *poll,
 		Compose: *compose, Keep: *keep, Client: client,
+		Order: *order, TokenBudget: *budget,
 		Logf: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) },
 	})
 	if err != nil {

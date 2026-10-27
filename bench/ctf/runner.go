@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jintilm/praetor/internal/ctfplan"
 )
 
 // Options 控制一次跑分。
@@ -22,7 +24,26 @@ type Options struct {
 	Keep        bool // 保留靶场（排查用）
 	Client      Client
 	Logf        func(format string, args ...any)
+	// Order 决定先跑哪题（P2-6）："" / "auto" = 按预算松紧自动选；
+	// "easy-first" / "value-first" = 强制策略（对照实验用）；"asis" = 保持目录顺序。
+	Order string
+	// TokenBudget 是整轮 token 预算（0 = 不限）。给定时按预算动态排序，
+	// 预算不够的题直接跳过并在报告里写明原因——这比"跑完再看花了多少"有用得多。
+	TokenBudget int64
 }
+
+// ctfplanOrder 把 Options.Order 翻译成 ctfplan 的策略覆盖值。
+func (o Options) planForce() string {
+	switch strings.ToLower(strings.TrimSpace(o.Order)) {
+	case "easy-first", "easy":
+		return "easy-first"
+	case "value-first", "value", "points":
+		return "value-first"
+	}
+	return ""
+}
+
+func (o Options) asis() bool { return strings.EqualFold(strings.TrimSpace(o.Order), "asis") }
 
 // Item 是一道题的跑分结果。
 type Item struct {
@@ -37,6 +58,8 @@ type Item struct {
 	Err          string `json:"err,omitempty"`
 	Skipped      bool   `json:"skipped,omitempty"`
 	SkipWhy      string `json:"skip_why,omitempty"`
+	// Order 是这道题在本轮里的执行次序（1 起），复盘"是不是顺序选错了"时要用。
+	Order int `json:"order,omitempty"`
 }
 
 // Summary 是一轮跑分的汇总。
@@ -46,6 +69,7 @@ type Summary struct {
 	Skipped     int           `json:"skipped"`
 	InputTokens int64         `json:"input_tokens"`
 	OutputToken int64         `json:"output_tokens"`
+	Strategy    string        `json:"strategy,omitempty"` // 本轮实际用的排序策略
 	Items       []Item        `json:"items"`
 	Elapsed     time.Duration `json:"elapsed_ns"`
 }
@@ -88,22 +112,88 @@ func Run(ctx context.Context, opt Options) (*Summary, error) {
 
 	sum := &Summary{Total: len(chosen)}
 	start := time.Now()
-	for _, ch := range chosen {
-		it := runOne(ctx, opt, ch)
+
+	budget := ctfplan.Budget{Unlimited: opt.TokenBudget <= 0, TokenLeft: opt.TokenBudget}
+	spent := map[string]int64{}
+	pending := append([]Challenge(nil), chosen...)
+	order := 0
+
+	// asis：保持目录顺序（对照组）；其余：每跑完一题就用**实际花费**重算一次顺序。
+	// 重算而不是"开局排一次"是关键——开局只有预测，跑过一题后才有真实单价，
+	// 预算紧时正是靠这个把"贵且没进展"的题往后压。
+	for len(pending) > 0 {
+		var next Challenge
+		if opt.asis() {
+			next, pending = pending[0], pending[1:]
+		} else {
+			plan := ctfplan.BuildWith(challengesFor(pending, spent), budget, opt.planForce())
+			if sum.Strategy == "" {
+				sum.Strategy = plan.Strategy
+			}
+			if len(plan.Todo) == 0 {
+				// 剩下的都不可行（预算不够/已放弃）→ 全部跳过，并写清原因
+				for _, v := range plan.GiveUp {
+					sum.Skipped++
+					sum.Items = append(sum.Items, Item{ID: v.ID, Skipped: true, SkipWhy: v.Reason})
+					opt.Logf("[%s] 跳过：%s", v.ID, v.Reason)
+				}
+				break
+			}
+			id := plan.Recommend
+			for i, c := range pending {
+				if c.ID == id {
+					next = c
+					pending = append(pending[:i], pending[i+1:]...)
+					break
+				}
+			}
+			opt.Logf("顺序：%s（策略 %s，剩余预算 %s）", id, plan.Strategy, kiloLeft(budget))
+		}
+
+		order++
+		it := runOne(ctx, opt, next)
+		it.Order = order
 		if it.Skipped {
 			sum.Skipped++
 		}
 		if it.Solved {
 			sum.Solved++
 		}
+		spent[next.ID] += it.InputTokens + it.OutputTokens
 		sum.InputTokens += it.InputTokens
 		sum.OutputToken += it.OutputTokens
 		sum.Items = append(sum.Items, it)
+		if !budget.Unlimited {
+			budget.TokenLeft -= it.InputTokens + it.OutputTokens
+			if budget.TokenLeft < 0 {
+				budget.TokenLeft = 0
+			}
+		}
 		opt.Logf("[%s] solved=%v task=%d elapsed=%s in=%dK %s",
-			ch.ID, it.Solved, it.TaskID, it.Elapsed.Round(time.Second), it.InputTokens/1000, it.Err)
+			next.ID, it.Solved, it.TaskID, it.Elapsed.Round(time.Second), it.InputTokens/1000, it.Err)
 	}
 	sum.Elapsed = time.Since(start)
 	return sum, nil
+}
+
+// challengesFor 把"待跑清单 + 已花"翻译成决策输入。
+func challengesFor(pending []Challenge, spent map[string]int64) []ctfplan.Challenge {
+	out := make([]ctfplan.Challenge, 0, len(pending))
+	for _, c := range pending {
+		out = append(out, ctfplan.Challenge{
+			ID: c.ID, Name: c.Name, Category: c.Category,
+			Points: c.Points, Solves: c.Solves, EstTokens: c.EstTokens,
+			SpentTokens: spent[c.ID], State: ctfplan.StateNew,
+		})
+	}
+	return out
+}
+
+func kiloLeft(b ctfplan.Budget) string {
+	if b.Unlimited {
+		return "不限"
+	}
+	return fmt.Sprintf("%.2fM", float64(b.TokenLeft)/1e6)
 }
 
 func runOne(ctx context.Context, opt Options, ch Challenge) (it Item) {
@@ -235,9 +325,12 @@ func composeDown(ctx context.Context, ch Challenge) error {
 func (s *Summary) Markdown() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## CTF 基线：%.1f%%（%d/%d 解出，跳过 %d）\n\n", s.Score(), s.Solved, s.Total-s.Skipped, s.Skipped)
-	fmt.Fprintf(&b, "- 总耗时：%s\n- 总 token：input %.2fM / output %.0fK\n- 判分口径：平台判对（`ctf_submissions.verdict=accepted`），不看任务状态\n\n",
+	fmt.Fprintf(&b, "- 总耗时：%s\n- 总 token：input %.2fM / output %.0fK\n- 判分口径：平台判对（`ctf_submissions.verdict=accepted`），不看任务状态\n",
 		s.Elapsed.Round(time.Second), float64(s.InputTokens)/1e6, float64(s.OutputToken)/1e3)
-	b.WriteString("| 题目 | 结果 | 任务 | 耗时 | input | 备注 |\n| --- | --- | --- | --- | --- | --- |\n")
+	if s.Strategy != "" {
+		fmt.Fprintf(&b, "- 排序策略：%s（预算不足时会跳过注定跑不完的题，并在备注里写明原因）\n", s.Strategy)
+	}
+	b.WriteString("\n| # | 题目 | 结果 | 任务 | 耗时 | input | 备注 |\n| --- | --- | --- | --- | --- | --- | --- |\n")
 	for _, it := range s.Items {
 		state := "未解出"
 		switch {
@@ -256,8 +349,8 @@ func (s *Summary) Markdown() string {
 		if it.InputTokens > 0 {
 			tok = fmt.Sprintf("%.2fM", float64(it.InputTokens)/1e6)
 		}
-		fmt.Fprintf(&b, "| %s %s | %s | %s | %s | %s | %s |\n",
-			it.ID, escapeCell(it.Name), state, task, it.Elapsed.Round(time.Second), tok, escapeCell(it.SkipWhy))
+		fmt.Fprintf(&b, "| %d | %s %s | %s | %s | %s | %s | %s |\n",
+			it.Order, it.ID, escapeCell(it.Name), state, task, it.Elapsed.Round(time.Second), tok, escapeCell(it.SkipWhy))
 	}
 	return b.String()
 }

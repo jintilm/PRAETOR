@@ -567,8 +567,11 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	if sub := s.ctfSubmitterFor(t); sub != nil {
 		wk.SetCTFSubmitter(sub)
 	}
-	if src := s.ctfChallengeSourceFor(t); src != nil {
-		wk.SetCTFChallengeSource(src)
+	// CTF 域一次注入两样：题面来源（Fetch 时顺手记录"这题开做了"）与看板（P2-6）。
+	// 两者共享同一个 provider，进度才不会各记一套。
+	if kit, ok := s.ctfKitFor(t); ok {
+		wk.SetCTFChallengeSource(kit)
+		wk.SetCTFBoard(kit)
 	}
 	wk.SetFindingRecorder(s.evidenceStore())
 	wk.SetFindingVerifier(NewEvidenceVerifier(s.evidenceStore(), nil))

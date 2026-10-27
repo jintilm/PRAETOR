@@ -118,6 +118,9 @@ type ctfSubmitter struct {
 	taskID string
 	// converge 在判对后调用（向本任务所有在跑意图注入停止指令）。
 	converge func(cause string)
+	// onAccept 把"这题解出了"写进逐题进度（P2-6 看板据此把它移出待做）。
+	// 与 converge 分开：一个记事实，一个停执行，任一为 nil 都不影响判题与落库。
+	onAccept func(challengeID string)
 }
 
 // SubmitFlag 实现 agent.CTFSubmitter。
@@ -154,9 +157,14 @@ func (c *ctfSubmitter) SubmitFlag(ctx context.Context, challengeID, flag string)
 		return &agent.CTFSubmitResult{Verdict: "duplicate", Detail: "并发提交：已由另一条请求先记录"}, nil
 	}
 
-	// ④ 判对 → 收敛全任务（只在这里做，调度器不猜"解出没解出"）
-	if accepted && c.converge != nil {
-		c.converge("flag 已通过平台判题：" + flag)
+	// ④ 判对 → 记进逐题进度 + 收敛全任务（只在这里做，调度器不猜"解出没解出"）
+	if accepted {
+		if c.onAccept != nil {
+			c.onAccept(challengeID)
+		}
+		if c.converge != nil {
+			c.converge("flag 已通过平台判题：" + flag)
+		}
 	}
 	return &agent.CTFSubmitResult{Verdict: verdict, Detail: "判题后端：" + c.judge.Name(), Raw: raw}, nil
 }
@@ -179,7 +187,8 @@ func (s *Server) ctfSubmitterFor(t *Task) agent.CTFSubmitter {
 		converge = func(cause string) { s.engine.ConvergeTask(taskID, cause) }
 	}
 	// s.engine 为 nil 只出现在测试/装配早期；判题与去重照常工作，只是不收敛（不 panic）。
-	return &ctfSubmitter{pg: s.m.pg, judge: judge, taskID: taskID, converge: converge}
+	onAccept := func(challengeID string) { s.markCTFSolvedOnAccept(t.ID, challengeID) }
+	return &ctfSubmitter{pg: s.m.pg, judge: judge, taskID: taskID, converge: converge, onAccept: onAccept}
 }
 
 // buildCTFJudge 解析判题模式与参数。优先级：settings（任务级） > 环境变量 > 默认 offline。

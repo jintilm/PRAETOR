@@ -55,6 +55,7 @@ type ToolSet struct {
 	findingVerifier FindingVerifier    // nil = 未启用确定性验证
 	ctfSubmitter    CTFSubmitter       // nil = 未配置判题后端（ctf_submit 会明确报不可用）
 	ctfChallenge    CTFChallengeSource // nil = 未配置题面来源（ctf_challenge 会明确报不可用）
+	ctfBoard        CTFBoardProvider   // nil = 未配置题目看板（ctf_board 会明确报不可用）
 	as              *db.AssetStore     // asset store (optional; nil = asset tools not available)
 	cs              *db.CompanyStore   // company store (optional)
 	ts              *db.ExplorationStore

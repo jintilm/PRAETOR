@@ -24,7 +24,35 @@ type ctfTaskConfigReq struct {
 func (s *Server) registerCTFRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/tasks/{id}/ctf", s.putTaskCTFConfig)
 	mux.HandleFunc("GET /api/tasks/{id}/ctf", s.getTaskCTFConfig)
+	mux.HandleFunc("GET /api/tasks/{id}/ctf/board", s.getTaskCTFBoard)
 	mux.HandleFunc("GET /api/ctf/submissions", s.listCTFSubmissions)
+}
+
+// getTaskCTFBoard 返回「先做哪题、什么时候放弃」的当前结论（P2-6）。
+//
+// 与工具 ctf_board 同一份计算：面板上看到的顺序就是模型看到的顺序，
+// 否则"人以为它在做 A、其实它在磨 B"这种偏差根本没法解释。
+func (s *Server) getTaskCTFBoard(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "任务不存在")
+		return
+	}
+	if t.Domain != string(domain.CTF) {
+		writeErr(w, 400, fmt.Sprintf("任务 %s 的领域是 %q，只有 ctf 任务有题目看板", t.ID, t.Domain))
+		return
+	}
+	kit, ok := s.ctfKitFor(t)
+	if !ok {
+		writeErr(w, 400, "本任务没有配置题面来源（离线需设 ctf.challenge_dir 或 PRAETOR_CTF_CHALLENGE_DIR；在线需配 CTFd）")
+		return
+	}
+	board, err := kit.Board(r.Context())
+	if err != nil {
+		writeErr(w, 500, "计算看板失败："+err.Error())
+		return
+	}
+	writeJSON(w, 200, board)
 }
 
 // putTaskCTFConfig 写入任务的 CTF 判分/题面配置。

@@ -189,6 +189,26 @@ ALTER TABLE ctf_submissions ADD COLUMN IF NOT EXISTS task_id BIGINT;
 CREATE INDEX IF NOT EXISTS idx_ctf_submissions_challenge ON ctf_submissions(challenge_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ctf_submissions_task ON ctf_submissions(task_id, created_at DESC);
 
+-- CTF 逐题进度（P2-6）：「先做哪题、什么时候放弃」的决策依据与留痕。
+--
+-- 为什么不是内存态：决策要跨轮次、跨重启成立（模型换一轮、进程重启后都得知道
+-- "这题已经放弃了/已经花了多少"）。放内存里等于每次重启都重新乐观一遍，把预算
+-- 反复扔进同一道废题。
+--
+-- base_tokens 是激活那一刻的任务累计 tokens；当前花费 = 任务累计 - base_tokens，
+-- 这样不需要为每道题单独记一份账（账本只有任务级）。
+CREATE TABLE IF NOT EXISTS ctf_progress (
+    task_id      BIGINT NOT NULL,
+    challenge_id TEXT   NOT NULL,
+    state        TEXT   NOT NULL DEFAULT 'new',  -- new | active | solved | abandoned
+    reason       TEXT   NOT NULL DEFAULT '',     -- 放弃原因（保留"上次为什么放弃"）
+    spent_tokens BIGINT NOT NULL DEFAULT 0,      -- 放弃/解出时冻结的花费
+    base_tokens  BIGINT NOT NULL DEFAULT 0,      -- 激活时的任务累计 tokens
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (task_id, challenge_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ctf_progress_task ON ctf_progress(task_id, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS exploration_nodes (
     id             BIGSERIAL PRIMARY KEY,
     exploration_id BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -33,12 +34,31 @@ type CTFChallenge struct {
 	Truncated   bool               `json:"truncated,omitempty"`
 }
 
-// CTFChallengeSource 拉取题面并把附件落盘。
+// CTFChallengeMeta 是题目清单里的一条（决策看板的输入，**不含题面正文**）。
+//
+// 看板只需要"这题值多少分、多少人解出、大概多贵"，题面正文由 ctf_challenge 单独拉——
+// 两者分开是因为看板会被反复调用，而题面只该读一次。
+type CTFChallengeMeta struct {
+	ID       string
+	Name     string
+	Category string
+	Points   int // 分值；0 = 未知
+	Solves   int // 解出人数；<=0 = 未知（CTFd 的 "solves" 字段）
+	// EstTokens 是题库作者给出的单题成本预估（可选）；0 = 用分类基线。
+	EstTokens int64
+}
+
+// ErrListUnsupported 表示该来源不支持列举题目（例如只给了一个单题目录）。
+var ErrListUnsupported = errors.New("该题面来源不支持列举题目")
+
+// CTFChallengeSource 拉取题面并把附件落盘，并可以列举题目清单。
 //
 // 抽成接口的理由与 submitter 相同：离线（题库/本地目录）与 CTFd 两套来源要能互换，
 // 而工具本身不该知道 HTTP 细节；测试也能注入假实现把"只回摘要不回正文"锁死。
 type CTFChallengeSource interface {
 	Fetch(ctx context.Context, challengeID string) (*CTFChallenge, error)
+	// List 返回题目清单（决策看板用）。不支持列举时返回 ErrListUnsupported。
+	List(ctx context.Context) ([]CTFChallengeMeta, error)
 }
 
 // SetCTFChallengeSource 注入题面来源（nil = 工具明确报不可用）。
