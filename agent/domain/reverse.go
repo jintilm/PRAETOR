@@ -148,8 +148,12 @@ func ReverseRecipes() []Recipe {
 			Returns: "编译器/加壳器判定与依据（配合段熵）；判定为壳时给出脱壳建议"},
 		{Name: "trace", Upstream: "gdb", License: "GPL-3.0", Needs: []string{"gdb"},
 			Returns: "指定函数的动态调用序列与关键寄存器/返回值（gdb batch，只输出序列不输出全文）"},
-		{Name: "mobile", Upstream: "iBotPeaches/Apktool + skylot/jadx", License: "Apache-2.0", Needs: []string{"apktool", "jadx"},
-			Returns: "APK 解包结果摘要：清单关键项、入口 Activity、类名清单（分页），不返回反编译全文"},
+		// Needs 只写 apktool：jadx 只决定"Java 源码还是 smali"的可读性，
+		// 不装也能拿到清单、类名与单类 smali。把可选增强写成硬依赖，
+		// 等于让没装 200MB jadx 的机器整条配方不可用 —— 可读性问题不该变成阻断。
+		{Name: "mobile", Upstream: "iBotPeaches/Apktool（jadx 可选）", License: "Apache-2.0", Needs: []string{"apktool"},
+			Returns: "APK 解包摘要：清单关键项、入口 Activity、类名清单（分页，不返回反编译全文）；" +
+				"select=类名时回该类的 Java（装了 jadx）或 smali 源码"},
 	}
 }
 

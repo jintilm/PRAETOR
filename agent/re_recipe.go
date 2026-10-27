@@ -34,6 +34,8 @@ const (
 	reRecipeRawCap    = 4 << 20 // 单条命令最多收多少输出
 	reRecipeTimeout   = 90 * time.Second
 	reRecipeHeadless  = 10 * time.Minute // Ghidra headless 启动就要几十秒
+	reRecipeTrace     = 120 * time.Second
+	reRecipeMobile    = 5 * time.Minute
 )
 
 // reRecipe 描述一条配方怎么执行：单命令 + 分页规则。
@@ -41,7 +43,10 @@ const (
 // 命令是 argv 切片而不是 shell 字符串：配方参数来自模型，拼 shell 等于把样本名
 // 变成命令注入入口（样本名完全可能是 `x; rm -rf ~`）。
 type reRecipe struct {
-	argv    func(target, sel string) ([]string, error)
+	argv func(target, sel string) ([]string, error)
+	// run 用于"一条命令不够"或需要清理的配方（mobile 要解包、trace 要授权检查）。
+	// 与 argv 二选一：两条路都保持"单次外部调用 + 确定性输出"的纪律。
+	run     func(ctx context.Context, target, sel string) (string, error)
 	perPage int           // 每页行数
 	limit   int           // 单次返回字节上限
 	timeout time.Duration // 单次执行超时
@@ -164,6 +169,34 @@ func reRecipeRun(recipe string) (reRecipe, bool) {
 				return []string{"diec", target}, nil
 			},
 		}, true
+	case "trace":
+		return reRecipe{
+			perPage: reRecipePageLines, limit: reRecipePageBytes, timeout: reRecipeTrace,
+			run: func(ctx context.Context, target, sel string) (string, error) {
+				if err := requireDynamic(); err != nil {
+					return "", err
+				}
+				if strings.TrimSpace(sel) == "" {
+					return "", errors.New("trace 需要 select：函数名或地址")
+				}
+				// batch + -nx：不读 ~/.gdbinit（用户配置会让输出不可复现）。
+				// 断在目标函数上只取调用栈与关键寄存器 —— 配方契约是"只回序列不回全文"。
+				argv := []string{"gdb", "-q", "-batch", "-nx",
+					"-ex", "set pagination off", "-ex", "set confirm off",
+					"-ex", "break " + sel, "-ex", "run",
+					"-ex", "bt 20", "-ex", "info registers rsp rbp rip", "-ex", "kill",
+					target,
+				}
+				return reRecipeExec(ctx, argv, reRecipeTrace)
+			},
+		}, true
+	case "mobile":
+		return reRecipe{
+			perPage: reRecipePageLines, limit: reRecipePageBytes, timeout: reRecipeMobile,
+			run: func(ctx context.Context, target, sel string) (string, error) {
+				return runMobile(ctx, target, sel)
+			},
+		}, true
 	}
 	return reRecipe{}, false
 }
@@ -202,6 +235,15 @@ func (t *ToolSet) reRecipe() actool.CoreTool {
 			if _, ok := domainRecipe(name); !ok {
 				return actool.Errorf(fmt.Sprintf("没有配方 %q；可用：%s", name, strings.Join(names, "/"))), nil
 			}
+			// 样本库形态（sha256:…）先解密成临时文件，之后一律按普通路径处理。
+			// 放在 stat 之前：样本库里本来就没有这个"路径"，先 stat 必然 ENOENT，
+			// 报错还会误导成"文件不存在"，而不是"样本库没配"。
+			target, cleanupTarget, err := resolveSampleTarget(target)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			defer cleanupTarget()
+
 			fi, err := os.Stat(target)
 			if err != nil {
 				return actool.Errorf("读不到样本：" + err.Error()), nil
@@ -215,12 +257,6 @@ func (t *ToolSet) reRecipe() actool.CoreTool {
 				payload, _ := json.Marshal(map[string]any{"path": target})
 				return (&ToolSet{}).reTriage().Call(ctx, payload, nil)
 			}
-			// trace/mobile 属 P3-5（动态/移动），这里明确说"还没落地"，
-			// 不要伪装成"缺依赖" —— 那是两件不同的环境事实。
-			if name == "trace" || name == "mobile" {
-				return actool.Errorf(fmt.Sprintf("配方 %q 属 P3-5（动态/移动），尚未落地；"+
-					"静态方向请先用 triage / disasm / xrefs", name)), nil
-			}
 
 			spec, ok := reRecipeRun(name)
 			if !ok {
@@ -232,11 +268,17 @@ func (t *ToolSet) reRecipe() actool.CoreTool {
 					strings.Join(miss, "、"), hintsFor(miss))), nil
 			}
 
-			argv, err := spec.argv(target, strings.TrimSpace(a.Select))
-			if err != nil {
-				return actool.Errorf(err.Error()), nil
+			var out string
+			var runErr error
+			if spec.run != nil {
+				out, runErr = spec.run(ctx, target, strings.TrimSpace(a.Select))
+			} else {
+				argv, aerr := spec.argv(target, strings.TrimSpace(a.Select))
+				if aerr != nil {
+					return actool.Errorf(aerr.Error()), nil
+				}
+				out, runErr = reRecipeExec(ctx, argv, spec.timeout)
 			}
-			out, runErr := reRecipeExec(ctx, argv, spec.timeout)
 			if runErr != nil && strings.TrimSpace(out) == "" {
 				return actool.Errorf(fmt.Sprintf("配方 %s 执行失败：%v", name, runErr)), nil
 			}

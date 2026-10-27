@@ -1263,13 +1263,24 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 | `capability` | `mandiant/capa` | Apache-2.0 | `capa` | 命中的能力与地址 ≤2KB |
 | `packer` | `horsicq/Detect-It-Easy` | MIT | `diec` | 编译器/加壳判定与依据（配合段熵） |
 | `trace` | `gdb` | GPL-3.0 | `gdb` | 指定函数的动态调用序列（只输出序列，不输出全文） |
-| `mobile` | `iBotPeaches/Apktool` + `skylot/jadx` | Apache-2.0 | `apktool`、`jadx` | APK 清单关键项 + 类名清单（分页），不返回反编译全文 |
+| `mobile` | `iBotPeaches/Apktool`（jadx 可选） | Apache-2.0 | `apktool` | APK 清单关键项 + 类名清单（分页），不返回反编译全文；`select=类名` 时回该类 Java（装了 jadx）或 smali |
 
 > 选择标准只有一条：**单命令、可 JSON 化、确定性输出**。需要长交互会话、需要 GUI、或自带几百个工具的一律不进表。
 > 缺依赖时**明确报「缺 X」**，不静默降级（与沙箱 `required` 同一条纪律）。
 > 代码里 `agent/domain/reverse.go` 的 `ReverseRecipes()` 就是这张表；`TestReverseRecipeCatalogIsLean` 守着
 > 「≤10 条」和「有上游必须写许可」两条，改表会被测试拦住。
 >
+**样本治理（P3-5）**：`internal/samplestore` 是唯一允许长期持有样本的地方，四条硬规矩：
+
+- **磁盘上没有明文**：AES-256-GCM 分块加密（nonce 递增），密钥只从 `PRAETOR_SAMPLE_KEY`（64 位 hex）取。
+  缺密钥直接报错，**没有明文降级** —— 有降级就等于把样本库变成明码目录。
+- **索引以 sha256 为键**：同一份样本只存一份，分析产物（`re-triage-<sha8>.json`、`.praetor/re/…`）能稳定对回样本。
+  入库是人工动作（`go run ./cmd/samplestore -put <样本>`），不给模型决定权。
+- **工具只见路径不见字节**：`re_recipe` / `re_triage` 的 `target` 支持 `sha256:<hex>`，内部解密到临时文件，
+  `defer` 立即删除。工具的返回值永远是摘要或落盘路径，不可能是样本本身。
+- **动态执行单独授权**：`trace` 会真的 `run` 样本（可能回连、写文件），默认拒绝，
+  必须显式 `PRAETOR_RE_DYNAMIC=1`。静态配方最坏是读错文件，动态配方最坏是执行了不该执行的东西。
+
 > **按 R6：配方全是可选加速器。** 核心路径（`re_triage` 全貌解析、`re_evidence` 证据落库）**零外部依赖**，
 > 干净机器上就能用；配方缺依赖时明确报「缺 X，装法见文档」，不阻塞分析（先用 triage + 字符串/导入判断方向）。
 
@@ -1298,7 +1309,7 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 | P3-2 | `re_triage`：纯 Go 解析 PE/ELF/Mach-O（头/段表/熵/导入/字符串摘要/加壳依据） | 自研（`internal/binfmt`），字段划分参考 `lief-project/LIEF`（Apache-2.0，只读思路） | ✅ 用真实 23.6MB PE 验证：8 段/51 导入/熵/可疑 API 全部解析；摘要 **795 字节**（≤1.4KB）、JSON 落盘、零外部依赖 | ✅ 已完成 |
 | P3-3 | `re_recipe` 骨架 + 静态配方（`disasm`/`xrefs`/`decompile`/`strings`/`capability`/`packer`） | 外部进程调用 rizin / Ghidra headless / FLOSS / capa / DIE（**不复制、不链接代码**） | ✅ 6 条静态配方落地：argv 直传（不拼 shell）、缺依赖点名+装法、按行分页（60/页）、全文落盘、`page` 越界报总页数；`triage` 直接复用 `re_triage` 保证两条入口口径一致；`trace`/`mobile` 明确报「属 P3-5 未落地」而不是假装缺依赖 | ✅ 已完成 |
 | P3-4 | `re_evidence` + 证据链闭环：`db.KindEvidence` 节点 + 调 `domain.Reverse.Verifier()` 判定 + `WriteCounts.Evidence` | 自研（规则只有一份：直接复用领域判定器，不在工具里重写） | ✅ 工具注册在 worker；claim/ref 必填硬校验；ref 是文件则哈希**内容**、否则哈希引用串并标注来源；判定不通过也落库但 state=inferred 且返回 `chain_ok=false`+hint | ✅ 已完成（含真库集成测试） |
-| P3-5 | 动态/移动配方（`trace`/`mobile`）+ 样本治理（加密存储、哈希索引、禁止整包进 LLM） | 自研（合规要求） | 请求日志里无完整样本；`trace` 只回调用序列 | 待做 |
+| P3-5 | 动态/移动配方（`trace`/`mobile`）+ 样本治理（加密存储、哈希索引、禁止整包进 LLM） | 自研（合规要求） | ✅ `trace` 默认拒绝、需 `PRAETOR_RE_DYNAMIC=1` 授权，gdb `-batch -nx` 只回 `bt`+关键寄存器；`mobile` 走 apktool 解包出清单/类名/单类代码，jadx 可选（没装退 smali）；`internal/samplestore` AES-256-GCM + sha256 索引，工具只接受 `sha256:<hex>` 并解密到临时文件（用完即删），样本字节不进上下文 | ✅ 已完成 |
 
 **域级验收口径**：一道中等难度 rev 题 —— **input ≤ 300K tokens、调用 ≤ 40 次、结论有 xref 或 trace 支撑**。
 
