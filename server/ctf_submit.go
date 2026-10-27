@@ -171,6 +171,37 @@ func (c *ctfSubmitter) SubmitFlag(ctx context.Context, challengeID, flag string)
 
 // ctfSubmitterFor 按任务构造提交后端；不是 CTF 域或未配置判题则返回 nil
 // （工具会明确报"不可用"，而不是静默成功）。
+// liveSubmitter 每次提交时重新解析判题后端。
+//
+// 与 ctfBoardProvider.source() 同一个理由：worker 的依赖在 bundle 构建时注入一次，
+// 而 bundle 是进程内单例。若在那一刻把 submitter 定成 nil（"当时还没配 expected_flag"），
+// 之后再配也永远用不上——现象是模型解出了 flag 却说 ctf_submit 不可用。
+type liveSubmitter struct {
+	s      *Server
+	taskID string
+}
+
+func (l liveSubmitter) SubmitFlag(ctx context.Context, challengeID, flag string) (*agent.CTFSubmitResult, error) {
+	t, ok := l.s.m.Task(l.taskID)
+	if !ok || t == nil {
+		return nil, fmt.Errorf("任务 %s 不存在", l.taskID)
+	}
+	sub := l.s.ctfSubmitterFor(t)
+	if sub == nil {
+		return nil, fmt.Errorf(
+			"本任务没有可用的判题后端（offline 模式需设 settings ctf.expected_flag.%s 或 PRAETOR_CTF_EXPECTED_FLAG）", l.taskID)
+	}
+	return sub.SubmitFlag(ctx, challengeID, flag)
+}
+
+// liveCTFSubmitter 给 worker 注入"永远存在"的提交句柄；非 ctf 域返回 nil。
+func (s *Server) liveCTFSubmitter(t *Task) agent.CTFSubmitter {
+	if s == nil || t == nil || t.Domain != "ctf" {
+		return nil
+	}
+	return liveSubmitter{s: s, taskID: t.ID}
+}
+
 func (s *Server) ctfSubmitterFor(t *Task) agent.CTFSubmitter {
 	if t == nil || t.Domain != "ctf" {
 		return nil

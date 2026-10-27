@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -43,12 +44,109 @@ type PerTaskConfig struct {
 	IdleTTL       time.Duration // 空闲回收阈值，默认 30m
 	LabelPrefix   string        // 容器标签前缀，用于批量清理；默认 praetor.task
 	Command       string        // 容器常驻命令，默认 sleep infinity
+	// ImageFor 按任务选镜像；nil 或返回空 = 用 Image。
+	//
+	// 为什么镜像要按任务选：CTF 域需要 pwntools/gdb/rizin 这套工具链（约 700MB），
+	// 而渗透域不需要 —— 让所有人都背上它，等于每次冷启动都多等一倍。镜像选择是**领域**
+	// 的属性，领域又只有任务知道，所以决策由上层注入，这里只负责用。
+	ImageFor func(taskID string) string
+	// MountFor 返回该任务额外的只读挂载（题面附件、题库目录等）；nil = 不挂。
+	//
+	// 为什么必须由上层注入：附件放在哪里是**题面来源**的知识（离线题库目录 vs CTFd
+	// 下载目录），沙箱只该知道"挂哪个宿主目录到哪个容器路径"。
+	// 不挂的后果不是"读不到文件"这么轻——模型会拿到一串宿主绝对路径，
+	// 在容器里 `ls` 全部 ENOENT，然后得出"题目附件缺失"，转而自己编题。
+	MountFor func(taskID string) []Mount
+}
+
+// Mount 是一个额外挂载。
+//
+// ReadOnly 默认该为 true：题面附件是**输入**，模型的任务不是改题库。
+// 只有确实需要写回的场景（比如共享产物目录）才放开。
+type Mount struct {
+	Source   string // 宿主绝对路径
+	Target   string // 容器内绝对路径
+	ReadOnly bool
+}
+
+// spec 转成 docker -v 的写法。Windows 上源路径也必须是正斜杠（E:/x 可以，E:\x 不行）。
+func (m Mount) spec() string {
+	s := filepath.ToSlash(m.Source) + ":" + m.Target
+	if m.ReadOnly {
+		s += ":ro"
+	}
+	return s
+}
+
+// mountsFor 解析该任务的额外挂载并做三项兜底：
+// 相对路径展开（否则 docker 会把 `./x` 当卷名，见 NewPerTask 的同类注释）、
+// 宿主目录不存在就跳过（挂一个不存在的路径会直接让 create 失败，
+// 而"题面来源没配"是常见状态，不该让整个沙箱不可用）、目标路径必须是绝对路径。
+func (p *PerTaskRunner) mountsFor(taskID string) []Mount {
+	if p.cfg.MountFor == nil {
+		return nil
+	}
+	var out []Mount
+	seen := map[string]bool{}
+	for _, m := range p.cfg.MountFor(taskID) {
+		src := strings.TrimSpace(m.Source)
+		tgt := strings.TrimSpace(m.Target)
+		if src == "" || tgt == "" || !strings.HasPrefix(tgt, "/") {
+			continue
+		}
+		if abs, err := filepath.Abs(src); err == nil {
+			src = abs
+		}
+		if !isDir(src) {
+			continue
+		}
+		if seen[src+">"+tgt] {
+			continue
+		}
+		seen[src+">"+tgt] = true
+		out = append(out, Mount{Source: src, Target: tgt, ReadOnly: m.ReadOnly})
+	}
+	return out
+}
+
+// isDir 判断路径是不是一个存在的目录；不存在/不可读一律 false。
+func isDir(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
+}
+
+// mountKey 把挂载集合压成一个可比较的指纹。
+//
+// 与镜像同理：容器一旦建成，挂载集合就固定了。题面目录变了（换了题、或从"没配"
+// 变成"配了"）却复用旧容器，表现是"明明配了题目，容器里 /chal 却是空的"。
+func mountKey(ms []Mount) string {
+	if len(ms) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(ms))
+	for _, m := range ms {
+		parts = append(parts, m.spec())
+	}
+	return strings.Join(parts, ",")
+}
+
+// imageFor 解析该任务该用哪个镜像。空返回 = 用默认镜像（上层没装镜像路由时）。
+func (p *PerTaskRunner) imageFor(taskID string) string {
+	if p.cfg.ImageFor != nil {
+		if img := strings.TrimSpace(p.cfg.ImageFor(taskID)); img != "" {
+			return img
+		}
+	}
+	return p.cfg.Image
 }
 
 type taskBox struct {
 	container string
 	hostDir   string
 	lastUsed  time.Time
+	// mountKey 是创建该容器时实际使用的挂载指纹；空 = 当时没有任何额外挂载。
+	// 复用时比对它，不同就重建容器（详见 mountKey 的注释）。
+	mountKey string
 	// mu 串行化「同一任务的创建」，避免两个并发 Exec 各建一个容器。
 	mu sync.Mutex
 }
@@ -57,6 +155,15 @@ type taskBox struct {
 func NewPerTask(cfg PerTaskConfig) *PerTaskRunner {
 	if cfg.ContainerRoot == "" {
 		cfg.ContainerRoot = "/work"
+	}
+	// 宿主工作目录必须是**绝对路径**：`docker -v 相对路径:/work` 会把相对路径当卷名，
+	// 于是每一条 Bash 都以 "invalid volume specification" 失败，而错误发生在 create 阶段，
+	// 表现为"沙箱完全不可用"——但真正的原因只是一个没展开的 `.`。
+	// 配置里写 `./data/work` 是很自然的事（.env 里就是这么写的），所以在这里兜底。
+	if cfg.HostWorkRoot != "" {
+		if abs, err := filepath.Abs(cfg.HostWorkRoot); err == nil {
+			cfg.HostWorkRoot = abs
+		}
 	}
 	if cfg.IdleTTL <= 0 {
 		cfg.IdleTTL = 30 * time.Minute
@@ -241,20 +348,49 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 	defer box.mu.Unlock()
 	box.lastUsed = p.now()
 
-	if exists, err := p.containerExists(ctx, box.container); err != nil {
+	image := p.imageFor(key)
+	mounts := p.mountsFor(key)
+	mk := mountKey(mounts)
+	exists, current, err := p.containerState(ctx, box.container)
+	if err != nil {
 		return nil, err
-	} else if exists {
-		return box, nil
+	}
+	if exists {
+		// 镜像换了就换容器：否则"上一轮用基础镜像建的容器"会让新镜像永远用不上
+		// （容器还在就直接 exec），现象是"装了工具却找不到"，且只在重启后才诡异地好了。
+		// 挂载同理：题面目录从"没配"变成"配了"时，旧容器里没有 /chal，模型会看到空目录。
+		if sameImage(current, image) && box.mountKey == mk {
+			return box, nil
+		}
+		if err := p.removeContainer(ctx, box.container); err != nil {
+			return nil, err
+		}
 	}
 
+	// 领域专用镜像还没构建时，明确报出来（而不是让 docker 回一句 "Unable to find image"）：
+	// 这类任务缺的是 pwntools/gdb 这类"没有就基本做不了"的工具，
+	// 静默回落基础镜像会让模型在 Bash 里逐个试探，然后得出"解不出"。
+	if image != p.cfg.Image {
+		if _, _, code, ierr := p.exec(ctx, []string{"image", "inspect", image}, ""); ierr == nil && code != 0 {
+			return nil, fmt.Errorf(
+				"sandbox: 该任务所属领域需要镜像 %q，但它还没构建：先在组件面板应用对应预置，"+
+					"或 `docker build` 出该 tag 后重试", image)
+		}
+	}
+
+	// docker 的 -v 在 Windows 上也要求正斜杠源路径（E:/x 可以，E:\x 不行）。
 	args := []string{
 		"run", "-d",
 		"--name", box.container,
 		"--label", p.cfg.LabelPrefix + "=" + key,
 		"--workdir", p.cfg.ContainerRoot,
-		// docker 的 -v 在 Windows 上也要求正斜杠源路径（E:/x 可以，E:\x 不行）。
 		"-v", filepath.ToSlash(box.hostDir) + ":" + p.cfg.ContainerRoot,
 		"--security-opt", "no-new-privileges:true",
+	}
+	// 额外挂载放在工作目录之后：工作目录是"模型的草稿纸"，附件是"只读输入"，
+	// 顺序本身没有语义，但把只读的放后面读起来更清楚。
+	for _, m := range mounts {
+		args = append(args, "-v", m.spec())
 	}
 	if p.cfg.Network != "" {
 		args = append(args, "--network", p.cfg.Network)
@@ -262,7 +398,7 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 	for _, e := range p.cfg.Env {
 		args = append(args, "-e", e)
 	}
-	args = append(args, p.cfg.Image, "sh", "-lc", p.cfg.Command)
+	args = append(args, image, "sh", "-lc", p.cfg.Command)
 
 	_, stderr, code, err := p.exec(ctx, args, "")
 	if err != nil {
@@ -271,15 +407,49 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 	if code != 0 {
 		return nil, fmt.Errorf("sandbox: 创建任务容器失败: %s", strings.TrimSpace(stderr))
 	}
+	box.mountKey = mk
 	return box, nil
 }
 
 func (p *PerTaskRunner) containerExists(ctx context.Context, name string) (bool, error) {
-	_, _, code, err := p.exec(ctx, []string{"container", "inspect", name}, "")
+	ok, _, err := p.containerState(ctx, name)
+	return ok, err
+}
+
+// containerState 一次 inspect 同时回答「在不在」和「用的哪个镜像」。
+//
+// 合起来做是因为这两个问题永远一起问：只问在不在，就会把"镜像换了但容器还在"
+// 当成可复用；分开再问一次又白白多起一个进程。
+func (p *PerTaskRunner) containerState(ctx context.Context, name string) (bool, string, error) {
+	out, _, code, err := p.exec(ctx, []string{"container", "inspect", "--format", "{{.Config.Image}}", name}, "")
 	if err != nil {
-		return false, fmt.Errorf("sandbox: inspect 失败: %w", err)
+		return false, "", fmt.Errorf("sandbox: inspect 失败: %w", err)
 	}
-	return code == 0, nil
+	if code != 0 {
+		return false, "", nil
+	}
+	return true, strings.TrimSpace(out), nil
+}
+
+// sameImage 容忍 tag 与 digest 两种写法：inspect 返回的是创建时给的字符串，
+// 而落盘的 tag 可能带/不带 registry 前缀（docker 会补 index.docker.io/library/）。
+func sameImage(have, want string) bool {
+	if have == "" || want == "" {
+		return have == want
+	}
+	return have == want || strings.HasSuffix(have, "/"+want) || strings.HasSuffix(want, "/"+have)
+}
+
+// removeContainer 删除任务容器（镜像变更时用）。
+func (p *PerTaskRunner) removeContainer(ctx context.Context, name string) error {
+	_, stderr, code, err := p.exec(ctx, []string{"rm", "-f", name}, "")
+	if err != nil {
+		return fmt.Errorf("sandbox: 删除旧容器失败: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("sandbox: 删除旧容器失败: %s", strings.TrimSpace(stderr))
+	}
+	return nil
 }
 
 var unsafeNameChars = regexp.MustCompile(`[^a-zA-Z0-9_.-]+`)

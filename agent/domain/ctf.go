@@ -206,30 +206,40 @@ type CTFToolchainItem struct {
 	License  string // 许可；"未标注" = GitHub 未能识别，按外部调用处理
 	Base     bool   // 是否进基础镜像
 	Why      string // 解决什么问题（给 P2-3 构建镜像的人看）
+	// Component 是「可选组件」清单（internal/components）里的 ID。
+	//
+	// 这是本表与镜像之间的**唯一切口**：声明写了什么，镜像就必须装什么。
+	// 只写名字不写 ID 的话，两边会漂移，表现是「文档说镜像里有 pwntools、实际没有」——
+	// `server/ctf_toolchain_test.go` 会拿它逐项核对清单。
+	Component string
 }
 
 // CTFToolchain 返回沙箱镜像的 CLI 清单（有序，供镜像构建与文档共用）。
 func CTFToolchain() []CTFToolchainItem {
 	return []CTFToolchainItem{
 		// pwn：交互 + 调试 + gadget
-		{Name: "python3+pwntools", Category: "pwn", Upstream: "Gallopsled/pwntools", License: "未标注", Base: true, Why: "远程交互、打包解包、ELF 解析"},
-		{Name: "gdb", Category: "pwn", Upstream: "GNU binutils", License: "GPL-3.0", Base: true, Why: "动态调试基线"},
-		{Name: "pwndbg", Category: "pwn", Upstream: "pwndbg/pwndbg", License: "MIT", Base: true, Why: "gdb 增强：堆可视化、栈回溯"},
-		{Name: "ROPgadget", Category: "pwn", Upstream: "JonathanSalwan/ROPgadget", License: "未标注", Base: true, Why: "gadget 搜索"},
-		{Name: "seccomp-tools", Category: "pwn", Upstream: "david942j/seccomp-tools", License: "MIT", Base: true, Why: "沙箱规则分析（判断能否 execve）"},
+		// pwntools 走发行版包（python3-pwntools）：pip 版要现场编译原生依赖，
+		// 而基础镜像的系统解释器是 Python 3.14。
+		{Name: "pwntools", Category: "pwn", Upstream: "Gallopsled/pwntools", License: "未标注", Base: true, Why: "远程交互、打包解包、ELF 解析", Component: "pwntools"},
+		{Name: "gdb", Category: "pwn", Upstream: "GNU binutils", License: "GPL-3.0", Base: true, Why: "动态调试基线", Component: "gdb"},
+		// 原定 pwndbg：实测既不在 Kali 源、也不在内网 pip 源里，装不上；
+		// GEF 提供同类的堆/栈/寄存器可视化，且是发行版包（可复现）。
+		{Name: "gef", Category: "pwn", Upstream: "hugsy/gef", License: "MIT", Base: true, Why: "gdb 增强：堆可视化、栈回溯", Component: "gef"},
+		{Name: "ROPgadget", Category: "pwn", Upstream: "JonathanSalwan/ROPgadget", License: "未标注", Base: true, Why: "gadget 搜索", Component: "ropgadget"},
+		{Name: "seccomp-tools", Category: "pwn", Upstream: "david942j/seccomp-tools", License: "MIT", Base: true, Why: "沙箱规则分析（判断能否 execve）", Component: "seccomp-tools"},
 		// rev：反汇编 + 固件/文件拆解
-		{Name: "rizin", Category: "rev", Upstream: "rizinorg/rizin", License: "LGPL-3.0", Base: true, Why: "反汇编/交叉引用（脚本化）"},
-		{Name: "binwalk", Category: "rev", Upstream: "ReFirmLabs/binwalk", License: "MIT", Base: true, Why: "固件/嵌套文件识别与提取"},
+		{Name: "rizin", Category: "rev", Upstream: "rizinorg/rizin", License: "LGPL-3.0", Base: true, Why: "反汇编/交叉引用（脚本化）", Component: "rizin"},
+		{Name: "binwalk", Category: "rev", Upstream: "ReFirmLabs/binwalk", License: "MIT", Base: true, Why: "固件/嵌套文件识别与提取", Component: "binwalk"},
 		// crypto：约束求解 + 自动解码
-		{Name: "z3", Category: "crypto", Upstream: "Z3Prover/z3", License: "未标注", Base: true, Why: "位运算/线性约束求解"},
-		{Name: "ciphey", Category: "crypto", Upstream: "ciphey/ciphey", License: "MIT", Base: true, Why: "常见编码/古典密码自动识别"},
-		{Name: "angr", Category: "crypto", Upstream: "Angr/angr", License: "BSD-2-Clause", Base: false, Why: "符号执行（体积大，按需装）"},
-		{Name: "sage", Category: "crypto", Upstream: "sagemath/sage", License: "GPL-3.0", Base: false, Why: "格/数论（体积数 GB，按需装）"},
+		{Name: "z3", Category: "crypto", Upstream: "Z3Prover/z3", License: "未标注", Base: true, Why: "位运算/线性约束求解", Component: "z3"},
+		{Name: "ciphey", Category: "crypto", Upstream: "ciphey/ciphey", License: "MIT", Base: true, Why: "常见编码/古典密码自动识别", Component: "ciphey"},
+		{Name: "angr", Category: "crypto", Upstream: "Angr/angr", License: "BSD-2-Clause", Base: false, Why: "符号执行（体积大，按需装）", Component: "angr"},
+		{Name: "sage", Category: "crypto", Upstream: "sagemath/sage", License: "GPL-3.0", Base: false, Why: "格/数论（体积数 GB，按需装）", Component: "sage"},
 		// forensics：流量/隐写/内存
-		{Name: "tshark", Category: "forensics", Upstream: "wireshark/wireshark", License: "GPL-2.0", Base: true, Why: "pcap 解析与字段提取"},
-		{Name: "zsteg", Category: "forensics", Upstream: "zed-0xff/zsteg", License: "未标注", Base: true, Why: "PNG/BMP LSB 隐写"},
-		{Name: "exiftool", Category: "forensics", Upstream: "exiftool/exiftool", License: "未标注", Base: true, Why: "元数据（隐写第一顺位）"},
-		{Name: "volatility3", Category: "forensics", Upstream: "volatilityfoundation/volatility3", License: "未标注", Base: false, Why: "内存镜像分析（按需装）"},
+		{Name: "tshark", Category: "forensics", Upstream: "wireshark/wireshark", License: "GPL-2.0", Base: true, Why: "pcap 解析与字段提取", Component: "tshark"},
+		{Name: "zsteg", Category: "forensics", Upstream: "zed-0xff/zsteg", License: "未标注", Base: true, Why: "PNG/BMP LSB 隐写", Component: "zsteg"},
+		{Name: "exiftool", Category: "forensics", Upstream: "exiftool/exiftool", License: "未标注", Base: true, Why: "元数据（隐写第一顺位）", Component: "exiftool"},
+		{Name: "volatility3", Category: "forensics", Upstream: "volatilityfoundation/volatility3", License: "未标注", Base: false, Why: "内存镜像分析（按需装）", Component: "volatility3"},
 	}
 }
 

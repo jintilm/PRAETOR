@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -68,6 +69,13 @@ type Worker struct {
 	// (0 = unlimited). When it fires, the run is cut and a settlement round is
 	// forced so already-identified facts get written back instead of being lost.
 	runTimeout time.Duration
+	// 沙箱容器内的任务工作根（如 /work）；空 = Bash 在宿主执行。
+	//
+	// 为什么需要它：宿主侧的 runDir 是 <data>/tasks/<taskID>/i<intentID>，而容器只挂了
+	// <data>/work/<taskID> -> /work —— 两棵树毫无对应。把宿主路径写进系统提示词，
+	// 模型开局第一件事就是 `cd E:\...\tasks\25\i141`，必然失败，然后它会在
+	// /work 和那个不存在的路径之间反复试探，白白烧掉几轮上下文。
+	sandboxWorkRoot string
 	// extraTools are host-provided tools (e.g. traffic query, oast) appended to
 	// the worker's graph write-back tools.
 	// domain 是任务领域（pentest/reverse/ctf），用于裁剪 worker 工具面。
@@ -128,6 +136,26 @@ func (w *Worker) SetDomain(domainKey string) { w.domain = domainKey }
 
 // SetCTFSubmitter 注入 CTF 判题后端（nil = ctf_submit 明确报不可用）。
 func (w *Worker) SetCTFSubmitter(s CTFSubmitter) { w.ctfSubmitter = s }
+
+// SetSandboxWorkRoot 告知"Bash 跑在容器里、容器内的任务工作根在哪"（如 /work）。
+//
+// 传空 = 宿主执行，提示词继续用宿主绝对路径。由装配层按沙箱实际状态注入，
+// 不要在 agent 内部猜环境——猜错的方向有两种，都会让模型拿到打不开的路径。
+func (w *Worker) SetSandboxWorkRoot(dir string) { w.sandboxWorkRoot = strings.TrimSpace(dir) }
+
+// promptRunDir 返回**写进系统提示词**的工作目录。
+//
+// 容器模式下映射到 <sandboxWorkRoot>/i<intentID>：容器里只挂了任务的工作根，
+// 宿主 tasks/<id>/i<id> 那棵树根本不存在（详见 sandboxWorkRoot 字段的注释）。
+func (w *Worker) promptRunDir(runDir string, intentID int64) string {
+	if w.sandboxWorkRoot == "" {
+		return runDir
+	}
+	if intentID <= 0 {
+		return w.sandboxWorkRoot
+	}
+	return path.Join(w.sandboxWorkRoot, "i"+strconv.FormatInt(intentID, 10))
+}
 
 // SetCTFChallengeSource 注入题面来源（nil = ctf_challenge 明确报不可用）。
 func (w *Worker) SetCTFChallengeSource(s CTFChallengeSource) { w.ctfChallenge = s }
@@ -421,7 +449,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// inherit a parent run's background into the action reviewer.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
 	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
-	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, runDir)
+	sysBody := workerSystem(w.proxyAddr, w.proxyCACert, w.workDir, w.promptRunDir(runDir, intent.ID))
 	if w.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
 	}

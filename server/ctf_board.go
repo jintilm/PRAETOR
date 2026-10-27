@@ -28,24 +28,54 @@ import (
 // 为什么"取数"必须在 server：题目来源、DB、任务预算三样东西只有这层同时握得住。
 
 // ctfBoardProvider 同时实现 agent.CTFBoardProvider 与题面来源的包装（记录激活）。
+//
+// 注意它**不缓存**题面来源（早期版本缓存了 src，是个真 bug，见 source() 的注释）。
 type ctfBoardProvider struct {
 	s      *Server
 	t      *Task
-	src    agent.CTFChallengeSource
 	taskID int64
 }
 
-// ctfKitFor 构造 CTF 任务的工具依赖；不是 ctf 域或没有题面来源时返回 nil。
+// source 每次都重新解析题面来源，不缓存。
 //
-// 返回的 source 会在每次 Fetch 时把该题标为 active（并记下当时的任务用量基线），
-// 看板因此知道"现在在做哪道、这题花了多少"——不靠模型自报。
+// 为什么：agentsForTask 造出来的 worker bundle 是**进程内单例、只建不换**
+// （server/task_llm.go 的 taskAgents），而任务级题面配置（ctf.challenge_dir）是
+// **运行时可改**的。若在 bundle 构建那一刻把 source 定下来，就会分裂成：
+// 面板上 challenge_ready=true，模型调 ctf_challenge 却得到"本任务没有配置题面来源"。
+// 实测后果不是报错就完了——模型转而去 ls 宿主路径（容器里必然 ENOENT），
+// 然后判定"附件缺失"并开始自己编题，烧掉几十万 token。
+//
+// 副作用是每次 Fetch 多一次 settings 查询（单行 KV，可忽略），换来"配置改完立即生效"。
+func (p *ctfBoardProvider) source() agent.CTFChallengeSource {
+	if p == nil || p.s == nil || p.t == nil {
+		return nil
+	}
+	return p.s.ctfChallengeSourceFor(p.t)
+}
+
+// ctfKitFor 构造 CTF 任务的工具依赖；不是 ctf 域或**当前**没有题面来源时返回 nil。
+//
+// 适合"要立刻回答能不能用"的场景（API 的 challenge_ready、看板请求）。
+// 要让 worker 长期持有请用 ctfLiveKit——那个不依赖此刻是否已配置。
 func (s *Server) ctfKitFor(t *Task) (*ctfBoardProvider, bool) {
-	src := s.ctfChallengeSourceFor(t)
-	if src == nil {
+	p := s.ctfLiveKit(t)
+	if p == nil || p.source() == nil {
 		return nil, false
 	}
+	return p, true
+}
+
+// ctfLiveKit 给 worker 注入一个**永远存在**的题面句柄：是不是 ctf 域由这里定，
+// "有没有配题面来源"推迟到每次调用时判断。
+//
+// 这个区分是必要的：任务常常是"先建、跑起来、再配题目"（UI 上就是这个顺序），
+// 若注入时要求已配置，后配的配置对已经在跑的 worker 永远不生效。
+func (s *Server) ctfLiveKit(t *Task) *ctfBoardProvider {
+	if s == nil || t == nil || t.Domain != string(domain.CTF) {
+		return nil
+	}
 	id, _ := strconv.ParseInt(t.ID, 10, 64)
-	return &ctfBoardProvider{s: s, t: t, src: src, taskID: id}, true
+	return &ctfBoardProvider{s: s, t: t, taskID: id}
 }
 
 // ---- 题面来源的 List 实现 ----
@@ -56,10 +86,21 @@ func (s *Server) ctfKitFor(t *Task) (*ctfBoardProvider, bool) {
 //   - 根目录下每个子目录一道题（题库/基准常见）；
 //   - 根目录本身就是一道题（单题任务）。
 //
+// 判定顺序是"先认根、再认子目录"，顺序错了会出真问题：单题目录里通常有个
+// `files/` 附件容器目录，若先扫子目录，`files` 会被当成一道题，看板于是推荐
+// id=files —— 模型照着 ctf_challenge(id="files") 拿到的是一堆附件，题面一个字都没有。
+//
 // 可选 `meta.json` 提供分值/解出人数/预估成本（题库作者填，缺省也能跑）。
 func (s offlineChallengeSource) List(_ context.Context) ([]agent.CTFChallengeMeta, error) {
 	if !dirExists(s.root) {
 		return nil, fmt.Errorf("题面目录不存在：%s", s.root)
+	}
+	// 根目录自身带题目标识（name.txt / meta.json 等） = 这就是一道题。
+	// 用强标识判定：题库根也常放 README 说明，不能据此把整库当单题。
+	if rootHasChallengeMeta(s.root) {
+		if meta, ok := offlineMeta(s.root, filepath.Base(s.root)); ok {
+			return []agent.CTFChallengeMeta{meta}, nil
+		}
 	}
 	entries, err := os.ReadDir(s.root)
 	if err != nil {
@@ -70,18 +111,61 @@ func (s offlineChallengeSource) List(_ context.Context) ([]agent.CTFChallengeMet
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		if meta, ok := offlineMeta(filepath.Join(s.root, e.Name()), e.Name()); ok {
+		full := filepath.Join(s.root, e.Name())
+		// 只认带题目标识的子目录：<chal>/files 这种附件容器不是题。
+		if !hasChallengeMeta(full) {
+			continue
+		}
+		if meta, ok := offlineMeta(full, e.Name()); ok {
 			out = append(out, meta)
 		}
 	}
 	if len(out) == 0 {
-		// 根目录自己就是一道题
+		// 兜底：一个裸目录（只有附件、没有任何标识）——按"单题"处理，
+		// 这样手工放一个 zip 进去也能跑，不必先编 name.txt。
 		if meta, ok := offlineMeta(s.root, filepath.Base(s.root)); ok {
 			out = append(out, meta)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
+}
+
+// challengeMetaFiles 是"这个目录是一道题"的标识文件（任一存在即可认定）。
+//
+// 与 offlineMetaFiles 的区别：那个是"列附件时该跳过哪些文件"，这个是
+// "怎么判断一个目录是题目而不是附件容器"，用途不同不能合并。
+var challengeMetaFiles = []string{
+	chalNameFile, chalDescFiles, "description.md", "description.txt", "meta.json",
+}
+
+func hasChallengeMeta(dir string) bool {
+	for _, f := range challengeMetaFiles {
+		if readSmallFile(filepath.Join(dir, f)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// rootChallengeMetaFiles 是"根目录**自身**就是一道题"的强标识，特意不含 README.md。
+//
+// 为什么这里要更严：题库根目录写一份 README 说明是常见做法（本项目的 corpus
+// 就有一份）。若把 README 也算上，整个题库会被缩成"一道名叫目录名的题"，
+// 看板只显示 1 题，其余题目连列都列不出来 —— 实测就是这么暴露的。
+//
+// 反过来，子目录判定可以宽松（含 README）：`pwn-2/{README.md,chall}` 是标准题形。
+var rootChallengeMetaFiles = []string{
+	chalNameFile, chalConnFile, "description.md", "description.txt", "meta.json",
+}
+
+func rootHasChallengeMeta(dir string) bool {
+	for _, f := range rootChallengeMetaFiles {
+		if readSmallFile(filepath.Join(dir, f)) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // offlineMeta 读一道题的元信息；目录里什么都没有就返回 false（不是题）。
@@ -113,19 +197,34 @@ func offlineMeta(dir, id string) (agent.CTFChallengeMeta, bool) {
 		}
 	}
 	if !hasContent {
-		// 没有任何元信息：只要目录里还有文件就当它是题（题面/附件本身算内容）
-		if files, err := listChallengeFiles(dir, offlineMetaFiles()); err != nil || len(files) == 0 {
-			return m, false
+		// 判定与 List 同源（hasChallengeMeta）：有题目标识（README/description…）
+		// 或者有附件，都算一道题。
+		//
+		// 不能只看"除元信息外还有没有附件"：纯文本题（只有 README.md 的问答/情报题）
+		// 会被判死，而它明明是一道题。两处判据不一致时，List 列出了题、
+		// offlineMeta 却说不是题，看板就会出现"列了但点不进去"的鬼现象。
+		if !hasChallengeMeta(dir) {
+			if files, err := listChallengeFiles(dir, offlineMetaFiles()); err != nil || len(files) == 0 {
+				return m, false
+			}
 		}
 	}
 	return m, true
 }
 
+// offlineMetaFiles 是"列附件时该跳过哪些文件"。
+//
+// 答案文件也在里面：附件列表会原样进模型的上下文，列出 `flag.txt` 等于告诉它
+// "答案就在这个路径"。挂载侧另有一道闸门（ctf_hidden.go），两道都要有。
 func offlineMetaFiles() map[string]bool {
-	return map[string]bool{
+	skip := map[string]bool{
 		chalNameFile: true, chalDescFiles: true, chalConnFile: true,
 		"description.md": true, "description.txt": true, "meta.json": true,
 	}
+	for name := range ctfAnswerFiles {
+		skip[name] = true
+	}
+	return skip
 }
 
 // List 走 CTFd 的题目列表接口：GET /api/v1/challenges。
@@ -169,7 +268,11 @@ func (s ctfdChallengeSource) List(ctx context.Context) ([]agent.CTFChallengeMeta
 // ---- agent.CTFChallengeSource：Fetch 时记录激活 ----
 
 func (p *ctfBoardProvider) Fetch(ctx context.Context, challengeID string) (*agent.CTFChallenge, error) {
-	ch, err := p.src.Fetch(ctx, challengeID)
+	src := p.source()
+	if src == nil {
+		return nil, fmt.Errorf("本任务没有配置题面来源（离线需设 settings ctf.challenge_dir.%d 或 PRAETOR_CTF_CHALLENGE_DIR；在线需配 CTFd）", p.taskID)
+	}
+	ch, err := src.Fetch(ctx, challengeID)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +286,11 @@ func (p *ctfBoardProvider) Fetch(ctx context.Context, challengeID string) (*agen
 }
 
 func (p *ctfBoardProvider) List(ctx context.Context) ([]agent.CTFChallengeMeta, error) {
-	return p.src.List(ctx)
+	src := p.source()
+	if src == nil {
+		return nil, agent.ErrListUnsupported
+	}
+	return src.List(ctx)
 }
 
 // ---- agent.CTFBoardProvider ----
@@ -206,7 +313,7 @@ func (p *ctfBoardProvider) GiveUp(ctx context.Context, challengeID, reason strin
 	if challengeID == "" {
 		return nil, fmt.Errorf("题目 id 不能为空")
 	}
-	metas, err := p.src.List(ctx)
+	metas, err := p.List(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +378,7 @@ func (p *ctfBoardProvider) spentFor(challengeID string) (int64, error) {
 
 // buildPlan 组装决策输入并调用 ctfplan。
 func (p *ctfBoardProvider) buildPlan(ctx context.Context) (*agent.CTFBoard, error) {
-	metas, err := p.src.List(ctx)
+	metas, err := p.List(ctx)
 	if err != nil {
 		return nil, err
 	}

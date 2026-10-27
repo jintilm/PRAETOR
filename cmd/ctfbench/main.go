@@ -33,18 +33,33 @@ func main() {
 		poll     = flag.Duration("poll", 15*time.Second, "轮询间隔")
 		// 默认开：题目自带 compose 却没起，靶场就是死的，模型再强也解不出——
 		// 那种"未解出"是跑分器的错，不是模型的分。题目目录没有 compose 文件时此项无影响。
-		compose  = flag.Bool("compose", true, "起/停题目自带的 docker compose")
-		keep     = flag.Bool("keep", false, "保留靶场（排查用）")
-		order    = flag.String("order", "auto", "排序策略：auto（按预算紧松自动）/ easy-first / value-first / asis（目录顺序，对照组）")
-		budget   = flag.Int64("budget", 0, "整轮 token 预算（0=不限）；装不下的题会跳过并写明原因")
-		mdPath   = flag.String("md", "", "Markdown 报告输出路径")
-		jsonPath = flag.String("out", "", "JSON 结果输出路径")
-		dryRun   = flag.Bool("dry-run", false, "只列题，不跑")
+		compose    = flag.Bool("compose", true, "起/停题目自带的 docker compose")
+		keep       = flag.Bool("keep", false, "保留靶场（排查用）")
+		order      = flag.String("order", "auto", "排序策略：auto（按预算紧松自动）/ easy-first / value-first / asis（目录顺序，对照组）")
+		budget     = flag.Int64("budget", 0, "整轮 token 预算（0=不限）；装不下的题会跳过并写明原因")
+		mdPath     = flag.String("md", "", "Markdown 报告输出路径")
+		jsonPath   = flag.String("out", "", "JSON 结果输出路径")
+		dryRun     = flag.Bool("dry-run", false, "只列题，不跑")
+		importFrom = flag.String("import", "", "从 Cybench 仓库根导入题目到 -root 后退出（题目目录约定见 bench/ctf）")
 	)
 	flag.Parse()
 
 	if strings.TrimSpace(*root) == "" {
 		fatal(fmt.Errorf("-root 必填（题目根目录）"))
+	}
+
+	// 导入是准备步骤：做完了就退出，不要顺手开始烧 token。
+	// 题库不进仓库（来源与许可见文档），所以"先导入"是跑分的第一步。
+	if src := strings.TrimSpace(*importFrom); src != "" {
+		ids, err := ctf.ImportCybench(src, *root)
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("导入 %d 道题 → %s\n", len(ids), *root)
+		for _, id := range ids {
+			fmt.Printf("  %s\n", id)
+		}
+		return
 	}
 
 	challenges, err := ctf.Discover(*root)

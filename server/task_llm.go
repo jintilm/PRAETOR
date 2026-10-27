@@ -577,12 +577,24 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk := agent.NewWorker(workerRuntime, "task-router", s.m.dir, tx, window, s.agentMaxTurns("worker"))
 	// 任务领域决定 worker 的工具面（逆向/CTF 专属工具不进渗透任务）与判题后端。
 	wk.SetDomain(t.Domain)
-	if sub := s.ctfSubmitterFor(t); sub != nil {
+	// Bash 跑在任务容器里时，提示词里的工作目录必须换成容器内路径。
+	// 宿主侧 runDir 是 <data>/tasks/<id>/i<id>，容器只挂了 <data>/work/<id> -> /work，
+	// 两棵树没有对应关系；给宿主路径换来的是模型开局一次必然失败的 cd。
+	if SandboxPerTaskActive() {
+		wk.SetSandboxWorkRoot(SandboxContainerRoot)
+	}
+	// 判题后端同样用惰性句柄：先建任务、后配 expected_flag 是最常见的顺序，
+	// 快照式注入会让后配的 flag 对已在跑的 worker 无效（见 ctf_submit.go 的 liveSubmitter）。
+	if sub := s.liveCTFSubmitter(t); sub != nil {
 		wk.SetCTFSubmitter(sub)
 	}
 	// CTF 域一次注入两样：题面来源（Fetch 时顺手记录"这题开做了"）与看板（P2-6）。
 	// 两者共享同一个 provider，进度才不会各记一套。
-	if kit, ok := s.ctfKitFor(t); ok {
+	//
+	// 注入的是**惰性句柄**（ctfLiveKit），不是"此刻是否已配置"的快照：bundle 是进程内
+	// 单例，而题面配置运行时可改。快照会让"先建任务、后配题目"这条最常见的路径失效
+	// （见 ctf_board.go 的 source() 注释）。
+	if kit := s.ctfLiveKit(t); kit != nil {
 		wk.SetCTFChallengeSource(kit)
 		wk.SetCTFBoard(kit)
 	}

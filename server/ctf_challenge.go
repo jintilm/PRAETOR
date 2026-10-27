@@ -40,12 +40,19 @@ const (
 //	<dir>/*                 其余文件都当附件（递归）
 type offlineChallengeSource struct {
 	root string
+	// guestRoot 非空时，返回的 Dir 与 Files[].Path 会映射到容器内的该挂载点
+	// （见 sandbox_mounts.go 的长注释：这是"Serve 给模型的路径必须是模型能打开的路径"）。
+	guestRoot string
 }
 
 func (s offlineChallengeSource) Fetch(_ context.Context, challengeID string) (*agent.CTFChallenge, error) {
 	dir := s.root
 	if challengeID != "" {
-		if nested := filepath.Join(s.root, challengeID); dirExists(nested) {
+		// 只在目标子目录**确实是一道题**时才切过去；否则留在 root。
+		//
+		// 与 List 的判定同源：单题目录下的 `files/` 是附件容器，若照 id 切进去，
+		// 模型会拿到一个没有题面的目录。留 root 至少拿到的还是本题。
+		if nested := filepath.Join(s.root, challengeID); dirExists(nested) && hasChallengeMeta(nested) {
 			dir = nested
 		}
 	}
@@ -53,14 +60,13 @@ func (s offlineChallengeSource) Fetch(_ context.Context, challengeID string) (*a
 		return nil, fmt.Errorf("题面目录不存在：%s", dir)
 	}
 	ch := &agent.CTFChallenge{
-		ID:     challengeID,
+		// ID 以**实际落到的目录**为准：请求的 id 没切过去时（见上面的注释），
+		// 回一个 "files" 会让模型以为自己在解另一道题。
+		ID:     filepath.Base(dir),
 		Name:   filepath.Base(dir),
 		Dir:    dir,
 		Resets: -1, // 离线目录不提供重置次数
 		Source: "offline",
-	}
-	if ch.ID == "" {
-		ch.ID = filepath.Base(dir)
 	}
 	if v := readSmallFile(filepath.Join(dir, chalNameFile)); v != "" {
 		ch.Name = v
@@ -73,10 +79,19 @@ func (s offlineChallengeSource) Fetch(_ context.Context, challengeID string) (*a
 	}
 	ch.ConnInfo = readSmallFile(filepath.Join(dir, chalConnFile))
 
-	meta := map[string]bool{chalNameFile: true, chalDescFiles: true, chalConnFile: true,
-		"description.md": true, "description.txt": true}
-	if files, err := listChallengeFiles(dir, meta); err == nil {
+	// 复用同一份跳过表（而不是在这里再写一遍）：早期版本在这里硬编码了一份，
+	// 于是 offlineMetaFiles 后来加的过滤（比如答案文件）对这里不生效 ——
+	// 实测就是附件列表里出现了 /chal/flag.txt。
+	if files, err := listChallengeFiles(dir, offlineMetaFiles()); err == nil {
 		ch.Files = files
+	}
+	// 路径映射放在最后统一做：中途任何一步都还在用宿主路径（读文件、列目录），
+	// 只有"要交给模型"的那一刻才切换视角。
+	if s.guestRoot != "" {
+		ch.Dir = guestChallengePath(s.root, dir)
+		for i := range ch.Files {
+			ch.Files[i].Path = guestChallengePath(s.root, ch.Files[i].Path)
+		}
 	}
 	return ch, nil
 }
@@ -200,12 +215,16 @@ func (s *Server) ctfChallengeSourceFor(t *Task) agent.CTFChallengeSource {
 		return nil
 	}
 	// 离线目录优先：它不需要网络，测试与基准都靠它。
-	dir := settingOr(s.m.pg, "ctf.challenge_dir."+t.ID, "")
-	if dir == "" {
-		dir = config.Env(envCTFChallengeDir)
-	}
-	if dir != "" && dirExists(dir) {
-		return offlineChallengeSource{root: dir}
+	//
+	// guestRoot 只在"Bash 真的跑在任务容器里"时才设：这时题面目录会被只读挂到
+	// /chal（见 taskMountsFor），交给模型的路径必须跟着换视角。
+	// 宿主执行模式（sandbox=off / optional 降级）下宿主路径本来就是可用的，映射反而会错。
+	if root := s.taskChallengeDir(t); root != "" {
+		guest := ""
+		if SandboxPerTaskActive() {
+			guest = challengeMountTarget
+		}
+		return offlineChallengeSource{root: root, guestRoot: guest}
 	}
 	// 再尝试 CTFd（复用判题那边的 URL/Token 配置）
 	base := settingOr(s.m.pg, "ctf.ctfd_url", "")

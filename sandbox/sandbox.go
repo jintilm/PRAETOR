@@ -128,6 +128,31 @@ func ContainerFromEnv() string {
 	return DefaultContainer
 }
 
+// EnvIsolation 是隔离方式的开关。
+const EnvIsolation = "PRAETOR_SANDBOX_ISOLATION"
+
+// Isolation 是一任务一容器 / 共享容器的枚举。
+type Isolation string
+
+const (
+	IsolationPerTask Isolation = "per-task"
+	IsolationShared  Isolation = "shared"
+)
+
+// IsolationFromEnv 解析 PRAETOR_SANDBOX_ISOLATION；缺省/非法值一律 per-task。
+//
+// 这个判断必须只有一处：上层要据此决定"题面附件是不是得挂进容器"
+// （见 server/sandbox_mounts.go）。如果这里按 per-task、那边按 shared，
+// 结果就是模型拿到宿主路径、在容器里 ls 全部 ENOENT，最后得出"附件缺失"。
+func IsolationFromEnv() Isolation {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvIsolation))) {
+	case "shared", "container", "single":
+		return IsolationShared
+	default:
+		return IsolationPerTask
+	}
+}
+
 // Options 是 Select 的输入。
 type Options struct {
 	Mode      Mode

@@ -51,16 +51,24 @@ func All() []Item {
 		},
 		{
 			ID: "pwntools", Group: "pwn", Title: "pwntools", SizeMB: 30, License: "未标注（外部进程调用）",
-			Why:     "远程交互、打包解包、ELF 解析",
-			Install: []string{"pip3 install --no-cache-dir --break-system-packages pwntools"},
-			Probe:   []string{"python3", "-c", "import pwn;print(getattr(pwn,'__version__','unknown'))"},
+			Why: "远程交互、打包解包、ELF 解析",
+			// 用发行版包而不是 pip：基础镜像的系统 Python 是 3.14，pip 版要现场编译
+			// 原生依赖（实测 ctypes/pwnlib 编译失败），而 Kali 的 python3-pwntools 已按
+			// 这个解释器构建（实测 `import pwn` 可用）。
+			Install: []string{"apt-get install -y --no-install-recommends python3-pwntools"},
+			Probe:   []string{"python3", "-c", "from pwn import version;print(version)"},
 		},
 		{
-			ID: "pwndbg", Group: "pwn", Title: "pwndbg", SizeMB: 60, License: "MIT",
-			Why:     "gdb 增强：堆可视化、栈回溯",
-			Install: []string{"pip3 install --no-cache-dir --break-system-packages pwndbg"},
-			Probe:   []string{"python3", "-c", "import pwndbg;print('ok')"},
-			Needs:   []string{"gdb"},
+			ID: "gef", Group: "pwn", Title: "GEF（gdb 增强）", SizeMB: 10, License: "MIT",
+			// 原计划是 pwndbg，但它既不在 Kali 源也不在内网 pip 源里（实测
+			// `pip install pwndbg` → No matching distribution）；GEF 提供同类的堆/栈/寄存器
+			// 可视化，且是发行版包，装得上、可复现。
+			Why:     "gdb 增强：堆可视化、栈回溯、寄存器视图",
+			Install: []string{"apt-get install -y --no-install-recommends gef"},
+			// 实测 Kali 的 gef 包装在 /usr/bin/gef（不是 /usr/share/gef/gef.py）：
+			// 探针写错会稳定报"未安装"，而它其实装着 —— 面板撒谎比不显示更糟。
+			Probe: []string{"test", "-x", "/usr/bin/gef"},
+			Needs: []string{"gdb"},
 		},
 		{
 			ID: "ropgadget", Group: "pwn", Title: "ROPgadget", SizeMB: 5, License: "未标注（外部进程调用）",
@@ -94,10 +102,19 @@ func All() []Item {
 
 		// ---------- crypto ----------
 		{
-			ID: "z3", Group: "crypto", Title: "z3 (z3-solver)", SizeMB: 90, License: "MIT",
+			ID: "z3", Group: "crypto", Title: "z3 (python3-z3)", SizeMB: 30, License: "MIT",
 			Why:     "位运算/线性约束求解",
-			Install: []string{"pip3 install --no-cache-dir --break-system-packages z3-solver"},
+			Install: []string{"apt-get install -y --no-install-recommends python3-z3"},
 			Probe:   []string{"python3", "-c", "import z3;print(z3.get_version_string())"},
+		},
+		{
+			ID: "ciphey", Group: "crypto", Title: "ciphey", SizeMB: 60, License: "MIT",
+			// CTFToolchain 一直声明了它，清单里却漏了（漂移）。
+			// pip 的 ciphey 在 Python 3.14 上装不了（老版 absl-py 的 setup.py 直接
+			// 拒绝新解释器），Kali 的 python3-ciphey 可以（实测 import 通过）。
+			Why:     "常见编码/古典密码自动识别",
+			Install: []string{"apt-get install -y --no-install-recommends python3-ciphey"},
+			Probe:   []string{"python3", "-c", "import ciphey;print('ok')"},
 		},
 		{
 			ID: "angr", Group: "crypto", Title: "angr（符号执行）", SizeMB: 1200, License: "BSD-2-Clause",

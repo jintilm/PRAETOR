@@ -103,9 +103,36 @@ func (s *Server) getComponents(w http.ResponseWriter, r *http.Request) {
 			Selected: selSet[it.ID],
 		})
 	}
+	// 预置：把「CTF 需要哪 12 项」变成一次点击。面板不必自己记清单，
+	// 清单只在 internal/components 里存一份。
+	type presetDTO struct {
+		ID      string   `json:"id"`
+		Title   string   `json:"title"`
+		Why     string   `json:"why"`
+		IDs     []string `json:"ids"`
+		Image   string   `json:"image"`
+		TotalMB int      `json:"total_mb"`
+	}
+	presets := make([]presetDTO, 0, len(components.Presets()))
+	for _, p := range components.Presets() {
+		items, err := components.PresetItems(p.ID)
+		if err != nil {
+			continue // 预置引用了不存在的组件：不展示，测试会把它卡住
+		}
+		mb := 0
+		for _, it := range items {
+			mb += it.SizeMB
+		}
+		presets = append(presets, presetDTO{
+			ID: p.ID, Title: p.Title, Why: p.Why, IDs: p.IDs,
+			Image: components.ImageTag(items), TotalMB: mb,
+		})
+	}
+
 	running, ids, image, errMsg, lines, started, finished := componentsJob.snapshot()
 	writeJSON(w, 200, map[string]any{
 		"items":      items,
+		"presets":    presets,
 		"selected":   selected,
 		"image":      s.currentSandboxImage(),
 		"base_image": components.BaseImage,
@@ -127,13 +154,24 @@ func (s *Server) getComponents(w http.ResponseWriter, r *http.Request) {
 // 服务端不会执行任何用户提供的命令 —— 命令只来自代码里的清单。
 func (s *Server) applyComponents(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		IDs []string `json:"ids"`
+		IDs    []string `json:"ids"`
+		Preset string   `json:"preset"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, 400, "请求体不是合法 JSON")
 		return
 	}
-	items, err := components.Validate(in.IDs)
+	var (
+		items []components.Item
+		err   error
+	)
+	switch {
+	case strings.TrimSpace(in.Preset) != "":
+		// 预置展开后仍然过 Validate（白名单只有一处）
+		items, err = components.PresetItems(in.Preset)
+	default:
+		items, err = components.Validate(in.IDs)
+	}
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return

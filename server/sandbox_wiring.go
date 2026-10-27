@@ -5,6 +5,7 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jintilm/praetor/agent"
@@ -28,12 +29,52 @@ import (
 // 为什么镜像来自 settings 而不是只有环境变量：面板构建出的镜像是 `praetor/sandbox:custom-<hash>`，
 // 让用户改环境变量再重启既反直觉也容易忘。环境变量仍作为回落，保持"零配置能用"。
 func WireSandboxWithImage(ctx context.Context, dataDir, image string) {
-	wireSandbox(ctx, dataDir, image)
+	wireSandbox(ctx, dataDir, image, SandboxRouting{})
 }
 
-func WireSandbox(ctx context.Context, dataDir string) { wireSandbox(ctx, dataDir, "") }
+// SandboxRouting 是按任务做的两项路由决策。
+//
+// 两者都是"只有上层知道"的知识，所以从外面注入：
+//   - ImageFor：这个任务的领域要不要专用工具链（sandbox_image.go）；
+//   - MountFor：这个任务的题面附件在宿主的哪儿、要挂到容器里的哪儿（sandbox_mounts.go）。
+type SandboxRouting struct {
+	ImageFor func(taskID string) string
+	MountFor func(taskID string) []sandbox.Mount
+}
 
-func wireSandbox(ctx context.Context, dataDir, imageOverride string) {
+// WireSandboxWithImages 额外带上「按任务选镜像」的解析器（领域专用工具链，见 sandbox_image.go）。
+//
+// imageFor 返回空字符串 = 用默认镜像，所以传 nil 与 WireSandboxWithImage 等价。
+func WireSandboxWithImages(ctx context.Context, dataDir, image string, imageFor func(taskID string) string) {
+	wireSandbox(ctx, dataDir, image, SandboxRouting{ImageFor: imageFor})
+}
+
+// WireSandboxWithRouting 是完整形态：镜像与额外挂载都按任务路由。
+func WireSandboxWithRouting(ctx context.Context, dataDir, image string, r SandboxRouting) {
+	wireSandbox(ctx, dataDir, image, r)
+}
+
+func WireSandbox(ctx context.Context, dataDir string) { wireSandbox(ctx, dataDir, "", SandboxRouting{}) }
+
+// sandboxPerTaskActive 记录「Bash 是否真的跑在一任务一容器里」。
+//
+// 存在理由：题面来源要据此决定是否把附件路径映射成容器内路径。这个结论不能靠
+// "读环境变量重新猜一遍"——环境变量说 per-task，但镜像缺失时 Runner 会降级成
+// 永远拒绝（不是容器），此时映射到 /chal 反而是错的方向。只有 wireSandbox
+// 的最终分支才知道真相，所以由它写、别处只读。
+var sandboxPerTaskActive atomic.Bool
+
+// SandboxPerTaskActive 报告当前 Bash 是否跑在按任务创建的容器里。
+func SandboxPerTaskActive() bool { return sandboxPerTaskActive.Load() }
+
+// SandboxContainerRoot 是任务容器内的工作根（与 sandbox.PerTaskConfig.ContainerRoot 一致）。
+//
+// 提示词里要给模型的"工作目录"就是它：宿主 <data>/work/<taskID> 挂到这里，
+// 模型看不到宿主路径（见 agent/worker.go 的 sandboxWorkRoot）。
+const SandboxContainerRoot = "/work"
+
+func wireSandbox(ctx context.Context, dataDir, imageOverride string, routing SandboxRouting) {
+	sandboxPerTaskActive.Store(false)
 	mode := sandbox.ModeFromEnv()
 	if mode == sandbox.ModeOff {
 		agent.SandboxExec = nil // 不包 Bash，行为与改造前一致
@@ -41,14 +82,11 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string) {
 		return
 	}
 
-	isolation := strings.ToLower(strings.TrimSpace(config.Env("SANDBOX_ISOLATION")))
-	if isolation == "" {
-		isolation = "per-task"
-	}
+	isolation := sandbox.IsolationFromEnv()
 
 	var runner sandbox.Runner
 	switch isolation {
-	case "shared", "container", "single":
+	case sandbox.IsolationShared:
 		runner = sandbox.NewDocker(sandbox.ContainerFromEnv(), "/work")
 	default:
 		image := strings.TrimSpace(imageOverride)
@@ -57,6 +95,8 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string) {
 		}
 		pt := sandbox.NewPerTask(sandbox.PerTaskConfig{
 			Image:         image,
+			ImageFor:      routing.ImageFor,
+			MountFor:      routing.MountFor,
 			HostWorkRoot:  envOr("SANDBOX_WORK_ROOT", filepath.Join(dataDir, "work")),
 			ContainerRoot: "/work",
 			Network:       config.Env("SANDBOX_NETWORK"),
@@ -82,6 +122,10 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string) {
 	}
 
 	agent.SandboxExec = runner
+	// 只有走到这里才是真的"Bash 跑在任务容器里"，附件才需要（也才可能）挂到 /chal。
+	if isolation == sandbox.IsolationPerTask {
+		sandboxPerTaskActive.Store(true)
+	}
 	log.Printf("[sandbox] 已启用：mode=%s isolation=%s runner=%s", mode, isolation, runner.Name())
 }
 
