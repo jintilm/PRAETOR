@@ -169,7 +169,8 @@ CREATE TRIGGER trg_exp_upd BEFORE UPDATE ON explorations
 
 -- domain: 任务所属领域（pentest/redteam/ctf/reverse）。默认 pentest 保证存量任务语义不变。
 -- 调度器与预算都按它选（见 server/engine_scheduler.go 的 DomainPackFor）。
-ALTER TABLE tasks ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT 'pentest';
+-- 注意：这条 ALTER 必须放在 CREATE TABLE tasks 之后 —— 放在前面时，全新库上
+-- tasks 还不存在，整份 schema 的 Exec 会以 42P01 整体失败（一句错，全库都建不出来）。
 
 -- CTF 提交去重表（P2-2）。主键就是 flag 的 sha256：**同一个 flag 全局只提交一次**。
 -- 为什么去重放数据库而不是内存：进程重启/多实例下内存会失效，重复提交会浪费判题次数、还可能触发平台风控。
@@ -182,7 +183,11 @@ CREATE TABLE IF NOT EXISTS ctf_submissions (
     raw_response TEXT NOT NULL DEFAULT '',
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- task_id: 归属任务（评分/复盘要按任务看"这一题有没有被解出"）。
+-- 允许 NULL：早期记录或非任务场景（如人工提交）没有任务上下文。
+ALTER TABLE ctf_submissions ADD COLUMN IF NOT EXISTS task_id BIGINT;
 CREATE INDEX IF NOT EXISTS idx_ctf_submissions_challenge ON ctf_submissions(challenge_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ctf_submissions_task ON ctf_submissions(task_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS exploration_nodes (
     id             BIGSERIAL PRIMARY KEY,
@@ -580,6 +585,9 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS active_llm_profile_id BIGINT REFERENCES llm_profiles(id) ON DELETE SET NULL;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS llm_chain_revision BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+-- domain: 任务所属领域（pentest/redteam/ctf/reverse）。默认 pentest 保证存量任务语义不变，
+-- 调度器与预算都按它选（server/engine_scheduler.go 的 DomainPackFor）。必须在这里（建表之后）执行。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT 'pentest';
 CREATE INDEX IF NOT EXISTS idx_tasks_category ON tasks(category_id, created_at DESC)
     WHERE deleted_at IS NULL AND category_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_pinned ON tasks(pinned_at DESC)
