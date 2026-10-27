@@ -53,11 +53,15 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 type ToolSet struct {
 	findingRecorder FindingRecorder
 	findingVerifier FindingVerifier  // nil = 未启用确定性验证
+	ctfSubmitter    CTFSubmitter     // nil = 未配置判题后端（ctf_submit 会明确报不可用）
 	as              *db.AssetStore   // asset store (optional; nil = asset tools not available)
 	cs              *db.CompanyStore // company store (optional)
 	ts              *db.ExplorationStore
 	worker          string
-	taskID          int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
+	// domain 是任务所属领域（pentest/reverse/ctf/...）。用于**按领域裁剪工具面**：
+	// 逆向/CTF 专属工具不该出现在渗透任务的提示词里（每个工具每轮都要付 schema）。
+	domain string
+	taskID int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
 	// coverageDisabled mirrors tasks.coverage_enabled=false. Stored inverted so the
 	// zero value (all existing ToolSet constructions) means ENABLED — matching the
 	// DB default (true). When true: graphOverviewData drops the coverage block, the
@@ -165,6 +169,14 @@ func (t *ToolSet) Writes() WriteCounts { return t.writes }
 func NewToolSet(ts *db.ExplorationStore, worker string) *ToolSet {
 	return &ToolSet{ts: ts, worker: worker}
 }
+
+// SetDomain 记录任务领域；空值按渗透域处理（存量行为不变）。
+func (t *ToolSet) SetDomain(domainKey string) { t.domain = strings.TrimSpace(domainKey) }
+
+// isReverse / isCTF 用字符串比较而不是 import domain 包：agent 已有大量 domain 用法，
+// 但工具裁剪只需要这个键，避免把领域包牵进 tools.go 的依赖链。
+func (t *ToolSet) isReverse() bool { return t.domain == "reverse" }
+func (t *ToolSet) isCTF() bool     { return t.domain == "ctf" }
 
 // SetTaskID sets the PG task id on this ToolSet so that report_finding can
 // dual-write to the standalone findings table (which survives task deletion).

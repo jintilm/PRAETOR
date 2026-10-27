@@ -642,7 +642,7 @@ func splitLines(s string) []string {
 
 // WorkerTools returns the tool set for a work agent.
 func (t *ToolSet) WorkerTools() []actool.CoreTool {
-	return []actool.CoreTool{
+	tools := []actool.CoreTool{
 		// list_findings 保留：报漏洞前先查本任务已确认漏洞，避免重复上报同一漏洞。
 		t.listFindings(),
 		t.addFinding(), t.recordFact(),
@@ -657,13 +657,28 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		t.searchAllWorkerTraces(), t.getWorkerTrace(),
 		// node_detail：worker 拿到 intent_id/节点 id 后可查该节点完整详情（配合上面的回看）。
 		t.nodeDetail(),
-		// re_evidence：逆向域唯一结论出口（证据节点 + 领域判定器）。
-		// 只在 worker 上注册：它是执行者，也是唯一产出"可复核结论"的角色。
-		// 代价是 worker 工具面 +1（约 250 tokens/轮），换来证据链闭环 —— 这是 P3-4 的核心。
-		t.reEvidence(),
 		// 以下工具仍【不给】worker，只留给 planner/main（读上下文、跨 work 复盘是规划职责，
 		// worker 只做单条意图的执行与写回）：list_facts / list_companies / list_worker_traces。
 	}
+	// 领域专属工具按任务领域裁剪（见 ToolSet.SetDomain）：
+	// 渗透任务的 worker 不需要逆向/CTF 工具，多给一个就是每轮多付一份 schema。
+	return append(tools, t.domainTools()...)
+}
+
+// domainTools 返回当前任务领域专属的 worker 工具。
+//
+// 为什么要裁剪：worker 的工具 schema 每轮都随上下文重发。
+// 逆向/CTF 专属工具若无条件挂上，渗透任务每轮都要为用不到的工具付费。
+func (t *ToolSet) domainTools() []actool.CoreTool {
+	switch {
+	case t.isReverse():
+		// re_evidence：逆向域唯一结论出口（证据节点 + 领域判定器）
+		return []actool.CoreTool{t.reEvidence()}
+	case t.isCTF():
+		// ctf_submit：CTF 唯一提交出口（去重 + 判题 + 首解收敛）
+		return []actool.CoreTool{t.ctfSubmit()}
+	}
+	return nil
 }
 
 // MainAgentTools returns the human-interface tool set.

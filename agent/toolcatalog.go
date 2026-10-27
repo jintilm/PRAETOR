@@ -165,6 +165,14 @@ func platformToolIndex() map[string]actool.CoreTool {
 			idx[name] = t
 		}
 	}
+	// 按领域裁剪的 worker 工具（re_evidence / ctf_submit）也必须可解析：
+	// 它们不在无领域的 WorkerTools 里（那样会污染渗透任务的工具面），
+	// 所以这里按域各建一次 ToolSet 把它们收集进来。
+	for name, t := range domainScopedTools() {
+		if _, ok := idx[name]; !ok {
+			idx[name] = t
+		}
+	}
 	return idx
 }
 
@@ -322,4 +330,21 @@ func scalarDefaults(schema map[string]any) map[string]json.RawMessage {
 func isEmptyJSON(raw json.RawMessage) bool {
 	s := string(raw)
 	return s == "null" || s == `""`
+}
+
+// domainScopedTools 收集所有领域专属的 worker 工具（name → 实例），供索引/播种解析。
+//
+// 与 domainOwnedTools 的区别：那些是"无 store 也能用"的工具（re_triage）；
+// 这些是**需要任务上下文**、但名字要能被解析到的工具（re_evidence 要写探索图，
+// ctf_submit 要提交后端）。这里只为了让名字可解析，实例本身不用于执行。
+func domainScopedTools() map[string]actool.CoreTool {
+	out := map[string]actool.CoreTool{}
+	for _, key := range []string{"reverse", "ctf"} {
+		ts := NewToolSet(nil, "")
+		ts.SetDomain(key)
+		for _, t := range ts.domainTools() {
+			out[t.Name()] = t
+		}
+	}
+	return out
 }

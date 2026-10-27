@@ -562,6 +562,11 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	window := workerRuntime.CompactionWindow()
 	wk := agent.NewWorker(workerRuntime, "task-router", s.m.dir, tx, window, s.agentMaxTurns("worker"))
+	// 任务领域决定 worker 的工具面（逆向/CTF 专属工具不进渗透任务）与判题后端。
+	wk.SetDomain(t.Domain)
+	if sub := s.ctfSubmitterFor(t); sub != nil {
+		wk.SetCTFSubmitter(sub)
+	}
 	wk.SetFindingRecorder(s.evidenceStore())
 	wk.SetFindingVerifier(NewEvidenceVerifier(s.evidenceStore(), nil))
 	wk.SetCompactionWindowResolver(workerRuntime.CompactionWindow)

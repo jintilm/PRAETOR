@@ -171,6 +171,19 @@ CREATE TRIGGER trg_exp_upd BEFORE UPDATE ON explorations
 -- 调度器与预算都按它选（见 server/engine_scheduler.go 的 DomainPackFor）。
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT 'pentest';
 
+-- CTF 提交去重表（P2-2）。主键就是 flag 的 sha256：**同一个 flag 全局只提交一次**。
+-- 为什么去重放数据库而不是内存：进程重启/多实例下内存会失效，重复提交会浪费判题次数、还可能触发平台风控。
+-- rejected 也留档：被判错的 flag 不允许复投（复投不会变对，只会浪费）。
+CREATE TABLE IF NOT EXISTS ctf_submissions (
+    flag_sha256  TEXT PRIMARY KEY,
+    challenge_id TEXT NOT NULL DEFAULT '',
+    flag         TEXT NOT NULL,
+    verdict      TEXT NOT NULL,          -- accepted | rejected（duplicate 不入库，直接返回已有结论）
+    raw_response TEXT NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_ctf_submissions_challenge ON ctf_submissions(challenge_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS exploration_nodes (
     id             BIGSERIAL PRIMARY KEY,
     exploration_id BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,

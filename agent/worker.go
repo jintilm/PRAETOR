@@ -70,7 +70,11 @@ type Worker struct {
 	runTimeout time.Duration
 	// extraTools are host-provided tools (e.g. traffic query, oast) appended to
 	// the worker's graph write-back tools.
-	extraTools []actool.CoreTool
+	// domain 是任务领域（pentest/reverse/ctf），用于裁剪 worker 工具面。
+	domain string
+	// ctfSubmitter 是 CTF 判题后端（仅 ctf 域注入）。
+	ctfSubmitter CTFSubmitter
+	extraTools   []actool.CoreTool
 	// injectConstraints resolves whether this task's operation constraints get
 	// injected into the worker system prompt. Read per run so the settings toggle
 	// takes effect without rebuilding the agent. nil = inject (default).
@@ -115,6 +119,12 @@ func hasWorkerChatMessage(messages []llm.Message, requestID string) bool {
 // SetNonStreaming wires a resolver deciding whether runs use the non-streaming
 // model path (true = non-streaming). nil/unset = streaming (default). Read per
 // run so a profile or task-chain toggle takes effect without rebuilding.
+// SetDomain 设置任务领域：worker 的工具面按领域裁剪（逆向/CTF 专属工具不进渗透任务）。
+func (w *Worker) SetDomain(domainKey string) { w.domain = domainKey }
+
+// SetCTFSubmitter 注入 CTF 判题后端（nil = ctf_submit 明确报不可用）。
+func (w *Worker) SetCTFSubmitter(s CTFSubmitter) { w.ctfSubmitter = s }
+
 func (w *Worker) SetNonStreaming(fn func() bool) { w.nonStreamingFn = fn }
 
 func (w *Worker) nonStreaming() bool { return w.nonStreamingFn != nil && w.nonStreamingFn() }
@@ -361,6 +371,8 @@ func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int
 
 func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
 	tsx := NewToolSet(ts, name)
+	tsx.SetDomain(w.domain) // 领域专属工具按任务领域裁剪（逆向/CTF 工具不进渗透任务）
+	tsx.SetCTFSubmitter(w.ctfSubmitter)
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetFindingVerifier(w.findingVerifier)
 	tsx.SetTaskID(taskID)
