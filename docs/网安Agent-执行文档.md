@@ -256,6 +256,11 @@ go run ./cmd/ctftarget -challenge /path/to/corpus/very-easy-delulu -up
 - **`PRAETOR_SANDBOX_NETWORK` 指向不存在的网络**时，容器创建会全部失败，而报错发生在**每条 Bash** 上。
   现在启动期会探一次并打警告（`sandbox.CheckNetwork`），因为让模型在几十次工具调用里反复撞
   `network xxx not found` 比在启动日志里说一句贵得多。
+- **任务容器会活过它的进程**。容器名是 `praetor-task-<taskID>`，属于 docker 全局；回收协程
+  （`ReapIdle`）只认识**本进程内存里**创建过的容器，所以重启/崩溃/测试留下的那批对它是隐形的，
+  一直 Up。实测一次全量测试留下 6 个。现在启动时会扫一次（`pt.SweepOrphans`）：只删
+  `/work` 的宿主源落在**本部署 `HostWorkRoot` 之下**的容器，别人的 checkout 不碰；
+  真机日志是 `[sandbox] 清理了 N 个上次运行遗留的任务容器`。
 
 **文件工具怎么看到容器路径**（上一版这里是"已知缺口"，现在修了）：
 
@@ -322,6 +327,16 @@ output** 里的 `t.Skipf` 文案。第一版脚本去 grep skip 行找 "database
 
 实测口径：带 DB 全量 **1256 通过 / 0 失败 / 32 跳过**（跳过的是升级、证据等需要特定平台的用例）；
 不带 DB 时仅 `db` 包就有 157 个、`server` 包 104 个用例被跳过 —— 这就是"全绿"的水分。
+
+**别 `source .env` 之后跑测试**（脚本本身是 `grep` 取值，不是 source）。`.env` 里有真实 LLM 凭据、
+`PRAETOR_SANDBOX=required`、`WORK_ROOT=./data/work`，一旦被测试继承：
+
+- 用例会真的调模型 → 后台写入协程和 `t.TempDir()` 清理打架 →
+  `TempDir RemoveAll cleanup: unlinkat ...\tasks: The directory is not empty`，
+  而且整套从 184s 变成 365s；
+- 用例会真的建容器，工作目录落在 `server/data/work/<taskID>`。实测一次全量留下 6 个 Up 的
+  `praetor-task-*`（没人认领，见 1.22.2 最后一个 bullet）。`server` 包的 `TestMain`
+  现在强制 `PRAETOR_SANDBOX=off`，要测接线的用例自己 `t.Setenv` 覆盖。
 
 ### 1.21 竞速分模型（P2-5）：两路换的不是起点，是脑子
 

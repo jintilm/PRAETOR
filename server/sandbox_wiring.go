@@ -105,6 +105,11 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string, routing San
 		})
 		// 回收协程与探测结果无关：即使当前不可用，起来之后新容器也需要被回收。
 		pt.StartReaper(ctx, 5*time.Minute)
+		// 上一个进程留下的容器不在 boxes 里，回收协程永远看不见它们。
+		// 启动时扫一次：这批容器占内存、占磁盘、还占着网络，症状只是"越跑越慢"。
+		if n := pt.SweepOrphans(ctx); n > 0 {
+			log.Printf("[sandbox] 清理了 %d 个上次运行遗留的任务容器", n)
+		}
 		runner = pt
 	}
 

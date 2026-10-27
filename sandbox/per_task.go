@@ -440,6 +440,81 @@ func sameImage(have, want string) bool {
 	return have == want || strings.HasSuffix(have, "/"+want) || strings.HasSuffix(want, "/"+have)
 }
 
+// SweepOrphans 删除「本部署的、但当前进程不认识」的任务容器，返回删除数量。
+//
+// 为什么需要它：箱子表（p.boxes）在内存里，ReapIdle 只遍历它 —— 上一个进程
+// （重启、崩溃、实测中的测试运行）留下的容器对谁都是隐形的，于是永远 Up。
+// 实测一次全量测试就留下 6 个运行中的容器，而症状是"机器越跑越慢"，
+// 没人会联想到是三天前那批 praetor-task-*。
+//
+// 为什么可以只按名字前缀认领：容器名是 docker 全局的，`praetor-task-<key>`
+// 意味着同一台 docker 上只能有一个本系统在跑 —— 这是命名方案本来就已经写死的假设。
+// 即便如此仍先校验 /work 的宿主源落在我方 HostWorkRoot 之下才删，
+// 免得误伤另一个 checkout 的容器（它可能有同名任务 id）。
+func (p *PerTaskRunner) SweepOrphans(ctx context.Context) int {
+	if p == nil {
+		return 0
+	}
+	out, _, code, err := p.exec(ctx, []string{
+		"ps", "-a",
+		"--filter", "label=" + p.cfg.LabelPrefix,
+		"--format", "{{.Names}}",
+	}, "")
+	if err != nil || code != 0 {
+		// docker 不在/没权限：交给 Available() 去报，这里不抢答。
+		return 0
+	}
+
+	root := p.cfg.HostWorkRoot
+	n := 0
+	for _, name := range strings.Split(out, "\n") {
+		name = strings.TrimSpace(name)
+		key, ok := strings.CutPrefix(name, "praetor-task-")
+		if !ok || key == "" {
+			continue
+		}
+		p.mu.Lock()
+		_, known := p.boxes[key]
+		p.mu.Unlock()
+		if known {
+			continue // 本进程在用
+		}
+		if src, owned := p.workMountSource(ctx, name); !owned || !underRoot(src, root) {
+			continue // 不是这个部署的容器
+		}
+		if _, _, _, err := p.exec(ctx, []string{"rm", "-f", name}, ""); err == nil {
+			n++
+		}
+	}
+	return n
+}
+
+// workMountSource 返回容器 /work 挂载的宿主源；不是本系统建的容器返回 owned=false。
+func (p *PerTaskRunner) workMountSource(ctx context.Context, name string) (string, bool) {
+	format := `{{range .Mounts}}{{if eq .Destination "` + p.cfg.ContainerRoot + `"}}{{.Source}}{{end}}{{end}}`
+	out, _, code, err := p.exec(ctx, []string{"inspect", "--format", format, name}, "")
+	if err != nil || code != 0 {
+		return "", false
+	}
+	src := strings.TrimSpace(out)
+	return src, src != ""
+}
+
+// underRoot 判断 src 是否在 root 之下（按路径段，不是字符串前缀）。
+// Windows 路径大小写不敏感，统一转小写再比 —— 只可能让"更宽"的匹配命中，
+// 而命中的仍然是本部署根目录下的东西，不会越界。
+func underRoot(src, root string) bool {
+	s := strings.ToLower(filepath.ToSlash(strings.TrimSpace(src)))
+	r := strings.ToLower(filepath.ToSlash(strings.TrimSpace(root)))
+	if s == "" || r == "" {
+		return false
+	}
+	if s == r {
+		return true
+	}
+	return strings.HasPrefix(s, strings.TrimSuffix(r, "/")+"/")
+}
+
 // removeContainer 删除任务容器（镜像变更时用）。
 func (p *PerTaskRunner) removeContainer(ctx context.Context, name string) error {
 	_, stderr, code, err := p.exec(ctx, []string{"rm", "-f", name}, "")
