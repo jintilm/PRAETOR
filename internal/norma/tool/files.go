@@ -168,6 +168,10 @@ func runWrite(_ context.Context, input json.RawMessage, tc *ToolContext) (Result
 	if err := json.Unmarshal(input, &in); err != nil {
 		return Result{}, err
 	}
+	// 只读挂载（/chal）在容器里是 ro，但这里跑在宿主上，必须显式挡。
+	if err := denyReadOnly(tc, in.FilePath); err != nil {
+		return Errorf(err.Error()), nil
+	}
 	path := resolvePath(tc, in.FilePath)
 	existed := false
 	if info, err := os.Stat(path); err == nil {
@@ -223,6 +227,9 @@ func runEdit(_ context.Context, input json.RawMessage, tc *ToolContext) (Result,
 	}
 	if in.OldString == in.NewString {
 		return Errorf("Error: old_string and new_string are identical"), nil
+	}
+	if err := denyReadOnly(tc, in.FilePath); err != nil {
+		return Errorf(err.Error()), nil
 	}
 	path := resolvePath(tc, in.FilePath)
 	data, err := os.ReadFile(path)

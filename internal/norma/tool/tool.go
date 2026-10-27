@@ -50,6 +50,14 @@ type ToolContext struct {
 	// 工作目录下，于是报 "open E://...//data//tasks//<id>//chal//...: no such file"）。
 	// 返回 (宿主路径, true) 表示命中挂载点；false 表示不归它管，调用方按原逻辑处理。
 	SandboxPath func(string) (string, bool)
+	// SandboxReadOnly 报告某个容器路径是否落在**只读挂载**上；nil = 不在沙箱模式。
+	//
+	// 为什么单列一个判断：容器里的 `/chal` 是 `-v ...:ro`，Bash 写不进去；
+	// 但 Write/Edit/MultiEdit 跑在宿主进程上，只拿到宿主路径 —— 内核不知道
+	// "这块在容器里是只读的"，于是 `Write /chal/x.txt` 会真的改到题面目录。
+	// 没有答案文件的题，脱敏视图就是题库原目录本身，一个任务的误写会污染
+	// 之后所有跑同一道题的运行，而且看起来像"题目被改坏了"。
+	SandboxReadOnly func(string) bool
 }
 
 func (tc *ToolContext) progress(msg string) {

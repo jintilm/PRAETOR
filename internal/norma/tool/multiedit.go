@@ -55,6 +55,9 @@ func runMultiEdit(_ context.Context, input json.RawMessage, tc *ToolContext) (Re
 	if len(in.Edits) == 0 {
 		return Errorf("Error: no edits provided"), nil
 	}
+	if err := denyReadOnly(tc, in.FilePath); err != nil {
+		return Errorf(err.Error()), nil
+	}
 	path := resolvePath(tc, in.FilePath)
 	data, err := os.ReadFile(path)
 	if err != nil {

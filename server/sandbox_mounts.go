@@ -146,15 +146,59 @@ func (s *Server) sandboxPathMapper(t *Task) func(string) (string, bool) {
 	}
 }
 
+// sandboxReadOnly 返回「这个容器路径是不是只读挂载」的判断器，供写文件工具用。
+//
+// 判据与 sandboxPathMapper 同源（都来自 mountsForTask 的 ReadOnly 标记），
+// 不是另写一套路径规则 —— 两处一旦对不上，就会出现"能写进只读挂载"或
+// "草稿纸工作目录突然不能写"这类只有真跑才发现的错位。
+func (s *Server) sandboxReadOnly(t *Task) func(string) bool {
+	if s == nil || t == nil || t.ID == "" {
+		return nil
+	}
+	return func(p string) bool {
+		p = filepath.ToSlash(strings.TrimSpace(p))
+		if p == "" {
+			return false
+		}
+		for _, m := range s.mountsForTask(t) {
+			// 每次重取，理由同 sandboxPathMapper：题面目录是任务建好之后才配的。
+			if !m.ReadOnly {
+				continue
+			}
+			// 两种写法都要挡：容器路径（/chal/x）是常态，但提示词里偶尔会出现宿主路径
+			// （映射缺位时的兜底），只挡容器写法等于留一个后门 —— 而这条后门通向题库本身。
+			if hitsMount(p, m.Target) || hitsMountFold(p, m.Source) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// hitsMountFold 与 hitsMount 同义，但大小写不敏感（Windows 语义）。
+// 用于比对宿主路径：E:/Corpus 与 e:/corpus 是同一处。
+func hitsMountFold(p, root string) bool {
+	return hitsMount(strings.ToLower(filepath.ToSlash(p)), strings.ToLower(filepath.ToSlash(root)))
+}
+
+// hitsMount 判断 p 是否落在 container 之下（按路径段，不是字符串前缀）。
+func hitsMount(p, container string) bool {
+	container = strings.TrimSuffix(filepath.ToSlash(container), "/")
+	if container == "" {
+		return false
+	}
+	return p == container || strings.HasPrefix(p, container+"/")
+}
+
 // translateMount 把 container 前缀换成 host 前缀；不在 container 之下返回 false。
 //
 // `..` 必须挡住：模型传 `/work/../../../etc/passwd` 时 filepath.Join 会老老实实逃逸出去，
 // 于是"沙箱内的路径"能读到宿主的任意文件 —— 这比不给映射更糟。
 func translateMount(p, container, host string) (string, bool) {
-	container = strings.TrimSuffix(filepath.ToSlash(container), "/")
-	if container == "" || (p != container && !strings.HasPrefix(p, container+"/")) {
+	if !hitsMount(p, container) {
 		return "", false
 	}
+	container = strings.TrimSuffix(filepath.ToSlash(container), "/")
 	rest := strings.TrimPrefix(strings.TrimPrefix(p, container), "/")
 	joined := host
 	if rest != "" {

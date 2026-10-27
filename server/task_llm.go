@@ -587,6 +587,9 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 		// 只做上面那半（提示词）会让模型照着提示词去调 LS，然后拿到一条
 		// "打开宿主 data 目录下某个不存在路径" 的错误 —— 看起来像题目缺文件。
 		wk.SetSandboxPath(s.sandboxPathMapper(t))
+		// 第三半：能翻过去不等于能写。/chal 在容器里是 ro，但写文件的工具跑在宿主上，
+		// 不显式挡就会真的改到题面目录（没有答案文件的题，视图就是题库原目录）。
+		wk.SetSandboxReadOnly(s.sandboxReadOnly(t))
 	}
 	// 判题后端同样用惰性句柄：先建任务、后配 expected_flag 是最常见的顺序，
 	// 快照式注入会让后配的 flag 对已在跑的 worker 无效（见 ctf_submit.go 的 liveSubmitter）。

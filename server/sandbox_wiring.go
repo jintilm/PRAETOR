@@ -54,7 +54,9 @@ func WireSandboxWithRouting(ctx context.Context, dataDir, image string, r Sandbo
 	wireSandbox(ctx, dataDir, image, r)
 }
 
-func WireSandbox(ctx context.Context, dataDir string) { wireSandbox(ctx, dataDir, "", SandboxRouting{}) }
+func WireSandbox(ctx context.Context, dataDir string) {
+	wireSandbox(ctx, dataDir, "", SandboxRouting{})
+}
 
 // sandboxPerTaskActive 记录「Bash 是否真的跑在一任务一容器里」。
 //

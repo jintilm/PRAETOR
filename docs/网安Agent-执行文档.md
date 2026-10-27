@@ -261,6 +261,9 @@ go run ./cmd/ctftarget -challenge /path/to/corpus/very-easy-delulu -up
   一直 Up。实测一次全量测试留下 6 个。现在启动时会扫一次（`pt.SweepOrphans`）：只删
   `/work` 的宿主源落在**本部署 `HostWorkRoot` 之下**的容器，别人的 checkout 不碰；
   真机日志是 `[sandbox] 清理了 N 个上次运行遗留的任务容器`。
+  这条设计内建一个前提：**同一台 docker 上只有一个本系统在跑**（容器名全局，两个实例本来就会
+  在 `--name` 上撞车）。滚动升级时若旧进程还没退，新进程会把旧进程正在用的容器当遗留删掉 ——
+  要做多实例，得先把容器名加上实例前缀，那时这个扫描也得跟着改。
 
 **文件工具怎么看到容器路径**（上一版这里是"已知缺口"，现在修了）：
 
@@ -285,6 +288,19 @@ go run ./cmd/ctftarget -challenge /path/to/corpus/very-easy-delulu -up
 
 真机验证：模型只用文件工具（禁用 Bash）跑完 `LS /chal`、`LS /chal/files/challenge`、
 `Read /chal/name.txt`，三个都成功，且 `/chal` 的列表里**没有** `flag.txt`（脱敏视图仍然生效）。
+
+**能翻路径 ≠ 能写**（修完上面那条才暴露出来）：
+
+容器里的 `/chal` 是 `-v ...:ro`，Bash 写不进去；但 `Write`/`Edit`/`MultiEdit` 跑在宿主进程上，
+拿到的是普通宿主路径，内核根本不知道"这块在容器里是只读的"。也就是说路径映射一通，
+模型的 `Write /chal/name.txt` 就能**直接改题面目录**。最坏的情况是题目里没有答案文件 ——
+那时脱敏视图就是题库原目录本身（`ensureChallengeView` 直接返回 `srcDir`），一次误写会污染
+之后所有跑同一道题的运行，而现象只是"题目好像被改坏了"。
+
+修法：`ToolContext.SandboxReadOnly` + `denyReadOnly`，三个写工具入口统一拦，错误信息给出可写位置
+（`/work/` 下），否则模型会以为路径打错、换个写法重试。判据与路径映射同源（同一份
+`mountsForTask` 的 `ReadOnly` 标记），避免两套规则对不上。容器写法（`/chal/x`）和宿主写法
+（`E:\...\corpus\...`）都要挡 —— 后者是提示词兜底时可能出现的形态，只挡前者等于留后门。
 
 #### 1.22.3 去重表的副作用：每道题只有第一次跑有效
 

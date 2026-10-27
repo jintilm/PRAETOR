@@ -111,6 +111,21 @@ func resolvePath(tc *ToolContext, p string) string {
 	return filepath.Join(tc.WorkingDir, p)
 }
 
+// denyReadOnly 拦下「往只读挂载里写」。
+//
+// 容器里 /chal 是 `-v ...:ro`，Bash 写不进去；但写文件的三件工具（Write/Edit/MultiEdit）
+// 跑在宿主进程上，拿到的是普通宿主路径 —— 内核不知道"这块在容器里是只读的"，
+// 于是会真的写进题面目录。没有答案文件的题，脱敏视图就是题库原目录本身，
+// 一次误写会污染之后所有跑同一道题的运行，而现象只是"题目好像被改坏了"。
+//
+// 报错要说明原因，否则模型会以为路径打错了、换个写法重试。
+func denyReadOnly(tc *ToolContext, p string) error {
+	if tc == nil || tc.SandboxReadOnly == nil || !tc.SandboxReadOnly(p) {
+		return nil
+	}
+	return fmt.Errorf("Error: %s 是只读挂载（题面附件），不能修改；把产物写到工作目录（如 /work/ 下）", p)
+}
+
 // truncate trims s to max characters, keeping head and tail.
 func truncate(s string, max int) string {
 	if max <= 0 || len(s) <= max {
