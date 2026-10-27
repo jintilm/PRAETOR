@@ -185,6 +185,7 @@ func domainOwnedTools() map[string]actool.CoreTool {
 	ts := &ToolSet{} // 零值即可：以下工具都不触碰 store 字段
 	list := []actool.CoreTool{
 		ts.reTriage(),
+		ts.reRecipe(),
 	}
 	m := make(map[string]actool.CoreTool, len(list))
 	for _, t := range list {

@@ -1248,7 +1248,7 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 | 工具 | 作用 | 输出上限 |
 | --- | --- | --- |
 | `re_triage(target)` | 纯 Go 解析 PE/ELF/Mach-O：格式/架构/位数/编译器/加壳迹象/入口/段熵/高风险导入/字符串摘要 | 摘要 ≤1.5KB，全文落盘 `re/<sha256>/triage.json` |
-| `re_recipe(recipe, target, page)` | 按配方名执行已固化的 CLI 管道 | 单次 ≤2KB（`decompile` ≤4KB），超出落盘 |
+| `re_recipe(recipe, target, select, page)` | 按配方名执行已固化的 CLI 管道（`select` = 函数/地址/字符串，三条静态配方必填） | 单次 ≤2KB（`decompile` ≤4KB），超出落盘 |
 | `re_evidence(claim, ref, xref_count, trace_ref)` | **唯一结论出口**，交给 `reverseVerifier` 判 | — |
 
 **配方表（9 条；≤10 是硬约束，超了先问「哪条能合并」）**
@@ -1296,7 +1296,7 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 | --- | --- | --- | --- | --- |
 | P3-1 | `evidenceScheduler`：串行拓扑（1 planner + **1 worker**）+ **预算闸门** + 可续跑 | 自研（`internal/budget` 纯判定 + `server/budget_gate.go`） | ✅ 调度计划固定 1/1（忽略配置的 worker 数）；闸门读账本（`llm_usage`/`tool_usage`）判 token/次数/墙钟，到顶走**与墙钟超时同一套**收尾时序并写明原因；真机验证：建 `domain=reverse` 任务日志输出 `领域=reverse 调度=evidence 拓扑=1 planner/1 worker` | ✅ 已完成 |
 | P3-2 | `re_triage`：纯 Go 解析 PE/ELF/Mach-O（头/段表/熵/导入/字符串摘要/加壳依据） | 自研（`internal/binfmt`），字段划分参考 `lief-project/LIEF`（Apache-2.0，只读思路） | ✅ 用真实 23.6MB PE 验证：8 段/51 导入/熵/可疑 API 全部解析；摘要 **795 字节**（≤1.4KB）、JSON 落盘、零外部依赖 | ✅ 已完成 |
-| P3-3 | `re_recipe` 骨架 + 静态配方（`disasm`/`xrefs`/`decompile`/`strings`/`capability`/`packer`） | 外部进程调用 rizin / Ghidra headless / FLOSS / capa / DIE（**不复制、不链接代码**） | 装了该 CLI 时可用；未装时明确报「缺 X」而非空结果 | 待做 |
+| P3-3 | `re_recipe` 骨架 + 静态配方（`disasm`/`xrefs`/`decompile`/`strings`/`capability`/`packer`） | 外部进程调用 rizin / Ghidra headless / FLOSS / capa / DIE（**不复制、不链接代码**） | ✅ 6 条静态配方落地：argv 直传（不拼 shell）、缺依赖点名+装法、按行分页（60/页）、全文落盘、`page` 越界报总页数；`triage` 直接复用 `re_triage` 保证两条入口口径一致；`trace`/`mobile` 明确报「属 P3-5 未落地」而不是假装缺依赖 | ✅ 已完成 |
 | P3-4 | `re_evidence` + 证据链闭环：`db.KindEvidence` 节点 + 调 `domain.Reverse.Verifier()` 判定 + `WriteCounts.Evidence` | 自研（规则只有一份：直接复用领域判定器，不在工具里重写） | ✅ 工具注册在 worker；claim/ref 必填硬校验；ref 是文件则哈希**内容**、否则哈希引用串并标注来源；判定不通过也落库但 state=inferred 且返回 `chain_ok=false`+hint | ✅ 已完成（含真库集成测试） |
 | P3-5 | 动态/移动配方（`trace`/`mobile`）+ 样本治理（加密存储、哈希索引、禁止整包进 LLM） | 自研（合规要求） | 请求日志里无完整样本；`trace` 只回调用序列 | 待做 |
 
