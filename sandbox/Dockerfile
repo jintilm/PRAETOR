@@ -6,6 +6,14 @@
 #   - 只装「最小可用集」：真正按域加载的工具链（pwn/rev/AD）在 P1/P2 增量加，
 #     避免镜像一开始就有几个 GB、构建十几分钟。
 #   - 不加 privileged、不挂 docker.sock、不 mount 宿主根目录。
+#
+# 构建前请先预拉基础镜像：`docker pull kalilinux/kali-rolling`
+#   原因（本项目实测多次）：Docker Desktop 的代理只覆盖 docker pull，
+#   buildkit 拉基础镜像时的 token 请求不走代理，直连 auth.docker.io 会 "Bad Gateway"。
+#   本地已有镜像时 buildkit 直接复用，不再要 token。
+# 可选组件（rizin/angr/sage…）不写在这里：由「系统设置 → 可选组件」勾选后
+#   在此基础上生成 custom 镜像层（见 internal/components）。
+
 FROM kalilinux/kali-rolling
 
 ENV DEBIAN_FRONTEND=noninteractive \
