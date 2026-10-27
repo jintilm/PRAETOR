@@ -458,6 +458,7 @@ go test ./... -count=1
 | 2026-10-26 | **P0-6**：`sandbox` 包 + worker Bash 装饰 + `praetor-sandbox` 容器；修复自测发现的 **fail-open bug**（docker exec 非零退出被当成成功，导致容器不存在也判可用） | `sandbox` 7 个用例 + `agent` 沙箱 8 个用例全绿；16 包全绿 |
 | 2026-10-26 | **P0-5**：`server/engine_scheduler.go` — `DomainPackFor` / `SchedulerPlanFor` / `SchedulerPlan`；`Engine.Run` 改为「问领域包要调度拓扑」；启动期 `WarnUnresolvedDomainTools()`；新增 `PRAETOR_DOMAINS` 环境变量（默认 `pentest`） | 6 个新测试全绿（explore 拓扑=1+N、非 explore 明确报错、默认域、env 解析）；全仓 16 包全 ok |
 | 2026-10-27 | **逆向域重新设计（配方化，零 MCP）**：不接 REA / GhidraMCP 全家桶。工具面收敛为 3 个（`re_triage` 纯 Go 全貌 / `re_recipe` 配方枚举 / `re_evidence` 唯一结论出口），外部能力以**配方表**（9 条，≤10 硬约束）挂 rizin / Ghidra headless / capa / FLOSS / DIE / jadx 等 CLI；角色 5→2、MaxTurns 190→50、并发 2→1。顺带查实 `Budget` 的 `MaxTokens`/`MaxToolCalls`/`MaxParallel` **没有任何执行层消费**（初版「6M tokens / 3000 次」从未生效），成本控制改由 P3-1 的调度闸门承担 | 新增设计契约测试 6 个（工具面=设计集、零 MCP、角色≤2、角色不得声明域外工具、预算串行有界、配方必须写许可且≤10）；`agent/domain` 19 用例全绿；`ctf.go` 的 `rea` MCP 声明同步删除 |
+| 2026-10-27 | **P2 CTF 完整设计**：工具面 2 个（`ctf_challenge`/`ctf_submit`）+ 零 MCP；竞速改为**延迟竞速（默认单路，停滞才起第二路）**，`MaxParallel` 8→2、MaxTurns 合计 285→195；首解收敛用已有 steer hook（不硬 cancel ctx、不引入 subagent）；提交侧建 `ctf_submissions`（PK=flag sha256）做去重 + ctfd/offline 双判分模式；镜像工具链改为 `CTFToolchain()` 分层表（基础层 ≤12，angr/sage/volatility3 按需）；并清掉 5 个 solver 上 **13 个不存在的工具 key**（`curl_run`/`burp_repeater`/`pwntools_run`/`gdb_run`/`checksec`/`ghidra_decompile`/`rizin_analyze`/`sagemath_run`/`ciphey_decode`/`tshark_run`/`binwalk_run`/`zsteg_run`/`volatility_run`） | 新增设计契约测试 6 个（工具面=设计集/零 MCP/角色≤6 且 MaxTurns≤200/角色必须有 Bash/不得发明工具名/预算并发≤2/工具链分层与许可）；`agent/domain` 27 用例全绿 |
 
 ---
 
@@ -471,7 +472,7 @@ go test ./... -count=1
 | --- | --- | --- |
 | P0 骨架 | 领域包 / 测试门禁 / 装配层 / 调度接缝 / 沙箱（常驻 + 一任务一容器） | ✅ 6/6 |
 | P1 渗透对齐 | hexstrike 配置层 / 确定性验证闭环（`verify_finding` + 落库）/ XBOW 基线 runner | ✅ 3/3（基线可信 **40%**，见 `docs/基线-XBOW-L1-可信版.md`） |
-| P2 CTF | race 调度器 / CTFd 仲裁 / 沙箱工具链 / Cybench 出分 | 未开始 0/4 |
+| P2 CTF | **已完整设计（2 工具 + 延迟竞速 + 提交去重 + 分层镜像）**，实现未开始 | 设计完成，P2-1~P2-6 待做 |
 | P3 逆向 | **已重新设计（3 工具 + 配方 + 零 MCP）**，实现未开始 | 设计完成，P3-1~P3-5 待做 |
 | P4 红队 | campaign 调度器 / Caldera / Sliver / GOAD | 未开始 0/4 |
 
@@ -517,20 +518,125 @@ go test ./... -count=1
 | P1-2 | 确定性验证闭环：`internal/replay` + `agent.VerifyBinding` + `verify_finding` 工具 + `verification_state` 落库（unverified/verified/suspected） | **复刻 Pentest-Swarm 的 oracle 思路**（AGPL，只读思路，自行实现） | 重放一致→verified；不一致/无证据/重放失败→suspected 并写明 reasons；**均有单测** | 已完成 |
 | P1-3 | **已实现**：`bench/xbow`（Discover 读 `benchmark.json` 的 level/tags / 分层取样 spread / `PrepareImages` 预拉 / `ComposeCLI` 起停 / 端口优先 web / flag 判分**含流量来源校验**）+ `cmd/bench`（`-levels -tags -strategy -prepull -dry-run -md -out`）+ 可信基线报告 | 接入 `xbow-engineering/validation-benchmarks`（104 题） | **已出分**：`-levels 1 -limit 10` 名义 50% → 剔除 1 个假阳性后**可信 40%（4/10）**，逐题给出 flag 命中的流量 URL 作为依据 | 已完成（基线已记录） |
 
-### P2 CTF
+### P2 CTF（2026-10-27 完整设计）
+
+**目标与判据**：在时间预算内**最大化「被平台接受的 flag 数」**。判据完全客观——`ctfVerifier` 已强制
+「`accepted` 缺失即不计分」，模型自述「解出来了」一律无效。这条不能松，松了整个域就退化成"讲故事"。
+
+**设计原则（五条，前三条与 P3 同源）**
+
+1. **工具面在模型外**：模型只看到 2 个工具，真正的能力是沙箱 CLI 工具链（见 `CTFToolchain()`）。
+   加一个工具 = 改镜像，**不改 schema**。
+2. **首解即收敛**：任一路拿到 `accepted`，立刻让同题其余 solver 停下。竞速的价值不在"跑得快"，
+   而在**省下败者的 token**。
+3. **延迟竞速（lazy race）**：默认**单路**，出现停滞信号才起第二路。并行是唯一把成本 ×N 放大的操作，
+   而多数题单路能解——一上来就 2~8 路是纯浪费（初版 `MaxParallel: 8` 就是这个问题）。
+4. **提交唯一出口**：所有 flag 只能经 `ctf_submit` 出门，由它做 格式校验 → 本地去重 → 平台提交 → 落 verdict。
+   去重放在**工具里**而不是某个角色里，任何角色调用都安全。
+5. **到顶就放弃**：单题 token/轮数到上限 → 标 `abandoned` 并写清「试过什么、建议下一步」，
+   让人能接手；不允许在同一个点上无限重试烧预算。
+
+**工具面（2 个，零 MCP）**
+
+| 工具 | 作用 | 关键约束 |
+| --- | --- | --- |
+| `ctf_challenge(id)` | 拉题面/附件清单/实例地址/剩余重置次数，**附件落盘**到 `workdir/chal/<id>/` | 只回摘要与文件路径，不回附件正文（模型用 `Read` 按需读，避免一次灌爆上下文） |
+| `ctf_submit(flag, evidence)` | **唯一提交出口**：格式校验 → 本地去重 → 提交（CTFd 或离线判分）→ 落 verdict | 返回 `accepted/rejected/duplicate` + 平台原文；失败原因原样回给模型，不做美化 |
+
+> CTFd **不走 MCP**：只需要「拉题面」「提交」两个动作，写进工具里的 HTTP 客户端比多起一个进程
+> 少一份 schema、少一条会出错的链路。
+
+**沙箱工具链（镜像分层，由 `CTFToolchain()` 定义，P2-3 落地）**
+
+| 类别 | 基础层（`Base=true`） | 非基础层（按需） |
+| --- | --- | --- |
+| pwn | `python3+pwntools`、`gdb`、`pwndbg`、`ROPgadget`、`seccomp-tools` | — |
+| rev | `rizin`、`binwalk` | — |
+| crypto | `z3`、`ciphey` | `angr`（BSD-2）、`sage`（GPL-3，GB 级） |
+| forensics | `tshark`、`zsteg`、`exiftool` | `volatility3` |
+
+> 为什么要分层：**镜像体积直接决定冷启动**，而 CTF 是抢时间的场景。三个重依赖（angr/sage/volatility3）
+> 在基础层之外，按题安装；`TestCTFToolchainIsLean` 守着「基础层 ≤12 项 + 重依赖必须非基础层」。
+
+**竞速调度（P2-1 的核心）**
+
+```
+raceLoop(task):
+  ① 枚举题目 → 建 challenge 节点；按「类型先验 × 预期难度 × 剩余时间」排序
+  ② 单路探测：为当前题建 1 个 intent（起点 A），交给现有 worker
+  ③ 每轮图更新后判停滞：连续 K 轮（默认 6）无新 fact 且无 flag，或 intent 结束仍无 flag
+  ④ 停滞 → 起第二路（起点 B：另一条攻击面/另一种工具），
+     并把「A 已试过什么」写进 B 的上下文（避免两路重踩）
+  ⑤ 任一路 ctf_submit 得到 accepted：
+       写 flag 节点（含平台回执）→ 给同题所有在跑 intent 注入 steer
+       「本题已解出，立即停止，只输出一句话」→ 摘 winner 的关键步骤成 writeup
+  ⑥ 两路都到轮数/预算上限 → abandoned（写已试清单）；换下一题
+```
+
+三个实现取舍（都比"理想方案"便宜，且复用现有机器）：
+
+- **不引入 subagent 派生**：运行时至今没有 `subagent.` 的调用点（只有 domain 包内的声明），
+  所以 race 第一版复用现有 **worker + intent** 机制，不新增一层 agent。
+- **不硬 cancel ctx**：用已有的 steer hook 注入「本题已解出，立即停止」，让 worker 在下一轮自然收尾。
+  这比给每个 intent 造独立 ctx 便宜得多，也不会把半截输出丢掉。
+- **停滞判定只读现有数据**：用探索图的 fact 增量与 activity，不新建表。
+
+**提交仲裁与去重（P2-2）**
+
+```
+ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_response)
+  - PK 用 flag 的 sha256 → 天然去重（同一 flag 全局只发一次）
+  - verdict: accepted | rejected | duplicate
+  - 命中已存在记录：直接返回缓存 verdict，不再打平台（防重复扣分/风控/重复计分）
+  - rejected 的 flag 不允许"再试一次"：同一 flag 反复提交是纯浪费
+```
+
+两种判分模式（同一个工具出口，靠配置切换）：
+
+| 模式 | 何时用 | 判据 |
+| --- | --- | --- |
+| `ctfd` | 真实比赛/靶场 | `POST /api/v1/challenges/attempt` 返回 `status=correct` |
+| `offline` | 基准跑分（Cybench / NYU 子集） | 与题库给定 flag 精确匹配（不用联网） |
+
+**成本模型（定闸门用，不是预测）**
+
+| 场景 | 单题 input 估算 | 说明 |
+| --- | --- | --- |
+| 单路 25 轮 | ~450K | 12K 固定 + 增长，中位 ~18K/轮 |
+| eager 2 路（总是并行） | ~900K | 初版的隐含成本 |
+| **lazy race（约 40% 需要第二路）** | **~630K** | 比 eager 省 ~30% |
+| 40 题全量（lazy） | ~25M | 所以基准必须 `-limit` 分批 |
+
+**基准（P2-4）**：复用 `bench/xbow` 的结构（Discover / Run / Summary），换判分器为「离线 flag 比对」。
+- 题库：Cybench 40 题（Apache-2.0）；NYU CTF Bench 子集（**GPL-2.0：题库只作评测用，不复制代码**）
+- 指标：解出数、**time-to-flag**、每题 input tokens、工具调用次数、被拒提交次数、去重拦截次数
+- 口径：先出基线，之后每次改动的分数**不得低于上一版基线**（与 P1-3 同一条纪律，不先编目标分）
 
 | ID | 任务 | 做法 / 复刻来源 | 验收 | 状态 |
 | --- | --- | --- | --- | --- |
-| P2-1 | `raceScheduler`：同题多解并行、首解收敛、失败换模型 | **复刻 `verialabs/ctf-agent` 的 coordinator + solver swarm 结构**（MIT，可复制） | 单题可在 2 个 solver 并行下收敛 | 待做 |
-| P2-2 | CTFd 答题 + flag 仲裁（去重，避免重复提交） | 同上（其 CTFd token 接入方式） | 重复 flag 只提交一次 | 待做 |
-| P2-3 | CTF 沙箱工具链（pwntools/pwndbg/angr/z3，逆向题另需 rizin/binwalk） | 复刻 `chainreactors/tinyctfer` 的 sandbox 镜像构成（先确认许可） | 能跑通 1 道 pwn，且 1 道 rev 可反汇编定位校验点 | 待做 |
-| P2-4 | Cybench 40 题 + NYU CTF Bench 子集出分 | 接入 benchmark | 分数记录到本文件 | 待做 |
+| P2-1 | `raceScheduler`：lazy race + 停滞判定 + 首解收敛 + 预算闸门 | **复刻 `verialabs/ctf-agent` 的 coordinator + solver swarm 结构**（MIT，可复制）；收敛用本项目已有的 steer hook | 单题两路并行能收敛；首解后另一路在 **1 轮内**停止；到顶能 abandoned 并留下已试清单 | 待做 |
+| P2-2 | `ctf_challenge` / `ctf_submit` 两个工具 + 去重表 + 双判分模式（ctfd / offline） | CTFd API（Apache-2.0，外部服务调用） | 同一 flag 提交两次，平台只收到一次；rejected 不复投；附件落盘且不回正文 | 待做 |
+| P2-3 | CTF 沙箱镜像：基础层 + crypto 可选层 | 按 `CTFToolchain()` 构建；重依赖不进基础层 | 基础镜像 ≤12 项且能跑通 1 道 pwn + 1 道 forensics；`angr/sage` 按需装 | 待做 |
+| P2-4 | Cybench 40 题 + NYU 子集出分（复用 `bench/xbow` 结构） | 接入 benchmark，离线判分 | 出基线分并记录到本文件；含 time-to-flag 与每题 token | 待做 |
+| P2-5 | **per-intent 模型路由**（换模型竞速） | 自研：模型现在是任务级 profile 链（`task_llm.go` 的 `ActiveLLMProfileID`），要做 per-intent 需改解析层 | 同一题两路可用不同 profile；失败路回退换模型 | 待做 |
+| P2-6 | 题目优先级与放弃策略（按分值/剩余时间/预算动态排序） | 自研；参考 ctf-agent 的"先易后难 + 限时放弃" | 预算紧时优先高分易题；放弃的题有记录 | 待做 |
 
-> **逆向题的工具面（2026-10-27 随 P3 重新设计同步）**：CTF 的 `solver-rev` **不挂任何逆向 MCP**
-> （`ctf.go` 里原来那条 `rea` MCP 声明已删除）。解题用沙箱内 CLI（`rizin`/`radare2`、`binwalk`、`gdb`，
-> 与 P2-3 的镜像一起准备），逆向域落地后可复用其配方（`disasm`/`xrefs`/`decompile`）。
-> 注意 `solver-rev` 现在仍声明着 `ghidra_decompile` / `rizin_analyze` / `gdb_run` 三个 key ——
-> 它们属于 **P2-3 待接入**，`UnresolvedDomainTools` 会如实报缺；**不要为了消掉告警去接 MCP**。
+**已知限制（写在这里，别当成已实现）**
+
+1. **第一版不换模型**：race 靠「换起点/换思路」，不靠「换模型」（P2-5 才做）。
+2. **CTFd 需要 token**：拿不到就退化为 `offline` 模式；基准跑分用的是 offline。
+3. **无 subagent 派生**：race 跑在现有 worker 上，所以「两路」= 两条 intent，不是两个 agent。
+4. **实例重置次数**：CTFd 题目有 reset 限制，`ctf_challenge` 会回报剩余次数，策略上要留余量。
+
+**风险与回滚**
+
+| 风险 | 兜底 |
+| --- | --- |
+| 并行把预算烧光 | `MaxParallel ≤2` + 单题 token 闸门 + 首解即收敛（三道） |
+| flag 误判 | Verifier 只认 `accepted`；离线模式必须精确匹配 |
+| 重复提交被平台风控 | 去重表 PK 用 flag 哈希，命中直接返回缓存 |
+| 镜像过大拖慢冷启动 | 分层 + 测试守着「基础层 ≤12」 |
+| race 调度写错导致任务卡死 | 保留 `PRAETOR_CTF_RACE=off` 回落到单路串行（与 explore 等价） |
 
 ### P3 逆向（2026-10-27 重新设计：配方化，零 MCP）
 
@@ -623,7 +729,12 @@ go test ./... -count=1
 | `usestrix/strix` | Apache-2.0 | agent 图编排结构、沙箱镜像分层、`strix view` 回放思路 | 可复制代码 |
 | `vxcontrol/pentagi` | MIT | 沙箱内跑工具的做法、summarizer 压缩策略、pgvector 长期记忆 | 可复制代码 |
 | `norma`（已在依赖里） | 同源 SDK | `subagent` / `coordinator` / `filterTools` / `skill` | 直接用 |
-| `verialabs/ctf-agent` | MIT | coordinator + solver swarm、CTFd 接入 | 可复制代码 |
+| `verialabs/ctf-agent` | MIT | coordinator + solver swarm、CTFd 接入、**懒惰竞速的取舍** | 可复制代码 |
+| `andyzorigin/cybench` | Apache-2.0 | CTF 评测集（40 题）与判分口径 | 评测使用（外部调用） |
+| `NYU-LLM-CTF/NYU_CTF_Bench` | **GPL-2.0** | 题库与基线思路 | **只读思路**（题库仅评测用，不复制代码） |
+| `CTFd/CTFd` | Apache-2.0 | 判题/提交 API（`/api/v1/challenges/attempt`） | 外部服务调用 |
+| `pwndbg/pwndbg`、`ciphey/ciphey`、`ReFirmLabs/binwalk` | MIT | 镜像内 CLI（pwn / crypto / rev） | 外部进程调用 |
+| `Gallopsled/pwntools`、`Z3Prover/z3`、`JonathanSalwan/ROPgadget`、`volatilityfoundation/volatility3` | 未标注（GitHub 未识别） | 镜像内 CLI | 外部进程调用，**不复制代码** |
 | `rizinorg/rizin` | **LGPL-3.0** | 反汇编 / 交叉引用 CLI（`disasm`、`xrefs` 配方） | 外部进程调用，不链接代码 |
 | `NationalSecurityAgency/ghidra` | Apache-2.0 | headless 反编译脚本（`decompile` 配方，**不接 MCP**） | 外部进程调用 |
 | `mandiant/capa` | Apache-2.0 | 能力识别（`capability` 配方） | 外部进程调用 |
@@ -632,7 +743,7 @@ go test ./... -count=1
 | `skylot/jadx` + `iBotPeaches/Apktool` | Apache-2.0 | APK 解包与类清单（`mobile` 配方） | 外部进程调用 |
 | `lief-project/LIEF` | Apache-2.0 | 可执行格式的字段划分（`re_triage` 纯 Go 自研，只参考字段口径） | **只读思路** |
 | `hasherezade/pe-sieve` | BSD-2-Clause | 进程注入 / hollowing dump（候选配方，未进默认表） | 外部进程调用 |
-| `Angr/angr` | BSD-2-Clause | 符号执行（候选，重，默认不开） | 外部进程调用 |
+| `Angr/angr` | BSD-2-Clause | 符号执行：逆向域候选 / CTF crypto 非基础层 | 外部进程调用 |
 | `qilingframework/qiling` | GPL-2.0 | 模拟执行 | **只读思路** |
 | `morluto/rea`、`bethington/ghidra-mcp`（200+ 工具）、`LaurieWired/GhidraMCP`、`cyberkaida/ReVa`、`clearbluejar/pyghidra-mcp`、`mrexodia/ida-pro-mcp` | Apache-2.0 / MIT | **反面参照：MCP 工具面过大，明确不接**（理由见 P3 设计） | 不采用 |
 | `apache/caldera` / `redcanaryco/atomic-red-team` | Apache-2.0 / MIT | 战役编排、TTP 原子 | 直接接入 |
