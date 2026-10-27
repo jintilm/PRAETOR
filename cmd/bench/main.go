@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -32,7 +33,10 @@ func main() {
 		token    = flag.String("token", os.Getenv("PRAETOR_BENCH_TOKEN"), "JWT（留空则用 -password 登录获取）")
 		password = flag.String("password", os.Getenv("PRAETOR_BENCH_PASSWORD"), "登录密码（仅用于换 token）")
 		only     = flag.String("only", "", "只跑这些题目 ID，逗号分隔")
-		limit    = flag.Int("limit", 0, "只跑前 N 题（0=全部）")
+		limit    = flag.Int("limit", 0, "取样 N 题（0=全部）")
+		levels   = flag.String("levels", "", "只跑这些难度档（如 1,2），空=全部")
+		tags     = flag.String("tags", "", "只跑含这些标签的题（如 xss,sqli），空=全部")
+		strategy = flag.String("strategy", "spread", "取样策略：spread（按难度铺开，默认）| head（目录序前 N）")
 		taskTO   = flag.Duration("task-timeout", 30*time.Minute, "单题任务超时")
 		waitTO   = flag.Duration("wait-timeout", 45*time.Minute, "单题最长等待")
 		poll     = flag.Duration("poll", 10*time.Second, "任务状态轮询间隔")
@@ -53,9 +57,41 @@ func main() {
 		fatal(err)
 	}
 	fmt.Printf("发现 %d 道题\n", len(challenges))
+
+	// 先把 CLI 参数解析成 Options 的筛选条件——dry-run 与真跑共用同一份取样逻辑，
+	// 否则预览出来的题可能和实际跑的不是同一批。
+	var ids []string
+	if s := strings.TrimSpace(*only); s != "" {
+		ids = strings.Split(s, ",")
+		for i := range ids {
+			ids[i] = strings.TrimSpace(ids[i])
+		}
+	}
+	lvls, err := parseLevels(*levels)
+	if err != nil {
+		fatal(err)
+	}
+	var tagList []string
+	if s := strings.TrimSpace(*tags); s != "" {
+		tagList = strings.Split(s, ",")
+		for i := range tagList {
+			tagList[i] = strings.TrimSpace(tagList[i])
+		}
+	}
+	strat := xbow.Strategy(strings.ToLower(strings.TrimSpace(*strategy)))
+	if strat != xbow.StrategySpread && strat != xbow.StrategyHead {
+		fatal(fmt.Errorf("-strategy 只能是 spread 或 head，收到 %q", *strategy))
+	}
+	pickOpt := xbow.Options{
+		Root: *root, Only: ids, Limit: *limit,
+		Levels: lvls, Tags: tagList, Strategy: strat,
+	}
+
 	if *dryRun {
-		for _, c := range challenges {
-			fmt.Printf("  %-16s %s\n", c.ID, c.Name)
+		sel := xbow.Select(challenges, pickOpt)
+		fmt.Printf("将跑 %d 道题（strategy=%s）:\n", len(sel), strat)
+		for _, c := range sel {
+			fmt.Printf("  %-16s L%-2d %-56s %s\n", c.ID, c.Level, c.Name, strings.Join(c.Tags, ","))
 		}
 		return
 	}
@@ -75,18 +111,13 @@ func main() {
 		client.Token = tk
 	}
 
-	var ids []string
-	if s := strings.TrimSpace(*only); s != "" {
-		ids = strings.Split(s, ",")
-		for i := range ids {
-			ids[i] = strings.TrimSpace(ids[i])
-		}
-	}
-
 	sum, err := xbow.Run(ctx, xbow.Options{
 		Root:        *root,
 		Only:        ids,
 		Limit:       *limit,
+		Levels:      lvls,
+		Tags:        tagList,
+		Strategy:    strat,
 		TaskTimeout: *taskTO,
 		WaitTimeout: *waitTO,
 		Poll:        *poll,
@@ -144,6 +175,27 @@ func login(ctx context.Context, api, password string) (string, error) {
 		return "", fmt.Errorf("登录响应没有 token: %s", strings.TrimSpace(string(raw)))
 	}
 	return out.Token, nil
+}
+
+// parseLevels 解析 -levels（如 "1,2"）。
+func parseLevels(s string) ([]int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	var out []int
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, fmt.Errorf("难度档 %q 不是数字", part)
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 func fatal(err error) {
