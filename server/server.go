@@ -222,6 +222,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		wireTools(m.pg, domainReg)      // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
 		WireSandbox(s.ctx, m.DataDir()) // 沙箱：探测容器并注入 runner（required 不可用则 fail-closed）
 		seedMCPPresets(m.pg)            // 已配置的外部 MCP 预设（如 hexstrike）：只在缺失时插入
+		WarnEvidenceChainDisarmed(m.pg) // 证据链前置开关（捕获/自动绑定）关掉时告警：静默失效很难查
 		seedPrompts(m.pg)               // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
 		s.seedOrchestrationTools()      // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
 		if err := s.seedFindingRetester(); err != nil {

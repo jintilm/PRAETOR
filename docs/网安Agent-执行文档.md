@@ -120,6 +120,35 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 
 **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
 
+### 1.10 证据链前置开关（实战踩坑，已加护栏）
+
+Pikachu 实战（2026-10-27）暴露了一个**静默失效**：agent 真的测出并复现了 SQLi/XSS，
+但流量索引为空、finding 的 `verification_state` 一直停在 `unverified`，**全程没有一条
+错误日志指向真正原因**。根因是两个**默认关**的开关：
+
+| 开关 | 默认 | 关掉后的表现（都不报错） |
+| --- | --- | --- |
+| `traffic_capture` | **false** | worker 不注入代理 env（`HTTP_PROXY` 等）→ 请求不经 MITM → 流量索引为空；`traffic_*` 工具与提示词流量段都不注入 |
+| `agent_traffic_binding` | **false** | 流量有记录，但 reporter 不自动把流量挂到 finding 上 → 证据链永远空 |
+
+也就是说：**agent 照常跑、照常报漏洞，但拿不出可复现证据**。
+
+处置：
+1. 启动期新增 `WarnEvidenceChainDisarmed`（`server/evidence_guard.go`）：只告警、**不回写配置**
+   （开关是用户的显式选择，代码不该替用户改）。捕获关 → 提示开捕获；捕获开但绑定关 → 提示需人工/显式绑定。
+2. 跑渗透任务前的自检清单：
+   ```bash
+   # 两个都要 true
+   curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8797/api/settings | grep -o '"traffic_capture":[a-z]*'
+   # 开启
+   curl -s -X PUT http://127.0.0.1:8797/api/settings -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" -d '{"traffic_capture":true,"agent_traffic_binding":true}'
+   ```
+
+**另一条同源教训**：`.env` 改了必须**重启服务**。`/api/tasks/{id}/llm/resolution` 报的
+`source: environment` 只反映进程启动时读到的值，不代表 `.env` 现值——排查「配置明明改了却不生效」
+先重启再看。（实战里就是：`.env` 已换新 base_url/key，进程还跑着旧 key，一直 400「计费账户已被冻结」。）
+
 ### 1.9 基线跑分（P1-3）
 
 ```bash
@@ -260,6 +289,7 @@ go test ./... -count=1
 | 2026-10-26 | 修正 pack 里凭 grep 猜错的工具名：`add_finding`→`report_finding`；删掉不存在的 `coverage`/`asset_coverage`/`list_worker_traces`/`bind_finding_traffic`/`get_finding_traffic`/`goals`，换成真实存在的 `list_untested_assets`/`get_worker_trace`/`search_all_worker_traces` | 由 `TestDomainToolSeeds` 断言 pentest 域缺失集为空 |
 | 2026-10-26 | **改名 ARTEX → PRAETOR**：module path、二进制/镜像、前端品牌与偏好 key、登录用户名、文档全量更新；env 加 `PRAETOR_*` 优先 + `ARTEX_*` 兜底兼容层 | `go build ./...` OK；16 包全绿；`TestEnvPrefersNewPrefix` 锁定兼容顺序 |
 | 2026-10-26 | 沙箱方案定稿：形态 A（常驻工具容器 + `docker exec`）+ `PRAETOR_SANDBOX=required\|optional` 默认 required | 决策入档 §1.5 |
+| 2026-10-27 | **Pikachu 实战首次跑通证据链闭环**：任务 #6 `done`，2 个漏洞自动 `verified`（similarity=1.000：SQL Injection + Reflected XSS）+ 8 条流量绑定 + 179 条流量入库。过程中定位并修掉 4 个卡点（靶场 build 未走代理、`traffic_capture` 未开、`agent_traffic_binding` 未开、服务未重启仍读旧 LLM key） | 新增启动期 `WarnEvidenceChainDisarmed` 护栏（只告警不改配置）+ 单测；真库 18 包全绿 |
 | 2026-10-26 | **P1-3 骨架**：`bench/xbow`（Discover/ComposeCLI/FirstHTTPPort/FlagMatcher/Run/Summary.Markdown）+ `cmd/bench`（-dry-run/-only/-limit/-keep/-md/-out，支持密码换 token） | 10 个单测（发现/端口优先级/flag 匹配/编排三类结果/失败不提交/跳过计分母）；CLI dry-run 冒烟通过 |
 | 2026-10-26 | **P1-1**：`db.SeedMCPServer`（幂等预设播种，`ON CONFLICT DO NOTHING`，不覆盖用户配置）+ `server/mcp_presets.go`（hexstrike 预设构造/校验，未配置不写库） | `db` 2 个用例（真库幂等 + 入参校验）、`server` 3 个用例（构造/覆盖/拒绝缺失）；全仓绿 |
 | 2026-10-26 | **修真库测试红灯**：① 修真 bug `evidence` 目录 fsync（Windows 绑流量 422）② 修测试收尾泄漏 ③ 更新过时断言（coverage 已无 scope 字段）④ 唯一化跨轮数据 + `llmrec` 补 advisory lock + DB 套件 `-p 1` | 真库 `go test -p 1 ./...` 连跑 2 次全绿；无库 18 包全绿 |
