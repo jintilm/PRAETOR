@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -103,6 +104,45 @@ func guestChallengePath(root, hostPath string) string {
 	return path.Join(challengeMountTarget, filepath.ToSlash(rel))
 }
 
+// taskWorkHost 返回该任务工作目录的宿主路径，与 NewPerTask 同一套解析规则
+// （相对路径要展开，否则 docker 会把它当卷名）。
+func (s *Server) taskWorkHost(t *Task) string {
+	root := envOr("SANDBOX_WORK_ROOT", filepath.Join(s.m.DataDir(), "work"))
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	return filepath.Join(root, t.ID)
+}
+
+// resolveContainerPath 把容器路径翻成宿主路径，并保证结果**真的**落在挂载里。
+//
+// 二次校验不是多余的：路径前缀（filepath.Rel）只比字面，挡不住符号链接。
+// 容器里可以 `ln -s /home/lin/.ssh /work/k`（/work 是宿主目录的 bind mount），
+// 文件工具在宿主上打开 /work/k 时，内核按**宿主**的根解析这条链接 ——
+// 于是一个"沙箱内路径"读到了沙箱外的文件。所以翻完还要把链接解析掉再比一次。
+//
+// 返回 false = 不归本函数管（未命中挂载）或解析后越界；两种都让调用方按"没有这条路径"处理，
+// 也就是 fail closed。
+func (s *Server) resolveContainerPath(t *Task, p string) (string, bool) {
+	p = filepath.ToSlash(strings.TrimSpace(p))
+	if s == nil || t == nil || t.ID == "" || p == "" {
+		return "", false
+	}
+	workHost := s.taskWorkHost(t)
+	if host, ok := translateMount(p, SandboxContainerRoot, workHost); ok {
+		return withinRoot(workHost, host)
+	}
+	// 每次调用重新取，不能在构造时快照：题面目录是**任务建好之后**才配的
+	// （POST /tasks/{id}/ctf），而 worker 在任务创建时就构造好了 ——
+	// 快照会让 /chal 的映射永远缺失，症状正是 LS /chal 报 cannot find the file。
+	for _, m := range s.mountsForTask(t) {
+		if host, ok := translateMount(p, m.Target, m.Source); ok {
+			return withinRoot(m.Source, host)
+		}
+	}
+	return "", false
+}
+
 // sandboxPathMapper 返回「容器内路径 → 宿主路径」的翻译器，供文件类工具使用。
 //
 // 为什么需要它：Bash 走容器，但 LS/Read/Glob/Grep/Write 在宿主进程里用 os 打开文件。
@@ -117,33 +157,8 @@ func (s *Server) sandboxPathMapper(t *Task) func(string) (string, bool) {
 	if s == nil || t == nil || t.ID == "" {
 		return nil
 	}
-	// 与 NewPerTask 保持同一套解析：相对路径要展开，否则映射出来的宿主路径也是相对的。
-	root := envOr("SANDBOX_WORK_ROOT", filepath.Join(s.m.DataDir(), "work"))
-	if abs, err := filepath.Abs(root); err == nil {
-		root = abs
-	}
-	workHost := filepath.Join(root, t.ID)
-
 	return func(p string) (string, bool) {
-		p = filepath.ToSlash(strings.TrimSpace(p))
-		if p == "" {
-			return "", false
-		}
-		if host, ok := translateMount(p, SandboxContainerRoot, workHost); ok {
-			return host, true
-		}
-		// 每次调用重新取，不能在构造时快照。
-		//
-		// 题面目录是**任务建好之后**才配的（POST /tasks/{id}/ctf），而 worker 在任务创建时
-		// 就构造好了 —— 快照会让 /chal 的映射永远缺失，症状正是 LS /chal 报
-		// "open /chal: cannot find the file"，看着像挂载没生效。
-		// 这与题面来源改用惰性解析是同一个坑，同一个顺序：先建任务、后配题。
-		for _, m := range s.mountsForTask(t) {
-			if host, ok := translateMount(p, m.Target, m.Source); ok {
-				return host, true
-			}
-		}
-		return "", false
+		return s.resolveContainerPath(t, p)
 	}
 }
 
@@ -161,30 +176,113 @@ func (s *Server) sandboxWriteDeny(t *Task) func(string) string {
 	if s == nil || t == nil || t.ID == "" {
 		return nil
 	}
+	// 三个理由分开写：模型看到的原因不同，下一步动作也不同
+	// （只读 → 换地方写；越界 → 别用这个链接；没挂载 → 别用宿主路径）。
+	const (
+		roReason    = "%s 是只读挂载（题面附件），不能修改；把产物写到 " + SandboxContainerRoot + "/ 下"
+		outsideFmt  = "%s 解析后落到了挂载之外（符号链接指向外部），拒绝访问；把产物写到 " + SandboxContainerRoot + "/ 下"
+		unmappedFmt = "沙箱里没有 %s 这条路径的挂载，写不到（宿主的 /tmp、/etc 不属于本任务）；把产物写到 " + SandboxContainerRoot + "/ 下"
+	)
 	return func(p string) string {
 		p = filepath.ToSlash(strings.TrimSpace(p))
 		if p == "" {
 			return ""
 		}
-		// 工作目录永远可写：它是模型的草稿纸。
-		if hitsMount(p, SandboxContainerRoot) {
+		// 一、宿主写法（提示词兜底时会出现）：按它所属挂载的读写属性判。
+		workHost := s.taskWorkHost(t)
+		if hitsMountFold(p, workHost) {
+			if _, ok := withinRoot(workHost, p); !ok {
+				return fmt.Sprintf(outsideFmt, p)
+			}
 			return ""
 		}
-		// 每次重取，理由同 sandboxPathMapper：题面目录是任务建好之后才配的。
 		for _, m := range s.mountsForTask(t) {
-			if hitsMount(p, m.Target) || hitsMountFold(p, m.Source) {
-				if m.ReadOnly {
-					return fmt.Sprintf("%s 是只读挂载（题面附件），不能修改；把产物写到 %s/ 下",
-						p, SandboxContainerRoot)
-				}
-				return ""
+			if !hitsMountFold(p, m.Source) {
+				continue
 			}
+			if m.ReadOnly {
+				return fmt.Sprintf(roReason, p)
+			}
+			if _, ok := withinRoot(m.Source, p); !ok {
+				return fmt.Sprintf(outsideFmt, p)
+			}
+			return ""
 		}
-		if strings.HasPrefix(p, "/") {
-			return fmt.Sprintf("沙箱里没有 %s 这条路径的挂载，写不到（宿主的 /tmp、/etc 不属于本任务）；"+
-				"把产物写到 %s/ 下", p, SandboxContainerRoot)
+		// 二、相对路径：落在工作目录里，可写。
+		if !strings.HasPrefix(p, "/") {
+			return ""
 		}
-		return ""
+		// 三、容器写法。
+		if hitsMount(p, SandboxContainerRoot) {
+			if _, ok := s.resolveContainerPath(t, p); !ok {
+				return fmt.Sprintf(outsideFmt, p)
+			}
+			return ""
+		}
+		for _, m := range s.mountsForTask(t) {
+			if !hitsMount(p, m.Target) {
+				continue
+			}
+			if m.ReadOnly {
+				return fmt.Sprintf(roReason, p)
+			}
+			if _, ok := s.resolveContainerPath(t, p); !ok {
+				return fmt.Sprintf(outsideFmt, p)
+			}
+			return ""
+		}
+		return fmt.Sprintf(unmappedFmt, p)
+	}
+}
+
+// withinRoot 解析 p 里的符号链接，确认最终仍落在 root 之下，返回真实路径。
+//
+// 为什么必须做：容器里可以 `ln -s <宿主某个路径> /work/k`（/work 是宿主目录的 bind mount），
+// 文件工具在宿主上打开 /work/k 时，内核按**宿主**的根解析这条链接 —— 于是一个"沙箱内路径"
+// 读到了沙箱外的文件。路径前缀检查（filepath.Rel）只比字面，挡不住这一层。
+func withinRoot(root, p string) (string, bool) {
+	real, err := realPath(p)
+	if err != nil {
+		return "", false
+	}
+	rootReal, err := realPath(root)
+	if err != nil {
+		return "", false
+	}
+	if !hitsMountFold(real, rootReal) {
+		return "", false
+	}
+	return real, true
+}
+
+// realPath 逐级解析符号链接；路径尾部不存在时，解析最近的已存在祖先再把尾部拼回去。
+//
+// 直接调 EvalSymlinks 对"还不存在的文件"会报错，而 Write 的常态正是写一个新文件 ——
+// 那种情况下必须校验它的父目录，否则新建文件就成了绕过校验的口子。
+func realPath(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	cur := abs
+	var tail []string
+	for {
+		if _, err := os.Lstat(cur); err == nil {
+			real, err := filepath.EvalSymlinks(cur)
+			if err != nil {
+				return "", err
+			}
+			for i := len(tail) - 1; i >= 0; i-- {
+				real = filepath.Join(real, tail[i])
+			}
+			return real, nil
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return abs, nil
+		}
+		tail = append(tail, filepath.Base(cur))
+		cur = parent
 	}
 }
 
