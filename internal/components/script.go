@@ -47,28 +47,32 @@ func RenderDockerfile(items []Item) string {
 		b.WriteString("# 未选择任何可选组件\n")
 		return b.String()
 	}
-	// 基础准备层：apt 源与重试。
-	// 为什么要单独一层：extras 层可能叠在**旧**基镜像上（那时官方源还在），
-	// 而官方源在本机被镜像 403 拒绝 —— 不兜这一下，"装组件"会在完全无关的地方失败。
-	b.WriteString("\n# 基础准备：apt 源与重试（幂等）\n")
+	// 基础准备层：源 + 重试 + **更新索引并保留**。三件事都必须在这一层做：
+	//   1) 源：extras 可能叠在旧基镜像上，而官方源在本机被镜像 403 拒绝；
+	//   2) 重试：镜像偶发 5xx 时 apt 默认不重试；
+	//   3) apt-get update：基础镜像末尾删了 /var/lib/apt/lists/*，不在这里更新，
+	//      后面的组件层会直接 "Unable to locate package"（实测踩到）。
+	b.WriteString("\n# 基础准备：apt 源 + 重试 + 更新索引（保留给各组件层复用）\n")
 	b.WriteString("RUN set -eux; \\\n")
 	b.WriteString("    if [ -f /etc/apt/sources.list.d/kali.sources ]; then " +
 		"sed -i 's|http://http.kali.org/kali|" + KaliMirror + "|g' /etc/apt/sources.list.d/kali.sources; fi; \\\n")
-	b.WriteString("    printf 'Acquire::Retries \"5\";\\n' > /etc/apt/apt.conf.d/99praetor-retry\n")
+	b.WriteString("    printf 'Acquire::Retries \"5\";\\n' > /etc/apt/apt.conf.d/99praetor-retry; \\\n")
+	b.WriteString("    apt-get update\n")
 
 	for _, it := range items {
 		fmt.Fprintf(&b, "\n# %s (%s, %dMB 约) — %s\n", it.Title, it.ID, it.SizeMB, it.Why)
 		b.WriteString("RUN set -eux; \\\n")
-		for i, cmd := range it.Install {
-			line := "    " + cmd
-			if i < len(it.Install)-1 {
-				line += "; \\"
-			}
-			b.WriteString(line + "\n")
+		// 每条命令都必须以 `; \` 续行结尾 —— 否则下一条会变成独立指令。
+		// 曾经只在"非最后一条"加分号，单命令组件就生成出以 `;` 开头的新行，
+		// docker 直接报 `unknown instruction: ;`（实测踩到）。
+		for _, cmd := range it.Install {
+			b.WriteString("    " + cmd + "; \\\n")
 		}
-		// apt 列表集中清理（pip/gem 项也顺带清，幂等）
-		b.WriteString("    ; rm -rf /var/lib/apt/lists/*\n")
+		b.WriteString("    true\n")
 	}
+	// 统一清理：索引在构建期要给每个组件层复用，最后再删，避免镜像白胖几十 MB。
+	b.WriteString("\n# 清理：apt 缓存与包索引\n")
+	b.WriteString("RUN set -eux; apt-get clean; rm -rf /var/lib/apt/lists/*\n")
 	return b.String()
 }
 

@@ -149,25 +149,33 @@ R6 说外部工具是可选加速器 —— 但「可选」不等于「让用户
 - 四个接口行为正确（清单 14 项 / 未知 ID→400 / 基础镜像缺失→409 带可执行命令 / 探测无镜像→409）；
 - **探测链路已在真实镜像上验证**：临时给基础镜像打 tag 后 `POST /probe` 返回 14 项且全部正确判为未装（kali 基础镜像确实没有 gdb/rizin/angr…），验证完已移除该 tag。
 
-**⚠️ 本机镜像构建被环境挡住（不是代码问题，但会挡住"应用"）**：
+**✅ 端到端已验证（2026-10-27）**：
 
-```
-E: Failed to fetch http://http.kali.org/... 500
-connecting via container settings HTTP proxy http://host.docker.internal:7897:
-dial tcp: lookup host.docker.internal: no such host
-```
+| 步骤 | 结果 |
+| --- | --- |
+| 基础镜像构建 | `praetor/sandbox:latest` **553MB**（kali + nmap/python3/git 等最小集） |
+| 面板应用 `gdb` | 202 启动构建 → 约 2 分钟完成 → `praetor/sandbox:custom-eb685c80` **658MB**（+105MB） |
+| 探测（真实 `docker run`） | `gdb ok=true · GNU gdb (Debian 18.1-3) 18.1`，其余 13 项正确判为未装 |
+| 直接进容器复核 | `gdb --version` → `GNU gdb (Debian 18.1-3) 18.1` |
+| 重复应用同一选择 | **0.57s 返回 `skipped:true`**（不重复构建，直接切换） |
+| settings 落库 | `sandbox.extras=gdb` / `sandbox.image=custom-eb685c80` / `sandbox.extras.built=…` |
 
-排查过程：运行时容器 `apt-get update` **正常**（4.8MB/s）；构建容器里 `getent hosts host.docker.internal`
-也能解析到 `192.168.65.254`；但 Docker Desktop 注入的**容器代理网关自己解析不了该域名**，
-于是构建期所有 `apt` 失败。已验证无效的手段：`--add-host`、`--build-arg http_proxy=`、
-RUN 内 `unset http_proxy`、`DOCKER_BUILDKIT=0`（全部仍走透明代理）。
+**这一轮真机构建暴露并修掉的 3 个问题**（都是"单测绿、真跑必炸"的类型）：
 
-修法（需手动改 Docker Desktop）：Settings → Resources → Proxies → 关闭「Use proxy for containers」
-（或改用手动代理并填容器可达的地址）→ Apply & restart。修好后「应用」即可正常构建。
+1. **Dockerfile 续行错误**：单命令组件生成出以 `;` 开头的新行（上一行没续行符）→
+   `dockerfile parse error: unknown instruction: ;`。
+   修法：每条安装命令统一以 `; \` 结尾 + 末行 `true`；并加 `validateDockerfile()` 测试
+   做**语法形状校验**（以后这类错误在单测阶段就会被拦下）。
+2. **extras 层缺 `apt-get update`**：基础镜像末尾删了 `/var/lib/apt/lists/*`，
+   组件层直接 `apt-get install` → `E: Unable to locate package gdb`。
+   修法：准备层更新索引并**保留**，最后单独一层 `apt-get clean` + 删索引（既保住分层缓存，也不让镜像变胖）。
+3. **kali 官方源被镜像 403**：`http.kali.org` 是重定向器，本机落到清华镜像后被 **403** 拒绝
+   （同网络实测阿里云/中科大/kali.download 均 200）。修法：`ARG PRAETOR_KALI_MIRROR`
+   默认阿里云，非 CN 环境可 `--build-arg` 改回官方；同时加 `Acquire::Retries=5`。
 
-面板已**自动识别这个特征**并在失败信息里给出上述修法（`errorLines` 会挑出
-`container settings HTTP proxy` / `no such host` 这类有信息量的行，而不是只回传
-docker 那句 `exit code: 100`）。
+另外，Docker Desktop 的「容器代理」在构建期会拦截并要求解析 `host.docker.internal`，
+本机曾因解析失败导致所有构建期 apt 挂掉（运行时正常）。该设置在 Docker Desktop →
+Resources → Proxies 关闭后已恢复；面板会识别这个特征并在失败信息里直接给出修法。
 
 ### 1.12 三项修补（通用性说明）
 
@@ -507,6 +515,7 @@ go test ./... -count=1
 | 2026-10-27 | **P2 CTF 完整设计**：工具面 2 个（`ctf_challenge`/`ctf_submit`）+ 零 MCP；竞速改为**延迟竞速（默认单路，停滞才起第二路）**，`MaxParallel` 8→2、MaxTurns 合计 285→195；首解收敛用已有 steer hook（不硬 cancel ctx、不引入 subagent）；提交侧建 `ctf_submissions`（PK=flag sha256）做去重 + ctfd/offline 双判分模式；镜像工具链改为 `CTFToolchain()` 分层表（基础层 ≤12，angr/sage/volatility3 按需）；并清掉 5 个 solver 上 **13 个不存在的工具 key**（`curl_run`/`burp_repeater`/`pwntools_run`/`gdb_run`/`checksec`/`ghidra_decompile`/`rizin_analyze`/`sagemath_run`/`ciphey_decode`/`tshark_run`/`binwalk_run`/`zsteg_run`/`volatility_run`） | 新增设计契约测试 6 个（工具面=设计集/零 MCP/角色≤6 且 MaxTurns≤200/角色必须有 Bash/不得发明工具名/预算并发≤2/工具链分层与许可）；`agent/domain` 27 用例全绿 |
 | 2026-10-27 | **P3-2 `re_triage` 落地 + R6 铁律**：新增 `internal/binfmt`（纯 Go 解析 PE/ELF/Mach-O：头/段表/熵/导入表/导出数/安全缓解/加壳依据/字符串分类）+ `agent/re_tools.go` 的 `re_triage` 工具（摘要 ≤1.4KB、完整 JSON 落盘、不执行样本、畸形输入只降级不 panic）；`toolcatalog` 新增 `domainOwnedTools()` —— 领域专属工具**可解析但不播种给平台 agent**；文档 §0 新增 **R6 自包含优先（不依赖第三方 GitHub 项目）** | binfmt 8 个用例（含拿测试二进制自身当样本、畸形 PE 不 panic、熵边界、字符串提取与版本号误判、渲染预算）；agent 4 个用例（真实 PE 全链路/坏入参/未接入清单/领域工具不污染平台种子）；平台 golden 未变 |
 | 2026-10-27 | **可选组件面板（沙箱镜像层）**：`internal/components`（14 项清单 + Dockerfile/探测脚本生成器，单一数据源）+ `server/components.go`（清单/应用/探测/SSE 四个接口，构建串行单例、日志环形缓冲 400 行、失败回传尾部）+ 设置页「可选组件」卡片（分组勾选/体积估算/已装徽章/构建日志实时滚动）；镜像 tag 由选择集 hash 决定，切回 `:latest` 即回滚；`WireSandboxWithImage` 让 settings 里的镜像优先生效 | components 7 用例 + server 5 用例；真机接口验证：清单 14 项、未知 ID→400、基础镜像缺失→409（带可执行构建命令）、无镜像探测→409 |
+| 2026-10-27 | **组件面板端到端跑通 + 修真机构建暴露的 3 个 bug**：①Dockerfile 续行（单命令组件生成 `;` 开头新行）②extras 层缺 `apt-get update`（基镜像删了包索引）③kali 官方源被镜像 403（改默认阿里云 + 重试）④`errorLines()` 按特征挑错误行而不是只回传尾部 | 基础镜像 553MB → 应用 gdb → custom-eb685c80 658MB；探测 `gdb ok=true 18.1`；重复应用 0.57s 走 skipped；新增 `validateDockerfile` 语法校验用例 |
 
 ---
 
