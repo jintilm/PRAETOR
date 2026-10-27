@@ -18,8 +18,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/traffic"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/traffic"
 )
 
 type Store struct {

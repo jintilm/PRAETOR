@@ -15,12 +15,12 @@ import (
 	"time"
 
 	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/praetor/agent"
-	pgdb "github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/enrich"
-	"github.com/Autumn-27/praetor/guard"
-	"github.com/Autumn-27/praetor/intercept"
-	"github.com/Autumn-27/praetor/traffic"
+	"github.com/jintilm/praetor/agent"
+	pgdb "github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/enrich"
+	"github.com/jintilm/praetor/guard"
+	"github.com/jintilm/praetor/intercept"
+	"github.com/jintilm/praetor/traffic"
 )
 
 // Task is one engagement: a description + goal + its own exploration store,

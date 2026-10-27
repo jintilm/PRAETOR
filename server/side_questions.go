@@ -16,11 +16,11 @@ import (
 
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/transcript"
-	"github.com/Autumn-27/praetor/agent"
-	"github.com/Autumn-27/praetor/config"
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/llmrec"
-	"github.com/Autumn-27/praetor/sidequestion"
+	"github.com/jintilm/praetor/agent"
+	"github.com/jintilm/praetor/config"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/llmrec"
+	"github.com/jintilm/praetor/sidequestion"
 )
 
 type sideRun struct {

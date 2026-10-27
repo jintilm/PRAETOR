@@ -3,7 +3,7 @@ package server
 import (
 	"net/http"
 
-	"github.com/Autumn-27/praetor/db"
+	"github.com/jintilm/praetor/db"
 )
 
 // ---------- P3 agent triggers (仅自定义 agent) ----------

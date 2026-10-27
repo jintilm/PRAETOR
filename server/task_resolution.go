@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/Autumn-27/praetor/db"
+	"github.com/jintilm/praetor/db"
 )
 
 type taskLLMResolution struct {

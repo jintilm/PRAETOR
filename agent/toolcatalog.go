@@ -6,7 +6,7 @@ import (
 	"sort"
 
 	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/praetor/agent/domain"
+	"github.com/jintilm/praetor/agent/domain"
 )
 
 // 本文件把「内置工具」从纯代码变成可枚举、可被 DB 覆盖的目录：

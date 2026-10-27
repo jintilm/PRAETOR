@@ -13,10 +13,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Autumn-27/praetor/agent"
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/intercept"
-	"github.com/Autumn-27/praetor/sidequestion"
+	"github.com/jintilm/praetor/agent"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/intercept"
+	"github.com/jintilm/praetor/sidequestion"
 )
 
 const (

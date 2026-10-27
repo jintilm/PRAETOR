@@ -9,7 +9,7 @@ import (
 
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/praetor/db"
+	"github.com/jintilm/praetor/db"
 )
 
 // compactIntents distills intents to {id, summary, state, asset_ids, parents,

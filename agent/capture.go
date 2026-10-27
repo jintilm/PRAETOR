@@ -9,9 +9,9 @@ import (
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/intercept"
-	"github.com/Autumn-27/praetor/sidequestion"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/intercept"
+	"github.com/jintilm/praetor/sidequestion"
 )
 
 // captureRun drives one agent turn-to-completion over Session.Prompt and emits a

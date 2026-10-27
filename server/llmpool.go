@@ -5,9 +5,9 @@ import (
 	"time"
 
 	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/praetor/agent"
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/llmpool"
+	"github.com/jintilm/praetor/agent"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/llmpool"
 )
 
 // LLM 轮询(故障转移)的服务端接线。设计见 docs/LLM轮询设计.md：

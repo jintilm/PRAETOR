@@ -12,10 +12,10 @@ import (
 	"strings"
 
 	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/guard"
-	"github.com/Autumn-27/praetor/intercept"
-	"github.com/Autumn-27/praetor/llmrec"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/guard"
+	"github.com/jintilm/praetor/intercept"
+	"github.com/jintilm/praetor/llmrec"
 )
 
 // judgeWorkerLane is the usage-ledger "worker" label for intercept fallback-judge

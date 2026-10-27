@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Autumn-27/praetor/db"
+	"github.com/jintilm/praetor/db"
 )
 
 // companyScopeInputs accepts both the new [{kind,value}] contract and the

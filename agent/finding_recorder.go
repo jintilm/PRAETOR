@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 
-	"github.com/Autumn-27/praetor/db"
+	"github.com/jintilm/praetor/db"
 )
 
 // FindingRecorder is injected by the host; agents never synthesize or copy

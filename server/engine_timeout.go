@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Autumn-27/praetor/agent"
-	"github.com/Autumn-27/praetor/db"
+	"github.com/jintilm/praetor/agent"
+	"github.com/jintilm/praetor/db"
 )
 
 // 任务级超时协调器(见 docs/任务级超时与收尾设计.md §4/§8.5)。

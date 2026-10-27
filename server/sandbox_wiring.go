@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/praetor/agent"
-	"github.com/Autumn-27/praetor/config"
-	"github.com/Autumn-27/praetor/sandbox"
+	"github.com/jintilm/praetor/agent"
+	"github.com/jintilm/praetor/config"
+	"github.com/jintilm/praetor/sandbox"
 )
 
 // WireSandbox 在启动期选定沙箱后端并注入 agent。

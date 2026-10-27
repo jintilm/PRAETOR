@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/traffic"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/traffic"
 )
 
 // DTO/serialization layer: each handler emits EXACTLY the frontend's spec shapes

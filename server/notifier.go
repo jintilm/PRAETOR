@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/notify"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/notify"
 )
 
 // 全局设置键（存在 settings 键值表里，无需建表）。

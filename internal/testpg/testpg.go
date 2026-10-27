@@ -26,8 +26,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/praetor/config"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jintilm/praetor/config"
 )
 
 const pingTimeout = 3 * time.Second

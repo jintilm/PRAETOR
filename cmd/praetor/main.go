@@ -16,10 +16,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Autumn-27/praetor/agent"
-	"github.com/Autumn-27/praetor/config"
-	"github.com/Autumn-27/praetor/selfupdate"
-	"github.com/Autumn-27/praetor/server"
+	"github.com/jintilm/praetor/agent"
+	"github.com/jintilm/praetor/config"
+	"github.com/jintilm/praetor/selfupdate"
+	"github.com/jintilm/praetor/server"
 )
 
 // version is the build version, injected at release time via

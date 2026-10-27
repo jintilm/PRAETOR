@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/norma/hook"
-	"github.com/Autumn-27/praetor/intercept"
+	"github.com/jintilm/praetor/intercept"
 )
 
 // AuditEntry records one gated tool call.

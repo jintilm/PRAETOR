@@ -16,8 +16,8 @@ import (
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/norma/transcript"
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/intercept"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/intercept"
 )
 
 // Worker is an LLM work agent (docs §4.4): it claims ONE intent, completes it

@@ -76,7 +76,7 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 | 项 | 旧 | 新 | 兼容处理 |
 | --- | --- | --- | --- |
 | 项目名 | ARTEX | **PRAETOR** | 文档标题、README、前端品牌全量更新 |
-| Go module | `github.com/Autumn-27/artex` | `github.com/Autumn-27/praetor` | 140 个文件 import 已改，`go build` 验证 |
+| Go module | `github.com/Autumn-27/artex` | **`github.com/jintilm/praetor`** | 158 个文件 import 已改，`go build` 验证（2026-10-27 二次改名：fork 后 module 归属仍是上游作者，改成本人仓库） |
 | 二进制 / 镜像 | `artex` | `praetor`（`cmd/praetor`） | `build.sh` / `Dockerfile` / compose 同步 |
 | 环境变量 | `ARTEX_*` | `PRAETOR_*` | **硬切：只读 `PRAETOR_*`**。旧变量不再生效，两套栈配置物理隔离 |
 | 登录用户名 | `ARTEX` | `PRAETOR` | 前后端同步改（密码存 `auth.password_hash`，与用户名无关，不用重置） |
@@ -516,6 +516,7 @@ go test ./... -count=1
 | 2026-10-27 | **P3-2 `re_triage` 落地 + R6 铁律**：新增 `internal/binfmt`（纯 Go 解析 PE/ELF/Mach-O：头/段表/熵/导入表/导出数/安全缓解/加壳依据/字符串分类）+ `agent/re_tools.go` 的 `re_triage` 工具（摘要 ≤1.4KB、完整 JSON 落盘、不执行样本、畸形输入只降级不 panic）；`toolcatalog` 新增 `domainOwnedTools()` —— 领域专属工具**可解析但不播种给平台 agent**；文档 §0 新增 **R6 自包含优先（不依赖第三方 GitHub 项目）** | binfmt 8 个用例（含拿测试二进制自身当样本、畸形 PE 不 panic、熵边界、字符串提取与版本号误判、渲染预算）；agent 4 个用例（真实 PE 全链路/坏入参/未接入清单/领域工具不污染平台种子）；平台 golden 未变 |
 | 2026-10-27 | **可选组件面板（沙箱镜像层）**：`internal/components`（14 项清单 + Dockerfile/探测脚本生成器，单一数据源）+ `server/components.go`（清单/应用/探测/SSE 四个接口，构建串行单例、日志环形缓冲 400 行、失败回传尾部）+ 设置页「可选组件」卡片（分组勾选/体积估算/已装徽章/构建日志实时滚动）；镜像 tag 由选择集 hash 决定，切回 `:latest` 即回滚；`WireSandboxWithImage` 让 settings 里的镜像优先生效 | components 7 用例 + server 5 用例；真机接口验证：清单 14 项、未知 ID→400、基础镜像缺失→409（带可执行构建命令）、无镜像探测→409 |
 | 2026-10-27 | **组件面板端到端跑通 + 修真机构建暴露的 3 个 bug**：①Dockerfile 续行（单命令组件生成 `;` 开头新行）②extras 层缺 `apt-get update`（基镜像删了包索引）③kali 官方源被镜像 403（改默认阿里云 + 重试）④`errorLines()` 按特征挑错误行而不是只回传尾部 | 基础镜像 553MB → 应用 gdb → custom-eb685c80 658MB；探测 `gdb ok=true 18.1`；重复应用 0.57s 走 skipped；新增 `validateDockerfile` 语法校验用例 |
+| 2026-10-27 | **module 路径改为本人仓库**：`github.com/Autumn-27/praetor` → **`github.com/jintilm/praetor`**（158 个 Go 文件 import + go.mod）；`selfupdate.Repo` 由 `Autumn-27/praetor` 改为 `jintilm/PRAETOR`——这是**真 bug**：自动更新此前会去查上游作者的仓库，永远拿不到自己的发布；README 的 clone/Releases 链接同步 | `go build ./...` OK；`go vet` 干净；`internal/components`/`agent/domain`/`internal/binfmt` 用例全绿；`grep Autumn-27` 仅剩 SDK `norma` 与 ScopeSentry 关联（第三方，正确保留） |
 
 ---
 

@@ -3,7 +3,7 @@ package agent
 import (
 	"strings"
 
-	"github.com/Autumn-27/praetor/db"
+	"github.com/jintilm/praetor/db"
 )
 
 var _ = db.KindGoal // 保持 db 依赖（constraintBlock 用其类型）

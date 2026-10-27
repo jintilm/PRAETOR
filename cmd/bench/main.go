@@ -23,7 +23,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Autumn-27/praetor/bench/xbow"
+	"github.com/jintilm/praetor/bench/xbow"
 )
 
 func main() {

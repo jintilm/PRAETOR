@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/internal/components"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/internal/components"
 )
 
 // 可选组件管理（沙箱镜像层）。

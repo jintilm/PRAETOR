@@ -22,13 +22,13 @@ import (
 	"github.com/Autumn-27/norma/llm"
 	actool "github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/norma/transcript"
-	"github.com/Autumn-27/praetor/agent"
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/intercept"
-	"github.com/Autumn-27/praetor/llmpool"
-	"github.com/Autumn-27/praetor/llmrec"
-	"github.com/Autumn-27/praetor/report"
-	"github.com/Autumn-27/praetor/traffic"
+	"github.com/jintilm/praetor/agent"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/intercept"
+	"github.com/jintilm/praetor/llmpool"
+	"github.com/jintilm/praetor/llmrec"
+	"github.com/jintilm/praetor/report"
+	"github.com/jintilm/praetor/traffic"
 )
 
 // BuildVersion is the backend application version, injected from cmd/praetor at

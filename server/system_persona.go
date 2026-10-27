@@ -5,7 +5,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/Autumn-27/praetor/db"
+	"github.com/jintilm/praetor/db"
 )
 
 // 系统级人设（身份/授权声明层）的 API。

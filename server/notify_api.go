@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/notify"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/notify"
 )
 
 // 本文件是推送功能的 HTTP 接口。全部路由挂在 requireAuth 之后（见 Handler()），

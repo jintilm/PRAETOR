@@ -9,8 +9,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/internal/replay"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/internal/replay"
 )
 
 // BodySource 是「按证据快照取回请求/响应体」的最小接口（由 evidence.Store 实现）。

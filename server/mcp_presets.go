@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Autumn-27/praetor/config"
-	"github.com/Autumn-27/praetor/db"
+	"github.com/jintilm/praetor/config"
+	"github.com/jintilm/praetor/db"
 )
 
 // MCP 预设：把「装好一个外部 MCP server」的过程收敛成一次配置，而不是让用户

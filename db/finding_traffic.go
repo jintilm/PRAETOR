@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/praetor/notify"
+	"github.com/jintilm/praetor/notify"
 )
 
 var (

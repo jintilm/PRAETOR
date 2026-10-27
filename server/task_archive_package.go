@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"strings"
 
-	pgdb "github.com/Autumn-27/praetor/db"
+	pgdb "github.com/jintilm/praetor/db"
 	"github.com/klauspost/compress/zstd"
 )
 

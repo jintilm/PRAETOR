@@ -323,7 +323,7 @@ type Scheduler interface {
 - 技能包：https://github.com/mukul975/Anthropic-Cybersecurity-Skills ・ https://github.com/ljagiello/ctf-skills
 - 工具面（MCP）：https://github.com/0x4m4/hexstrike-ai ・ https://github.com/morluto/rea ・ https://github.com/LaurieWired/GhidraMCP ・ https://github.com/portswigger/mcp-server ・ https://github.com/FuzzingLabs/mcp-security-hub
 - 靶场：https://github.com/Orange-Cyberdefense/GOAD ・ https://github.com/CTFd/CTFd ・ https://github.com/0ca/BoxPwnr
-- 本仓库：`github.com/Autumn-27/praetor` ・ SDK `github.com/Autumn-27/norma`
+- 本仓库：`github.com/jintilm/praetor` ・ SDK `github.com/Autumn-27/norma`（第三方，保留）
 
 ---
 

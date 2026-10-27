@@ -5,9 +5,9 @@ import (
 	"log"
 	"strings"
 
-	"github.com/Autumn-27/praetor/agent"
-	"github.com/Autumn-27/praetor/agent/domain"
-	"github.com/Autumn-27/praetor/config"
+	"github.com/jintilm/praetor/agent"
+	"github.com/jintilm/praetor/agent/domain"
+	"github.com/jintilm/praetor/config"
 )
 
 // 本文件是「领域包 → 引擎调度拓扑」的唯一接缝（P0-5）。

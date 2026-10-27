@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/Autumn-27/praetor/agent"
-	"github.com/Autumn-27/praetor/db"
+	"github.com/jintilm/praetor/agent"
+	"github.com/jintilm/praetor/db"
 )
 
 const maxBatchControlIDs = 100

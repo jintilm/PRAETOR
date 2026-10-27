@@ -20,7 +20,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Autumn-27/praetor/config"
+	"github.com/jintilm/praetor/config"
 	"time"
 
 	"github.com/Autumn-27/norma/agentcore"
@@ -28,7 +28,7 @@ import (
 	"github.com/Autumn-27/norma/llm"
 	acperm "github.com/Autumn-27/norma/permission"
 	"github.com/Autumn-27/norma/transcript"
-	"github.com/Autumn-27/praetor/llmrec"
+	"github.com/jintilm/praetor/llmrec"
 )
 
 // Config describes the LLM backend resolved from the environment.

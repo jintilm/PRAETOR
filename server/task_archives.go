@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/praetor/agent"
-	pgdb "github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/traffic"
+	"github.com/jintilm/praetor/agent"
+	pgdb "github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/traffic"
 )
 
 const taskArchivePollInterval = 2 * time.Second

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/praetor/sandbox"
+	"github.com/jintilm/praetor/sandbox"
 )
 
 // SandboxExec 非 nil 时，worker 的 Bash 会被改路由到沙箱执行。

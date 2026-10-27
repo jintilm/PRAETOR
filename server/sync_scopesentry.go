@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/mcphttp"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/mcphttp"
 )
 
 // 资产同步（ScopeSentry 数据源）。

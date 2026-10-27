@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/Autumn-27/praetor/agent"
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/evidence"
-	"github.com/Autumn-27/praetor/internal/replay"
+	"github.com/jintilm/praetor/agent"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/evidence"
+	"github.com/jintilm/praetor/internal/replay"
 )
 
 // findingEvidence 是验证器需要的最小证据能力（*evidence.Store 天然满足）。

@@ -8,8 +8,8 @@ import (
 
 	"github.com/Autumn-27/norma/mcp"
 	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/praetor/db"
-	"github.com/Autumn-27/praetor/mcphttp"
+	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/mcphttp"
 )
 
 // mcpClient is the shared surface of a connected MCP server (stdio, Streamable HTTP,
