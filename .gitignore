@@ -46,6 +46,8 @@ Thumbs.db
 /praetor.exe
 /bench.exe
 /ctftarget.exe
+# Windows 上重编时旧二进制的临时改名（运行中的 exe 不能直接覆盖，只能先挪开）
+/*.exe~
 # 一键更新在可执行文件旁留下的中间产物（暂存件 / 备份 / 失败版本 / 升级标记）
 /praetor.new
 /praetor.new.sha256

@@ -88,6 +88,23 @@ func spillOutput(dir, s string) (string, error) {
 
 // resolvePath joins a relative path against the working directory.
 func resolvePath(tc *ToolContext, p string) string {
+	// 沙箱优先：命中挂载点就翻成宿主路径，之后的 os.ReadDir/os.Open 才打得开。
+	// 这一步必须在 IsAbs 判断之前——容器内路径以 "/" 开头，而 Windows 的 filepath.IsAbs
+	// 不认它，会把它当相对路径拼到工作目录下（报错信息里会突兀地出现宿主的 data 目录）。
+	if tc != nil && tc.SandboxPath != nil {
+		if host, ok := tc.SandboxPath(p); ok {
+			return host
+		}
+		// 沙箱模式下，以 "/" 开头却没命中挂载点 = 容器里那条路径在宿主上没有对应位置
+		// （比如 /etc/passwd、/usr/bin/xx）。原样返回让 os 去报 ENOENT ——
+		// 比拼到工作目录下"假装找到一个同名文件"诚实得多，也避免把宿主文件当成容器文件。
+		//
+		// 只在沙箱模式这么做：宿主模式（渗透任务）下 "/" 开头的相对写法是既有行为，
+		// 改它会波及与沙箱无关的任务。
+		if strings.HasPrefix(filepath.ToSlash(p), "/") {
+			return p
+		}
+	}
 	if filepath.IsAbs(p) || tc == nil || tc.WorkingDir == "" {
 		return p
 	}

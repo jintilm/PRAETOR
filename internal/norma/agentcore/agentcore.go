@@ -155,6 +155,9 @@ type Options struct {
 	Temperature    *float64
 	MaxConcurrency int
 	WorkingDir     string
+	// SandboxPath translates container paths to host paths for file tools; nil = not
+	// sandboxed. See harness.QueryInput.SandboxPath.
+	SandboxPath func(string) (string, bool)
 
 	// ToolOutputDir, when set, makes oversized tool output spill to a file there
 	// (full content preserved) and the tool return a head + pointer instead of
@@ -497,6 +500,7 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 		Settlement:         s.opts.Settlement,
 		MaxConcurrency:     s.opts.MaxConcurrency,
 		WorkingDir:         s.opts.WorkingDir,
+		SandboxPath:        s.opts.SandboxPath,
 		Todos:              s.opts.Todos,
 		ToolOutputDir:      s.opts.ToolOutputDir,
 		MaxToolOutputChars: s.opts.MaxToolOutputChars,

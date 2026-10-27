@@ -91,6 +91,7 @@ func (l *loop) execOne(use llm.ContentBlock, emitProgress func(tool.ProgressInfo
 		MaxOutputChars: l.in.MaxToolOutputChars,
 		Tasks:          l.in.Tasks,
 		Env:            l.in.BashEnv,
+		SandboxPath:    l.in.SandboxPath,
 	}
 	// toolCtx carries the run's MaxDuration deadline, so a tool that overruns the
 	// wall-clock budget is interrupted here (the turn loop then enters wrap-up). During

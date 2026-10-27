@@ -60,6 +60,17 @@ func (s *Server) taskMountsFor(taskID string) []sandbox.Mount {
 	if !ok || t == nil {
 		return nil
 	}
+	return s.mountsForTask(t)
+}
+
+// mountsForTask 与 taskMountsFor 同义，但直接吃已拿到的 *Task。
+//
+// 存在理由：路径映射器手上已经有 *Task，再按 id 回查一次库既慢又多一个"查不到就返回
+// 空挂载"的失败点（测试里构造的 Task 不在库里，就会永远映射不到 /chal）。
+func (s *Server) mountsForTask(t *Task) []sandbox.Mount {
+	if s == nil || s.m == nil || t == nil {
+		return nil
+	}
 	dir := s.taskChallengeDir(t)
 	if dir == "" {
 		return nil
@@ -89,4 +100,69 @@ func guestChallengePath(root, hostPath string) string {
 		return challengeMountTarget
 	}
 	return path.Join(challengeMountTarget, filepath.ToSlash(rel))
+}
+
+// sandboxPathMapper 返回「容器内路径 → 宿主路径」的翻译器，供文件类工具使用。
+//
+// 为什么需要它：Bash 走容器，但 LS/Read/Glob/Grep/Write 在宿主进程里用 os 打开文件。
+// 模型照着提示词说 `/chal/files/challenge`，宿主上并没有这条路径 —— Windows 上还会因为
+// filepath.IsAbs("/chal/x") == false 把它当相对路径拼到工作目录下，错误信息里冒出
+// `E:/.../data/tasks/29/i156/chal/...`，一眼看不出是"工具没进沙箱"。
+//
+// 翻译的是**挂载点**，不是"猜"：`/work` 来自 PerTaskConfig，`/chal` 来自 mountsFor，
+// 两者都是真挂进容器的目录，所以翻出来的宿主路径看到的就是模型看到的那份内容。
+// 未命中挂载点时返回 false，让工具按原逻辑处理（不臆造路径）。
+func (s *Server) sandboxPathMapper(t *Task) func(string) (string, bool) {
+	if s == nil || t == nil || t.ID == "" {
+		return nil
+	}
+	// 与 NewPerTask 保持同一套解析：相对路径要展开，否则映射出来的宿主路径也是相对的。
+	root := envOr("SANDBOX_WORK_ROOT", filepath.Join(s.m.DataDir(), "work"))
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	workHost := filepath.Join(root, t.ID)
+
+	return func(p string) (string, bool) {
+		p = filepath.ToSlash(strings.TrimSpace(p))
+		if p == "" {
+			return "", false
+		}
+		if host, ok := translateMount(p, SandboxContainerRoot, workHost); ok {
+			return host, true
+		}
+		// 每次调用重新取，不能在构造时快照。
+		//
+		// 题面目录是**任务建好之后**才配的（POST /tasks/{id}/ctf），而 worker 在任务创建时
+		// 就构造好了 —— 快照会让 /chal 的映射永远缺失，症状正是 LS /chal 报
+		// "open /chal: cannot find the file"，看着像挂载没生效。
+		// 这与题面来源改用惰性解析是同一个坑，同一个顺序：先建任务、后配题。
+		for _, m := range s.mountsForTask(t) {
+			if host, ok := translateMount(p, m.Target, m.Source); ok {
+				return host, true
+			}
+		}
+		return "", false
+	}
+}
+
+// translateMount 把 container 前缀换成 host 前缀；不在 container 之下返回 false。
+//
+// `..` 必须挡住：模型传 `/work/../../../etc/passwd` 时 filepath.Join 会老老实实逃逸出去，
+// 于是"沙箱内的路径"能读到宿主的任意文件 —— 这比不给映射更糟。
+func translateMount(p, container, host string) (string, bool) {
+	container = strings.TrimSuffix(filepath.ToSlash(container), "/")
+	if container == "" || (p != container && !strings.HasPrefix(p, container+"/")) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(strings.TrimPrefix(p, container), "/")
+	joined := host
+	if rest != "" {
+		joined = filepath.Join(host, filepath.FromSlash(rest))
+	}
+	rel, err := filepath.Rel(host, joined)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return joined, true
 }

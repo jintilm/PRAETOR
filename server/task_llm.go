@@ -582,6 +582,11 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	// 两棵树没有对应关系；给宿主路径换来的是模型开局一次必然失败的 cd。
 	if SandboxPerTaskActive() {
 		wk.SetSandboxWorkRoot(SandboxContainerRoot)
+		// 同一件事的另一半：文件工具（LS/Read/Glob/Grep/Write）跑在宿主进程里，
+		// 模型给的 /work/... 与 /chal/... 得翻回宿主路径才打得开。
+		// 只做上面那半（提示词）会让模型照着提示词去调 LS，然后拿到一条
+		// "打开宿主 data 目录下某个不存在路径" 的错误 —— 看起来像题目缺文件。
+		wk.SetSandboxPath(s.sandboxPathMapper(t))
 	}
 	// 判题后端同样用惰性句柄：先建任务、后配 expected_flag 是最常见的顺序，
 	// 快照式注入会让后配的 flag 对已在跑的 worker 无效（见 ctf_submit.go 的 liveSubmitter）。

@@ -76,6 +76,12 @@ type Worker struct {
 	// 模型开局第一件事就是 `cd E:\...\tasks\25\i141`，必然失败，然后它会在
 	// /work 和那个不存在的路径之间反复试探，白白烧掉几轮上下文。
 	sandboxWorkRoot string
+	// sandboxPath 把容器内路径翻成宿主路径（仅沙箱模式注入；nil = 不在沙箱）。
+	//
+	// sandboxWorkRoot 解决的是「提示词里该写哪个路径」，这个解决的是「文件工具怎么打开它」。
+	// 两者必须成对：只改提示词，模型会用 /chal/... 调 LS/Read，而文件工具跑在宿主进程里，
+	// 于是报 ENOENT（Windows 上还会把 /chal 当相对路径，错信息里混进宿主 data 目录）。
+	sandboxPath func(string) (string, bool)
 	// extraTools are host-provided tools (e.g. traffic query, oast) appended to
 	// the worker's graph write-back tools.
 	// domain 是任务领域（pentest/reverse/ctf），用于裁剪 worker 工具面。
@@ -142,6 +148,9 @@ func (w *Worker) SetCTFSubmitter(s CTFSubmitter) { w.ctfSubmitter = s }
 // 传空 = 宿主执行，提示词继续用宿主绝对路径。由装配层按沙箱实际状态注入，
 // 不要在 agent 内部猜环境——猜错的方向有两种，都会让模型拿到打不开的路径。
 func (w *Worker) SetSandboxWorkRoot(dir string) { w.sandboxWorkRoot = strings.TrimSpace(dir) }
+
+// SetSandboxPath 注入「容器内路径 → 宿主路径」的翻译器（nil = 不在沙箱）。
+func (w *Worker) SetSandboxPath(fn func(string) (string, bool)) { w.sandboxPath = fn }
 
 // promptRunDir 返回**写进系统提示词**的工作目录。
 //
@@ -509,9 +518,10 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		DeepSeekSearchModel:   w.webSearch.DeepSeekModel,
 		WebSearchProxy:        w.webSearch.Proxy,
 		// Bash 子命令的 HTTP 默认走记录代理 + 信任其 CA（工具无需 -x/-k）。
-		BashEnv:    proxyEnv(w.proxyAddr, w.proxyCACert),
-		WorkingDir: runDir,
-		MaxTurns:   w.maxTurns, // 0 = unlimited (configurable in agent management)
+		BashEnv:     proxyEnv(w.proxyAddr, w.proxyCACert),
+		WorkingDir:  runDir,
+		SandboxPath: w.sandboxPath,
+		MaxTurns:    w.maxTurns, // 0 = unlimited (configurable in agent management)
 		// 墙钟预算,轮边界判,不打断半路;0 = 不限。有任务级 deadline 时夹逼到 min(自身预算,
 		// 距 deadline 剩余),让本 run 在任务到点时自然进收尾(见 taskclock.go)。
 		MaxDuration: maxDur,

@@ -70,6 +70,13 @@ type QueryInput struct {
 	// environments (foreground + background). Empty = inherit unchanged.
 	BashEnv []string
 
+	// SandboxPath translates container paths to host paths for the file tools
+	// (Read/Write/Edit/LS/Glob/Grep). nil = not sandboxed, tools use host paths
+	// as before. The model lives in a container while these tools run in the host
+	// process, so without this a path like /chal/x is meaningless (and on Windows
+	// filepath.IsAbs rejects it, turning it into a relative path under WorkingDir).
+	SandboxPath func(string) (string, bool)
+
 	// Permission policy.
 	PermissionMode     permission.Mode
 	PermissionModeFunc func() permission.Mode

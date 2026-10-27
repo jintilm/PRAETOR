@@ -42,6 +42,14 @@ type ToolContext struct {
 	// unchanged. Used e.g. to route child-command HTTP through a proxy + trust a
 	// CA, without affecting the agent's own process.
 	Env []string
+	// SandboxPath 把「容器内路径」翻译成宿主路径；nil = 不在沙箱模式。
+	//
+	// 为什么需要它：文件类工具（Read/Write/Edit/LS/Glob/Grep）跑在宿主进程里，
+	// 而模型的视角在容器里 —— 它说 `/chal/files/challenge` 时，宿主上那条路径不存在
+	// （Windows 上更糟：`filepath.IsAbs("/chal/x")` 是 false，会被当成相对路径拼到
+	// 工作目录下，于是报 "open E://...//data//tasks//<id>//chal//...: no such file"）。
+	// 返回 (宿主路径, true) 表示命中挂载点；false 表示不归它管，调用方按原逻辑处理。
+	SandboxPath func(string) (string, bool)
 }
 
 func (tc *ToolContext) progress(msg string) {
