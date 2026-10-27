@@ -155,8 +155,43 @@ Pikachu 实战（2026-10-27）暴露了一个**静默失效**：agent 真的测�
 git clone https://github.com/xbow-engineering/validation-benchmarks
 go run ./cmd/bench -root validation-benchmarks/benchmarks \
   -api http://127.0.0.1:8797 -password "$PRAETOR_PASSWORD" \
-  -limit 5 -md report.md -out result.json
+  -limit 10 -md report.md -out result.json
 ```
+
+### 取样：不要用「前 N 题」
+
+全库 **104 题**，难度分布 **L1 45 / L2 51 / L3 8**。题型（一题可有多个 tag，按出现次数排）：
+xss 23、default_credentials 18、idor 15、privilege_escalation 14、ssti 13、
+command_injection 11、sqli 6、lfi 6、ssrf 3、xxe 3……
+
+**关键陷阱**：目录按 ID 排序，同作者会把一个题型的多个变体连续编号——实测
+`XBEN-001/002/003` **全是 IDOR-Trading-Platform 的变体**。所以 `-limit 3` 取到的是
+三道同源题，跑出来的分数只反映一种题型，**不能当能力基线**。
+
+因此默认策略改为 **`spread`（按难度档铺开 + 档内优先取新 tag）**：
+
+```bash
+# 默认 spread：5 题覆盖 6 种题型 + 1 道 L3
+go run ./cmd/bench -root <benchmarks> -limit 5 -dry-run
+
+# 对照：head 取目录序前 N（5 题全是 IDOR 系列）——仅用于编号排查
+go run ./cmd/bench -root <benchmarks> -limit 5 -strategy head -dry-run
+```
+
+`-dry-run` 与实际跑**共用同一份取样逻辑**（`xbow.Select`），所以预览到的题就是真跑的题。
+
+### 怎么选跑多少题
+
+| 目的 | 取样 | 说明 |
+| --- | --- | --- |
+| 冒烟（链路是否通） | `-limit 3` | 只为验证起停/判分，分数无意义 |
+| 校准基线 | `-limit 10` ~ `15` | spread 已能覆盖主要题型与三档难度，性价比最高 |
+| 对比改进 | 固定同一批题 | **必须锁题**：改动前后跑同一 `-only` 列表，否则分数不可比 |
+| 正式基线 | 全量 104 | 最可信，但要按题型分批；L3 单题可能耗时最长 |
+
+单题预算：`-task-timeout` 默认 30m、`-wait-timeout` 默认 45m。全量 104 题的**上界**
+是 104×45m≈78h，实际大多提前解出/失败，但仍建议分批（如 `-levels 1` 45 题一批）。
+想更快可以先 `-levels 1` 建立「能不能解简单题」的底线，再上 L2/L3。
 
 流程（每题）：`docker compose -p xben-<id> up -d --wait` → 解析发布端口 → 提交任务
 （描述里带目标 URL，`seed_first_intent=true` 省掉首轮 planner）→ 轮询到终态 → 在
@@ -289,6 +324,7 @@ go test ./... -count=1
 | 2026-10-26 | 修正 pack 里凭 grep 猜错的工具名：`add_finding`→`report_finding`；删掉不存在的 `coverage`/`asset_coverage`/`list_worker_traces`/`bind_finding_traffic`/`get_finding_traffic`/`goals`，换成真实存在的 `list_untested_assets`/`get_worker_trace`/`search_all_worker_traces` | 由 `TestDomainToolSeeds` 断言 pentest 域缺失集为空 |
 | 2026-10-26 | **改名 ARTEX → PRAETOR**：module path、二进制/镜像、前端品牌与偏好 key、登录用户名、文档全量更新；env 加 `PRAETOR_*` 优先 + `ARTEX_*` 兜底兼容层 | `go build ./...` OK；16 包全绿；`TestEnvPrefersNewPrefix` 锁定兼容顺序 |
 | 2026-10-26 | 沙箱方案定稿：形态 A（常驻工具容器 + `docker exec`）+ `PRAETOR_SANDBOX=required\|optional` 默认 required | 决策入档 §1.5 |
+| 2026-10-27 | **bench 取样修正**：runner 原本完全没读 `benchmark.json`，`-limit N` 就是取目录序前 N 题，而 `XBEN-001/002/003` 恰是同一 IDOR 系列变体 → 分数被单一题型带偏。改为默认 `spread`（按 level 铺开 + 档内优先新 tag），新增 `-levels`/`-tags`/`-strategy`，`-dry-run` 与真跑共用同一取样逻辑 | 真实题库验证：head 取 5 题全 IDOR；spread 同 5 题覆盖 6 类题型 + 1 道 L3；bench 15 用例全绿 |
 | 2026-10-27 | **Pikachu 实战首次跑通证据链闭环**：任务 #6 `done`，2 个漏洞自动 `verified`（similarity=1.000：SQL Injection + Reflected XSS）+ 8 条流量绑定 + 179 条流量入库。过程中定位并修掉 4 个卡点（靶场 build 未走代理、`traffic_capture` 未开、`agent_traffic_binding` 未开、服务未重启仍读旧 LLM key） | 新增启动期 `WarnEvidenceChainDisarmed` 护栏（只告警不改配置）+ 单测；真库 18 包全绿 |
 | 2026-10-26 | **P1-3 骨架**：`bench/xbow`（Discover/ComposeCLI/FirstHTTPPort/FlagMatcher/Run/Summary.Markdown）+ `cmd/bench`（-dry-run/-only/-limit/-keep/-md/-out，支持密码换 token） | 10 个单测（发现/端口优先级/flag 匹配/编排三类结果/失败不提交/跳过计分母）；CLI dry-run 冒烟通过 |
 | 2026-10-26 | **P1-1**：`db.SeedMCPServer`（幂等预设播种，`ON CONFLICT DO NOTHING`，不覆盖用户配置）+ `server/mcp_presets.go`（hexstrike 预设构造/校验，未配置不写库） | `db` 2 个用例（真库幂等 + 入参校验）、`server` 3 个用例（构造/覆盖/拒绝缺失）；全仓绿 |
