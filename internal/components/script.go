@@ -13,6 +13,13 @@ import (
 // 前端文案），三处手写必然漂移，而漂移的表现是"面板说装了、容器里没有"——
 // 这种错误没人会在测试里发现，只会在真正要用的时候才发现。
 
+// KaliMirror 是 extras 层使用的 apt 源。
+//
+// http.kali.org 是「重定向器」，落到哪个镜像不可控；本项目实测本机被清华镜像 403 拒绝
+// （同一网络下阿里云 / 中科大 / kali.download 都是 200）。基镜像已经改过源，
+// 但 extras 层可能叠在旧基镜像上，所以这里再兜一次底。
+const KaliMirror = "http://mirrors.aliyun.com/kali"
+
 // ImageTag 由所选组件集合算出稳定镜像 tag：同一组选择永远得到同一个 tag（构建缓存命中），
 // 换一组选择就是另一个 tag（旧镜像还在，切回去即可回滚）。
 func ImageTag(items []Item) string {
@@ -40,6 +47,15 @@ func RenderDockerfile(items []Item) string {
 		b.WriteString("# 未选择任何可选组件\n")
 		return b.String()
 	}
+	// 基础准备层：apt 源与重试。
+	// 为什么要单独一层：extras 层可能叠在**旧**基镜像上（那时官方源还在），
+	// 而官方源在本机被镜像 403 拒绝 —— 不兜这一下，"装组件"会在完全无关的地方失败。
+	b.WriteString("\n# 基础准备：apt 源与重试（幂等）\n")
+	b.WriteString("RUN set -eux; \\\n")
+	b.WriteString("    if [ -f /etc/apt/sources.list.d/kali.sources ]; then " +
+		"sed -i 's|http://http.kali.org/kali|" + KaliMirror + "|g' /etc/apt/sources.list.d/kali.sources; fi; \\\n")
+	b.WriteString("    printf 'Acquire::Retries \"5\";\\n' > /etc/apt/apt.conf.d/99praetor-retry\n")
+
 	for _, it := range items {
 		fmt.Fprintf(&b, "\n# %s (%s, %dMB 约) — %s\n", it.Title, it.ID, it.SizeMB, it.Why)
 		b.WriteString("RUN set -eux; \\\n")

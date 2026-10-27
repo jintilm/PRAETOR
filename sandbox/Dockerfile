@@ -13,12 +13,25 @@
 #   本地已有镜像时 buildkit 直接复用，不再要 token。
 # 可选组件（rizin/angr/sage…）不写在这里：由「系统设置 → 可选组件」勾选后
 #   在此基础上生成 custom 镜像层（见 internal/components）。
-
+#
+# apt 源与重试：
+#   - Kali 官方 http.kali.org 是重定向器，落到哪个镜像不可控；本项目实测本机被清华镜像
+#     以 403 拒绝（同网络下阿里云 / 中科大 / kali.download 均 200）。所以默认钉到阿里云，
+#     非中国大陆环境可 `--build-arg PRAETOR_KALI_MIRROR=http://http.kali.org/kali` 改回官方。
+#   - Acquire::Retries：镜像偶发 5xx 时 apt 默认不重试，加 5 次能显著减少构建失败。
 FROM kalilinux/kali-rolling
+
+# 见上文：默认走可用的国内镜像，非 CN 环境用 --build-arg 改回官方
+ARG PRAETOR_KALI_MIRROR=http://mirrors.aliyun.com/kali
+
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     TERM=xterm
+
+RUN set -eux; \
+    sed -i "s|http://http.kali.org/kali|${PRAETOR_KALI_MIRROR}|g" /etc/apt/sources.list.d/kali.sources; \
+    printf 'Acquire::Retries "5";\nAcquire::http::Pipeline-Depth "0";\n' > /etc/apt/apt.conf.d/99praetor-retry
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl wget git jq \
