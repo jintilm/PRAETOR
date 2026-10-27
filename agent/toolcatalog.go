@@ -158,7 +158,31 @@ func platformToolIndex() map[string]actool.CoreTool {
 			}
 		}
 	}
+	// 领域专属工具（如逆向域 re_triage）必须能被领域角色解析到，但**不能**进平台 agent 的
+	// 绑定表 —— 否则每个装 PRAETOR 的库都会给 worker 多出几个用不到的工具，每轮多付 schema。
+	for name, t := range domainOwnedTools() {
+		if _, ok := idx[name]; !ok {
+			idx[name] = t
+		}
+	}
 	return idx
+}
+
+// domainOwnedTools 是「只服务领域包」的工具集合：可解析、不播种给平台 agent。
+//
+// 它们都不依赖 store（只读文件系统/纯计算），所以这里可以用零值 ToolSet 构造。
+// 一旦某个领域工具需要 DB，就不能放进来 —— 那时应该走每任务的 ToolSet 构造，
+// 而不是在包级 init 时造一个没有 store 的实例。
+func domainOwnedTools() map[string]actool.CoreTool {
+	ts := &ToolSet{} // 零值即可：以下工具都不触碰 store 字段
+	list := []actool.CoreTool{
+		ts.reTriage(),
+	}
+	m := make(map[string]actool.CoreTool, len(list))
+	for _, t := range list {
+		m[t.Name()] = t
+	}
+	return m
 }
 
 // mergeSeeds 是 BuiltinToolSeeds / DomainToolSeeds 的公共骨架：按 order 展开、

@@ -20,6 +20,7 @@
 | R3 | **文档先行** | 先在本文件建任务条目（含验收标准），再写代码；代码完成即回填状态与本日验证结果。 |
 | R4 | **许可证红线** | 复制代码前先看 LICENSE：MIT / Apache-2.0 / BSD 可复制（保留版权头）；**AGPL / GPL 只读思路，不复制代码**。 |
 | R5 | **不碰主栈数据** | 见 §1.3：绝不连 `praetor` 库跑测试，绝不 `down -v` 主栈。 |
+| R6 | **自包含优先：不依赖第三方 GitHub 项目** | 运行时的**核心能力**必须只用本项目代码 + Go 标准库/SDK 实现。外部 CLI（rizin / Ghidra / capa / FLOSS / DIE / jadx / angr…）只能是**可选加速器**：装了就更好，没装必须降级为明确的「缺 X」，而不是整条路径不可用。禁止把「必须先 clone 某仓库 / 先起某个 MCP」当作交付前提。判据：干净机器上 `go build && ./praetor` 之后，各域主路径都能走通。这条是实测逼出来的——开发机上 rizin/ghidra/jadx 一个都没有。 |
 
 ---
 
@@ -459,6 +460,7 @@ go test ./... -count=1
 | 2026-10-26 | **P0-5**：`server/engine_scheduler.go` — `DomainPackFor` / `SchedulerPlanFor` / `SchedulerPlan`；`Engine.Run` 改为「问领域包要调度拓扑」；启动期 `WarnUnresolvedDomainTools()`；新增 `PRAETOR_DOMAINS` 环境变量（默认 `pentest`） | 6 个新测试全绿（explore 拓扑=1+N、非 explore 明确报错、默认域、env 解析）；全仓 16 包全 ok |
 | 2026-10-27 | **逆向域重新设计（配方化，零 MCP）**：不接 REA / GhidraMCP 全家桶。工具面收敛为 3 个（`re_triage` 纯 Go 全貌 / `re_recipe` 配方枚举 / `re_evidence` 唯一结论出口），外部能力以**配方表**（9 条，≤10 硬约束）挂 rizin / Ghidra headless / capa / FLOSS / DIE / jadx 等 CLI；角色 5→2、MaxTurns 190→50、并发 2→1。顺带查实 `Budget` 的 `MaxTokens`/`MaxToolCalls`/`MaxParallel` **没有任何执行层消费**（初版「6M tokens / 3000 次」从未生效），成本控制改由 P3-1 的调度闸门承担 | 新增设计契约测试 6 个（工具面=设计集、零 MCP、角色≤2、角色不得声明域外工具、预算串行有界、配方必须写许可且≤10）；`agent/domain` 19 用例全绿；`ctf.go` 的 `rea` MCP 声明同步删除 |
 | 2026-10-27 | **P2 CTF 完整设计**：工具面 2 个（`ctf_challenge`/`ctf_submit`）+ 零 MCP；竞速改为**延迟竞速（默认单路，停滞才起第二路）**，`MaxParallel` 8→2、MaxTurns 合计 285→195；首解收敛用已有 steer hook（不硬 cancel ctx、不引入 subagent）；提交侧建 `ctf_submissions`（PK=flag sha256）做去重 + ctfd/offline 双判分模式；镜像工具链改为 `CTFToolchain()` 分层表（基础层 ≤12，angr/sage/volatility3 按需）；并清掉 5 个 solver 上 **13 个不存在的工具 key**（`curl_run`/`burp_repeater`/`pwntools_run`/`gdb_run`/`checksec`/`ghidra_decompile`/`rizin_analyze`/`sagemath_run`/`ciphey_decode`/`tshark_run`/`binwalk_run`/`zsteg_run`/`volatility_run`） | 新增设计契约测试 6 个（工具面=设计集/零 MCP/角色≤6 且 MaxTurns≤200/角色必须有 Bash/不得发明工具名/预算并发≤2/工具链分层与许可）；`agent/domain` 27 用例全绿 |
+| 2026-10-27 | **P3-2 `re_triage` 落地 + R6 铁律**：新增 `internal/binfmt`（纯 Go 解析 PE/ELF/Mach-O：头/段表/熵/导入表/导出数/安全缓解/加壳依据/字符串分类）+ `agent/re_tools.go` 的 `re_triage` 工具（摘要 ≤1.4KB、完整 JSON 落盘、不执行样本、畸形输入只降级不 panic）；`toolcatalog` 新增 `domainOwnedTools()` —— 领域专属工具**可解析但不播种给平台 agent**；文档 §0 新增 **R6 自包含优先（不依赖第三方 GitHub 项目）** | binfmt 8 个用例（含拿测试二进制自身当样本、畸形 PE 不 panic、熵边界、字符串提取与版本号误判、渲染预算）；agent 4 个用例（真实 PE 全链路/坏入参/未接入清单/领域工具不污染平台种子）；平台 golden 未变 |
 
 ---
 
@@ -473,7 +475,7 @@ go test ./... -count=1
 | P0 骨架 | 领域包 / 测试门禁 / 装配层 / 调度接缝 / 沙箱（常驻 + 一任务一容器） | ✅ 6/6 |
 | P1 渗透对齐 | hexstrike 配置层 / 确定性验证闭环（`verify_finding` + 落库）/ XBOW 基线 runner | ✅ 3/3（基线可信 **40%**，见 `docs/基线-XBOW-L1-可信版.md`） |
 | P2 CTF | **已完整设计（2 工具 + 延迟竞速 + 提交去重 + 分层镜像）**，实现未开始 | 设计完成，P2-1~P2-6 待做 |
-| P3 逆向 | **已重新设计（3 工具 + 配方 + 零 MCP）**，实现未开始 | 设计完成，P3-1~P3-5 待做 |
+| P3 逆向 | 3 工具 + 配方 + 零 MCP；**`re_triage` 已落地（纯 Go，零依赖）** | 实现进行中 1/5 |
 | P4 红队 | campaign 调度器 / Caldera / Sliver / GOAD | 未开始 0/4 |
 
 > 下一步只有两个正当入口：**P3-1**（evidence 调度闸门，逆向域的总开关）或 **P2-1**（race 调度器，CTF 的总开关）。
@@ -681,6 +683,9 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 > 缺依赖时**明确报「缺 X」**，不静默降级（与沙箱 `required` 同一条纪律）。
 > 代码里 `agent/domain/reverse.go` 的 `ReverseRecipes()` 就是这张表；`TestReverseRecipeCatalogIsLean` 守着
 > 「≤10 条」和「有上游必须写许可」两条，改表会被测试拦住。
+>
+> **按 R6：配方全是可选加速器。** 核心路径（`re_triage` 全貌解析、`re_evidence` 证据落库）**零外部依赖**，
+> 干净机器上就能用；配方缺依赖时明确报「缺 X，装法见文档」，不阻塞分析（先用 triage + 字符串/导入判断方向）。
 
 **角色 5 → 2**：`re-lead`（定路线 + 证据链，20 turns）、`re-analyst`（执行单条意图，30 turns）。
 砍掉的 `malware-analyst` / `mobile-analyst` 是**场景差异不是能力差异**（同一个分析者换目标而已），
@@ -704,7 +709,7 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 | ID | 任务 | 做法 / 复刻来源 | 验收 | 状态 |
 | --- | --- | --- | --- | --- |
 | P3-1 | `evidenceScheduler`：串行推进 + checkpoint 续跑 + **预算闸门** | 自研（设计见上） | 中途 kill 后能续跑、不重复已完成阶段；轮数/token 到顶时强制「收束并写未确认」而不是硬撑 | 待做 |
-| P3-2 | `re_triage`：纯 Go 解析 PE/ELF/Mach-O（头/段表/熵/导入/字符串摘要） | 自研；字段划分参考 `lief-project/LIEF`（Apache-2.0，只读思路） | 三类样本各 1 个：输出 ≤1.5KB、JSON 落盘、**零外部依赖** | 待做 |
+| P3-2 | `re_triage`：纯 Go 解析 PE/ELF/Mach-O（头/段表/熵/导入/字符串摘要/加壳依据） | 自研（`internal/binfmt`），字段划分参考 `lief-project/LIEF`（Apache-2.0，只读思路） | ✅ 用真实 23.6MB PE 验证：8 段/51 导入/熵/可疑 API 全部解析；摘要 **795 字节**（≤1.4KB）、JSON 落盘、零外部依赖 | ✅ 已完成 |
 | P3-3 | `re_recipe` 骨架 + 静态配方（`disasm`/`xrefs`/`decompile`/`strings`/`capability`/`packer`） | 外部进程调用 rizin / Ghidra headless / FLOSS / capa / DIE（**不复制、不链接代码**） | 装了该 CLI 时可用；未装时明确报「缺 X」而非空结果 | 待做 |
 | P3-4 | `re_evidence` + 证据链闭环（`reverseVerifier` 已就绪） | 自研 | 无 xref 无 trace 一律不判 Done（已有单测守着） | 待做 |
 | P3-5 | 动态/移动配方（`trace`/`mobile`）+ 样本治理（加密存储、哈希索引、禁止整包进 LLM） | 自研（合规要求） | 请求日志里无完整样本；`trace` 只回调用序列 | 待做 |
