@@ -180,12 +180,20 @@ func (e *Engine) deadlineCoordinator(ctx context.Context, t *Task) {
 	}
 }
 
-// settleTask runs the ordered settle sequence once (§4 steps ①–⑥).
+// settleTask 是"墙钟到点"的收尾入口（保持原语义）。
 func (e *Engine) settleTask(ctx context.Context, t *Task) {
+	e.settleTaskCause(ctx, t, "到达超时上限", "timeout")
+}
+
+// settleTaskCause 跑一次有序收尾（§4 ①–⑥），并把**为什么收尾**写进日志与终态。
+//
+// 为什么要带原因：预算闸门和墙钟超时走同一套收尾，但原因完全不同
+// （一个是"钱烧完了"、一个是"时间到了"）。日志里只写"收尾"会让人查半天。
+func (e *Engine) settleTaskCause(ctx context.Context, t *Task, cause, defaultStatus string) {
 	if !e.markSettling(t.ID) {
 		return
 	}
-	log.Printf("[deadline] task %s 到达超时上限,进入收尾时序", t.ID)
+	log.Printf("[settle] task %s %s，进入收尾时序", t.ID, cause)
 
 	// ④ 等在跑 worker/planner drain(在跑 run 因夹逼的 MaxDuration 自行进收尾);
 	// 超过 grace 仍未清空 → 硬 cancel 该任务 exec ctx(settling-aware 分支正确归类)。
@@ -209,20 +217,23 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 	}
 	defer e.decInflight(t.ID)
 
-	// ⑥ 定终态(带守卫):met → done(completed);否则 timeout。若常规路径已先落 done,
-	// 守卫(SetTaskStatusGuarded)会拒绝覆盖,保留 completed 语义。
-	status := "timeout"
+	// ⑥ 定终态(带守卫):met → done(completed);否则用调用方给的默认终态。
+	// 若常规路径已先落 done,守卫(SetTaskStatusGuarded)会拒绝覆盖,保留 completed 语义。
+	status := defaultStatus
+	if status == "" {
+		status = "timeout"
+	}
 	if met {
 		status = "done"
 	}
 	won, err := e.m.SetTaskStatusGuarded(t.ID, status)
 	switch {
 	case err != nil:
-		log.Printf("[deadline] task %s 落终态失败: %v", t.ID, err)
+		log.Printf("[settle] task %s 落终态失败: %v", t.ID, err)
 	case won:
-		log.Printf("[deadline] task %s 收尾完成,终态=%s", t.ID, status)
+		log.Printf("[settle] task %s 收尾完成,终态=%s（原因：%s）", t.ID, status, cause)
 	default:
-		log.Printf("[deadline] task %s 收尾时已是终态,保留原状态", t.ID)
+		log.Printf("[settle] task %s 收尾时已是终态,保留原状态", t.ID)
 	}
 }
 

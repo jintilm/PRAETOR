@@ -554,6 +554,7 @@ go test ./... -count=1
 | 2026-10-27 | **module 路径改为本人仓库**：`github.com/Autumn-27/praetor` → **`github.com/jintilm/praetor`**（158 个 Go 文件 import + go.mod）；`selfupdate.Repo` 由 `Autumn-27/praetor` 改为 `jintilm/PRAETOR`——这是**真 bug**：自动更新此前会去查上游作者的仓库，永远拿不到自己的发布；README 的 clone/Releases 链接同步 | `go build ./...` OK；`go vet` 干净；`internal/components`/`agent/domain`/`internal/binfmt` 用例全绿；`grep Autumn-27` 仅剩 SDK `norma` 与 ScopeSentry 关联（第三方，正确保留） |
 | 2026-10-27 | **norma 内联（构建期零外部仓库依赖）**：`internal/norma/` 101 文件 19,659 行，import 前缀改本项目路径，`go.mod` 移除 `github.com/Autumn-27/norma`；Apache-2.0 许可与来源写入 `NOTICE.md`；未拷贝上游测试/cmd/examples。ScopeSentry 保持为可选集成（无 LICENSE，仅调 API） | `GOPROXY=off go build` 成功（43MB）；`go version -m` 不含外部 norma；`go test ./...` 21 包全绿 |
 | 2026-10-27 | **P3-4 `re_evidence` 落地（证据链闭环）**：新增 `db.KindEvidence` 节点种类 + `WriteCounts.Evidence`；工具调 `domain.Reverse.Verifier()` 判定（**规则只有一份**，不在工具里重写）；claim/ref 硬校验；文件 ref 哈希内容、非文件哈希引用串并标注 `sha256_source`；判定不通过**也落库**（state=inferred，返回 chain_ok=false + 补证 hint），既不丢上下文也不让推测冒充成果；**schema 同步**：`ck_node_kind` 白名单加 `evidence`、`ck_node_state` 加 `(kind='evidence' AND state IN ('confirmed','inferred'))`，并对老库加了重建约束的迁移块；注册进 `WorkerTools`（worker 工具面 +1，约 250 tokens/轮） | agent 新增 6 用例（输入校验/哈希来源/无任务上下文降级/worker 接线/**真库落库**）；真库测试当场抓到两个问题：①`ck_node_kind` 约束白名单没含 evidence（写入被 CHECK 拒）；②payload 字段名与返回值不一致（`hashed_from` vs `sha256_source`）——都是单测覆盖不到、只有真库才暴露的；golden 有意变更且仅 `re_evidence	worker` 一行（按纪律 `-update-seed-golden` 并核对 diff）；真库 `go test -p 1 ./...` **21 包全绿**（0 失败） |
+| 2026-10-27 | **P3-1 evidence 调度 + 预算闸门；任务领域列**：`internal/budget`（纯判定：tokens→tool_calls→wall，0=不限）；`server/budget_gate.go` 每 20s 读账本（`llm_usage` 累计 token、`tool_usage` 调用数）判定，到顶调 `settleTaskCause` 走**与墙钟超时同一套**收尾（drain→终局 planner→带守卫落终态）并写明原因；`SchedulerPlanFor` 支持 evidence → 固定 1 planner/1 worker（忽略配置并发）；新增 `tasks.domain`（默认 pentest）+ API `domain` 字段 + `DomainPackFor` 读任务领域，未知值回落并记日志 | budget 7 用例（边界/优先级/剩余量）；db 2 个真库用例（用量取数、领域落库）；server 3 个用例（evidence 串行/领域分流/domainKeys）；真机：非法领域→400，`domain=reverse` 任务日志 `调度=evidence 拓扑=1/1`；真库 `go test -p 1 ./...` **22 包全绿** |
 
 ---
 
@@ -568,7 +569,7 @@ go test ./... -count=1
 | P0 骨架 | 领域包 / 测试门禁 / 装配层 / 调度接缝 / 沙箱（常驻 + 一任务一容器） | ✅ 6/6 |
 | P1 渗透对齐 | hexstrike 配置层 / 确定性验证闭环（`verify_finding` + 落库）/ XBOW 基线 runner | ✅ 3/3（基线可信 **40%**，见 `docs/基线-XBOW-L1-可信版.md`） |
 | P2 CTF | **已完整设计（2 工具 + 延迟竞速 + 提交去重 + 分层镜像）**，实现未开始 | 设计完成，P2-1~P2-6 待做 |
-| P3 逆向 | 3 工具 + 配方 + 零 MCP；`re_triage`（纯 Go 解析）+ `re_evidence`（证据链）已落地 | 实现进行中 2/5 |
+| P3 逆向 | 3 工具 + 配方 + 零 MCP；`re_triage`/`re_evidence` 已落地，**evidence 调度 + 预算闸门已通** | 实现进行中 3/5 |
 | P4 红队 | campaign 调度器 / Caldera / Sliver / GOAD | 未开始 0/4 |
 
 > 下一步只有两个正当入口：**P3-1**（evidence 调度闸门，逆向域的总开关）或 **P2-1**（race 调度器，CTF 的总开关）。
@@ -602,7 +603,8 @@ go test ./... -count=1
 > **P0-5 实现说明**：`Engine.Run` 现在第一件事是 `SchedulerPlanFor(DomainPackFor(t), m.Workers())`。
 > - `explore` → `{Planners:1, Workers:N}`，与改造前的 `1+workers` 例程账本逐字等价（`m.Workers()` 自身已有 >0 兜底，代码里的 clamp 只对直接调用生效，属防御而非行为变更）。
 > - 其它调度器 → 返回 `errSchedulerNotImplemented`，`Run` 记一条 ERROR 后 **不启动任何循环**。刻意不回落 explore：半成品静默跑歪比直接失败难查。
-> - `DomainPackFor` 目前恒返回渗透域（`tasks` 表还没有领域字段）；P1 加列后改为读库。
+> - ~~`DomainPackFor` 目前恒返回渗透域（`tasks` 表还没有领域字段）~~ → **2026-10-27 已加 `tasks.domain`**，
+>   `DomainPackFor` 改为读任务领域（空/未注册回落 pentest 并记日志）。
 > - 告警用的是 `agent.UnresolvedDomainTools(pack)`（面向 tools 表的视图），不是 `domain.Missing(pack, reg)`（面向一个具体 Registry）；后者留到真正装配 Registry 时用。
 
 ### P1 渗透对齐
@@ -801,7 +803,7 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 
 | ID | 任务 | 做法 / 复刻来源 | 验收 | 状态 |
 | --- | --- | --- | --- | --- |
-| P3-1 | `evidenceScheduler`：串行推进 + checkpoint 续跑 + **预算闸门** | 自研（设计见上） | 中途 kill 后能续跑、不重复已完成阶段；轮数/token 到顶时强制「收束并写未确认」而不是硬撑 | 待做 |
+| P3-1 | `evidenceScheduler`：串行拓扑（1 planner + **1 worker**）+ **预算闸门** + 可续跑 | 自研（`internal/budget` 纯判定 + `server/budget_gate.go`） | ✅ 调度计划固定 1/1（忽略配置的 worker 数）；闸门读账本（`llm_usage`/`tool_usage`）判 token/次数/墙钟，到顶走**与墙钟超时同一套**收尾时序并写明原因；真机验证：建 `domain=reverse` 任务日志输出 `领域=reverse 调度=evidence 拓扑=1 planner/1 worker` | ✅ 已完成 |
 | P3-2 | `re_triage`：纯 Go 解析 PE/ELF/Mach-O（头/段表/熵/导入/字符串摘要/加壳依据） | 自研（`internal/binfmt`），字段划分参考 `lief-project/LIEF`（Apache-2.0，只读思路） | ✅ 用真实 23.6MB PE 验证：8 段/51 导入/熵/可疑 API 全部解析；摘要 **795 字节**（≤1.4KB）、JSON 落盘、零外部依赖 | ✅ 已完成 |
 | P3-3 | `re_recipe` 骨架 + 静态配方（`disasm`/`xrefs`/`decompile`/`strings`/`capability`/`packer`） | 外部进程调用 rizin / Ghidra headless / FLOSS / capa / DIE（**不复制、不链接代码**） | 装了该 CLI 时可用；未装时明确报「缺 X」而非空结果 | 待做 |
 | P3-4 | `re_evidence` + 证据链闭环：`db.KindEvidence` 节点 + 调 `domain.Reverse.Verifier()` 判定 + `WriteCounts.Evidence` | 自研（规则只有一份：直接复用领域判定器，不在工具里重写） | ✅ 工具注册在 worker；claim/ref 必填硬校验；ref 是文件则哈希**内容**、否则哈希引用串并标注来源；判定不通过也落库但 state=inferred 且返回 `chain_ok=false`+hint | ✅ 已完成（含真库集成测试） |
@@ -911,9 +913,10 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
    结果：真库 `go test -p 1 ./...` 连跑两次全绿；无库时 18 包全绿（DB 用例按设计 skip）。
 5. 上游 `.gitignore` 原本忽略整个 `/docs/`，导致本文件与选型报告不进版本库。已改为 `/docs/*` + 两份文档白名单例外（`.gitignore` 有注释说明原因）；`docs/漏洞流量证据.md` 仍保持忽略。
 6. **声明了但没人消费的字段（2026-10-27 查实，别当成已生效的护栏）**：
-   - `domain.Budget` 的 `MaxTokens` / `MaxWall` / `MaxToolCalls` / `MaxParallel` —— 全仓只有 `MaxDepth`
-     透传给了 `subagent`，其余四个**没有任何执行层读**。所以初版逆向域的「6M tokens / 3000 次工具调用」
-     从来没生效过。真正的成本闸门在 **P3-1 `evidenceScheduler`**；在那之前，调这些数字只是调注释。
+   - `domain.Budget` 的 `MaxTokens` / `MaxWall` / `MaxToolCalls` —— **2026-10-27 起由预算闸门真正消费**
+     （`internal/budget` + `server/budget_gate.go`），但**只对 evidence 调度器启用**：
+     渗透域（explore）暂不启用，因为其预算 3M/800 与实测单题 2.57M 太接近，贸然生效可能误杀正在产基线的路径。
+     `MaxParallel` 仍只有 explore（拓扑）与 adapter（MaxDepth）在用，其余调度器按自己的语义定并发。
    - `DomainPack.Skills()` —— **没有任何消费点**（`grep '\.Skills()'` 为空）。所以逆向域声明的
      `binary-triage`、CTF 声明的技能名都只是文档性质，不会因为技能不存在而报错，也不会被加载。
    - `DomainPack.MCP()` —— 同样没有消费点（`grep '\.MCP()'` 为空）。这也是为什么 `ctf.go` 里删掉

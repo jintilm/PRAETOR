@@ -167,6 +167,10 @@ DROP TRIGGER IF EXISTS trg_exp_upd ON explorations;
 CREATE TRIGGER trg_exp_upd BEFORE UPDATE ON explorations
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
+-- domain: 任务所属领域（pentest/redteam/ctf/reverse）。默认 pentest 保证存量任务语义不变。
+-- 调度器与预算都按它选（见 server/engine_scheduler.go 的 DomainPackFor）。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT 'pentest';
+
 CREATE TABLE IF NOT EXISTS exploration_nodes (
     id             BIGSERIAL PRIMARY KEY,
     exploration_id BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,

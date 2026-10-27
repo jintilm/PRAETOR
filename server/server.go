@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jintilm/praetor/agent"
+	"github.com/jintilm/praetor/agent/domain"
 	"github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/intercept"
 	"github.com/jintilm/praetor/internal/norma/llm"
@@ -1470,6 +1471,9 @@ type createTaskReq struct {
 	PlanHeartbeatSeconds int      `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
 	SeedFirstIntent      *bool    `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
 	CoverageEnabled      *bool    `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
+	// Domain 任务所属领域（pentest/redteam/ctf/reverse）；省略=pentest。
+	// 决定调度器与预算（证据串行 / 竞速 / 战役 DAG）。
+	Domain string `json:"domain,omitempty"`
 	// InterceptRules 任务级资产拦截/允许规则(创建时录入,存 task_intercept_rules,不进全局表)。
 	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
 }
@@ -1523,8 +1527,18 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "任务级拦截规则无效："+err.Error())
 		return
 	}
+	// 领域校验：只接受已注册的包。写错就 400 明确告知，而不是悄悄按渗透跑。
+	domainKey := strings.TrimSpace(req.Domain)
+	if domainKey == "" {
+		domainKey = string(domain.Pentest)
+	}
+	if _, ok := domain.Get(domain.Key(domainKey)); !ok {
+		writeErr(w, 400, fmt.Sprintf("未知领域 %q（可用：%s）", domainKey, strings.Join(domainKeys(), ", ")))
+		return
+	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
-		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
+		Domain: domainKey,
+		Name:   strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
 		CoverageEnabled: req.CoverageEnabled,

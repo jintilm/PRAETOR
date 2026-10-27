@@ -42,9 +42,25 @@ func (e errSchedulerNotImplemented) Error() string {
 
 // DomainPackFor 返回任务所属的领域包。
 //
-// 目前所有任务都是渗透域：tasks 表还没有领域字段，任务从创建到执行都走 PRAETOR
+// 任务带 domain 列（2026-10-27 起，默认 pentest）：调度器/预算按任务领域选，
+// 未注册值回落 pentest 并记日志。
 // 既有的探索流程。P1 增加 domain 列后，这里改为读任务字段并回落到 Pentest。
-func DomainPackFor(_ *Task) domain.DomainPack {
+// DomainPackFor 返回任务所属的领域包。
+//
+// 任务自 2026-10-27 起带 `domain` 列（默认 pentest）：调度器与预算都按它选。
+// 空值/未注册值一律回落 pentest 并记一条日志——配置写错不该让任务起不来，
+// 但也绝不能静默换成别的领域（那会悄悄改变执行语义）。
+func DomainPackFor(t *Task) domain.DomainPack {
+	key := ""
+	if t != nil {
+		key = strings.TrimSpace(t.Domain)
+	}
+	if key != "" && domain.Key(key) != domain.Pentest {
+		if p, ok := domain.Get(domain.Key(key)); ok {
+			return p
+		}
+		log.Printf("[domain] 任务 %s 的领域 %q 未注册，回落 pentest", t.ID, key)
+	}
 	if p, ok := domain.Get(domain.Pentest); ok {
 		return p
 	}
@@ -65,6 +81,10 @@ func SchedulerPlanFor(p domain.DomainPack, workers int) (SchedulerPlan, error) {
 	switch p.Scheduler() {
 	case domain.ScheduleExplore:
 		return SchedulerPlan{Kind: domain.ScheduleExplore, Planners: 1, Workers: workers}, nil
+	case domain.ScheduleEvidence:
+		// 证据链要求**串行**：一条结论验证完再下一条，并行会重复付"理解样本"的成本
+		// 且让证据顺序变得不可解释。所以这里**刻意忽略传入的 workers**。
+		return SchedulerPlan{Kind: domain.ScheduleEvidence, Planners: 1, Workers: 1}, nil
 	default:
 		return SchedulerPlan{}, errSchedulerNotImplemented{pk: p.Key(), kind: p.Scheduler()}
 	}
@@ -115,4 +135,14 @@ func WarnUnresolvedDomainTools() {
 		log.Printf("[domain] %s 域有 %d 个工具声明尚未接入（对应 MCP 未连）：%s",
 			p.Key(), len(miss), strings.Join(miss, ", "))
 	}
+}
+
+// domainKeys 返回已注册的领域 key（排序由 domain.All 保证），用于错误提示与 UI 选项。
+func domainKeys() []string {
+	packs := domain.All()
+	out := make([]string, 0, len(packs))
+	for _, p := range packs {
+		out = append(out, string(p.Key()))
+	}
+	return out
 }

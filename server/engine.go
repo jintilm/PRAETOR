@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jintilm/praetor/agent"
+	"github.com/jintilm/praetor/agent/domain"
 	"github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/intercept"
 	"github.com/jintilm/praetor/internal/norma/harness"
@@ -759,6 +760,8 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 		return
 	}
 	workers := plan.Workers
+	log.Printf("[engine] task %s 启动：领域=%s 调度=%s 拓扑=%d planner/%d worker",
+		t.ID, DomainPackFor(t).Key(), plan.Kind, plan.Planners, plan.Workers)
 	e.deleteMu.RLock()
 	if e.IsDeleting(t.ID) {
 		e.deleteMu.RUnlock()
@@ -780,6 +783,10 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 		runTaskRoutine(rt, func(loopCtx context.Context) { e.workerLoop(loopCtx, t, name) })
 	}
 	e.startDeadlineCoordinator(ctx, t) // 任务级超时定时器(仅 timeout>0;去重)
+	// 预算闸门：目前只对 evidence 调度器启用（见 budget_gate.go 头注里的取舍）。
+	if plan.Kind == domain.ScheduleEvidence {
+		e.startBudgetGate(ctx, t, DomainPackFor(t))
+	}
 	// 仅在「完全没有活动意图(open+running)」时才 kick 首轮规划。带种子意图的任务:种子已
 	// 是 open,或已被上面刚起的 worker 抢先 claim 成 running——两种都算「有活干」,一律跳过
 	// 首轮 planner,worker 直接领种子意图开跑,跑完由 NotifyDone/心跳唤醒 planner。
