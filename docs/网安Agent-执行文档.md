@@ -145,8 +145,29 @@ R6 说外部工具是可选加速器 —— 但「可选」不等于「让用户
 **失败必须说真话**：构建失败时把日志尾部原样回传（`tailLines`），并区分三类原因——
 基础镜像缺失（409 + 可复制的构建命令）、构建失败（含 docker 输出尾行）、保存选择失败（镜像已建但不切换）。
 
-**当前环境实测**：四个接口行为正确（清单 14 项 / 未知 ID→400 / 基础镜像缺失→409 带可执行命令 / 探测无镜像→409）；
-**沙箱基础镜像 `praetor/sandbox:latest` 在本机尚未构建**，所以「应用」目前会明确报缺基础镜像，而不是静默失败。
+**当前环境实测**：
+- 四个接口行为正确（清单 14 项 / 未知 ID→400 / 基础镜像缺失→409 带可执行命令 / 探测无镜像→409）；
+- **探测链路已在真实镜像上验证**：临时给基础镜像打 tag 后 `POST /probe` 返回 14 项且全部正确判为未装（kali 基础镜像确实没有 gdb/rizin/angr…），验证完已移除该 tag。
+
+**⚠️ 本机镜像构建被环境挡住（不是代码问题，但会挡住"应用"）**：
+
+```
+E: Failed to fetch http://http.kali.org/... 500
+connecting via container settings HTTP proxy http://host.docker.internal:7897:
+dial tcp: lookup host.docker.internal: no such host
+```
+
+排查过程：运行时容器 `apt-get update` **正常**（4.8MB/s）；构建容器里 `getent hosts host.docker.internal`
+也能解析到 `192.168.65.254`；但 Docker Desktop 注入的**容器代理网关自己解析不了该域名**，
+于是构建期所有 `apt` 失败。已验证无效的手段：`--add-host`、`--build-arg http_proxy=`、
+RUN 内 `unset http_proxy`、`DOCKER_BUILDKIT=0`（全部仍走透明代理）。
+
+修法（需手动改 Docker Desktop）：Settings → Resources → Proxies → 关闭「Use proxy for containers」
+（或改用手动代理并填容器可达的地址）→ Apply & restart。修好后「应用」即可正常构建。
+
+面板已**自动识别这个特征**并在失败信息里给出上述修法（`errorLines` 会挑出
+`container settings HTTP proxy` / `no such host` 这类有信息量的行，而不是只回传
+docker 那句 `exit code: 100`）。
 
 ### 1.12 三项修补（通用性说明）
 

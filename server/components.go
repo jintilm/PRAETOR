@@ -226,13 +226,18 @@ func (s *Server) buildComponents(items []components.Item, tag string) {
 	}
 	if err := cmd.Wait(); err != nil {
 		_, _, _, _, lines, _, _ := componentsJob.snapshot()
-		tail := tailLines(lines, 3)
+		tail := errorLines(lines, 3)
 		hint := ""
-		// 这一类失败在本项目环境里反复出现：buildkit 的 token 请求不走 Docker 代理，
-		// 直连 auth.docker.io 会 Bad Gateway。给出可执行修法，别让人对着 "failed to solve" 猜。
-		if strings.Contains(strings.ToLower(tail), "bad gateway") ||
-			strings.Contains(strings.ToLower(tail), "anonymous token") {
-			hint = "；这通常是代理问题：先 `docker pull kalilinux/kali-rolling` 预拉基础镜像，再重试"
+		low := strings.ToLower(tail)
+		switch {
+		// 本机实测：Docker Desktop 把代理注入到构建容器的网络层，但那个代理网关自己
+		// 解析不了 host.docker.internal，于是任何 apt 都失败（运行时容器却是正常的）。
+		// 这不是镜像或代码问题，必须去改 Docker Desktop 设置，所以要把话说明白。
+		case strings.Contains(low, "container settings http proxy") || strings.Contains(low, "no such host"):
+			hint = "；构建期网络被 Docker Desktop 的容器代理挡住（代理网关解析不了 host.docker.internal）。" +
+				"修法：Docker Desktop → Settings → Resources → Proxies → 关闭「Use proxy for containers」或改用手动代理，Apply & restart"
+		case strings.Contains(low, "bad gateway") || strings.Contains(low, "anonymous token"):
+			hint = "；这通常是 buildkit 取 token 的请求不走 Docker 代理：先 `docker pull kalilinux/kali-rolling` 预拉基础镜像，再重试"
 		}
 		fail("构建失败：" + err.Error() + "；最后输出：" + tail + hint)
 		return
@@ -381,6 +386,35 @@ func settingOr(pg *db.DB, key, def string) string {
 		return def
 	}
 	return strings.TrimSpace(v)
+}
+
+// errorLines 从构建日志里挑**信息量最大的**几行，而不是简单取最后 n 行。
+//
+// 为什么不能只取尾部：docker 失败时最后几行往往是它自己的包装信息
+// （`process "/bin/sh -c apt-get install ..." did not complete successfully: exit code: 100`），
+// 而真正的错误（apt 的 `E: ... 404` / `Temporary failure resolving`）在更上面。
+// 只回传尾部会让用户对着"exit code 100"发懵 —— 这等于没说。
+func errorLines(lines []string, n int) string {
+	if len(lines) == 0 {
+		return "（无输出）"
+	}
+	var hits []string
+	for _, ln := range lines {
+		l := strings.ToLower(ln)
+		if strings.Contains(l, "e: ") || strings.Contains(l, "error") ||
+			strings.Contains(l, "failed") || strings.Contains(l, "404") ||
+			strings.Contains(l, "temporary failure") || strings.Contains(l, "could not resolve") ||
+			strings.Contains(l, "no space left") || strings.Contains(l, "permission denied") {
+			hits = append(hits, ln)
+		}
+	}
+	if len(hits) == 0 {
+		return tailLines(lines, n)
+	}
+	if len(hits) > n {
+		hits = hits[len(hits)-n:]
+	}
+	return strings.Join(hits, " | ")
 }
 
 func tailLines(lines []string, n int) string {
