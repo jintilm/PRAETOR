@@ -186,6 +186,15 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			}
 			return t, true
 		}
+		// Wire the system-level persona (身份/授权声明层). It is prepended to EVERY
+		// agent's system prompt by renderSystem, and is read fresh each turn — so an
+		// edit in the UI takes effect on the next LLM call of every agent, no restart.
+		//
+		// 每次调用都读库（而不是启动缓存）：人设是运营随时可能调整的全局层，
+		// 且读库成本极低（settings 单行）。缓存反而会带来「改了不生效」的困惑。
+		agent.SystemPersona = func() (string, bool) {
+			return m.pg.SystemPersona()
+		}
 		// Wire DB-stored wrap-up (settlement) prompts. Empty column → built-in default.
 		agent.WrapupOverride = func(key string) (string, bool) {
 			a, err := m.pg.GetAgentByKey(key)
@@ -836,6 +845,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/conversations/{id}/messages/{seq}", s.pgConversationMsgDetail)
 
 	mux.HandleFunc("GET /api/agents", s.pgListAgents)
+	// 系统级人设（身份/授权声明层，跨所有 agent）+ 门禁与审计。
+	s.registerPersonaRoutes(mux)
 	mux.HandleFunc("POST /api/agents", s.pgCreateAgent)
 	mux.HandleFunc("GET /api/agents/{key}", s.pgGetAgent)
 	mux.HandleFunc("PATCH /api/agents/{key}", s.pgUpdateAgent)

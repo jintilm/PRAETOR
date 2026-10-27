@@ -810,6 +810,17 @@ export const api = {
   // index handed back to the filesystem. Evidence bound to findings is kept.
   trafficDeleteAll: () => del<{ deleted: number; reclaimed: number }>(`/traffic/all`),
 
+  // ---- 系统级人设（身份/授权声明层，跨所有 agent；带门禁与审计）----
+  // 与 per-agent 提示词（/agents/{key}/prompt）分开：这层改一次影响全部 agent。
+  systemPersona: () => get<SystemPersonaResp>(`/system-persona`),
+  // 保存需显式确认 + 变更说明（门禁在服务端也强制一次，两端都要把关）。
+  saveSystemPersona: (req: { text: string; confirm: boolean; note: string; actor?: string }) =>
+    put<{ ok: boolean; audit: PersonaAudit }>(`/system-persona`, req),
+  // 清空是独立动作（不是"保存空白"），必须给原因 —— 便于审计区分误删与有意清除。
+  clearSystemPersona: (note: string, actor?: string) =>
+    del<{ ok: boolean; audit: PersonaAudit }>(`/system-persona`, { note, actor }),
+  systemPersonaAudits: () => get<{ audits: PersonaAudit[] }>(`/system-persona/audits`),
+
   // ---- app settings (runtime toggles) ----
   settings: () => get<Settings>(`/settings`),
   setSettings: (patch: Partial<Settings>) => put<Settings>(`/settings`, patch),

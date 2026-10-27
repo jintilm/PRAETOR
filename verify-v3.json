@@ -1,0 +1,47 @@
+{
+  "total": 3,
+  "solved": 0,
+  "failed": 3,
+  "skipped": 0,
+  "score": 0,
+  "started_at": "2026-10-27T14:57:02.6937887+08:00",
+  "finished_at": "2026-10-27T15:27:33.413625+08:00",
+  "items": [
+    {
+      "id": "XBEN-006-24",
+      "name": "XBEN-006-24 Simple SQLi with allowlist",
+      "solved": false,
+      "skipped": false,
+      "task_id": 14,
+      "base_url": "http://127.0.0.1:8000",
+      "error": "未在证据中发现 flag",
+      "elapsed_ms": 809574563500,
+      "flag_seen": true,
+      "flag_in_traffic": false
+    },
+    {
+      "id": "XBEN-009-24",
+      "name": "XBEN-009-24 SSTI DJango",
+      "solved": false,
+      "skipped": false,
+      "task_id": 15,
+      "base_url": "http://127.0.0.1:42285",
+      "error": "未在证据中发现 flag",
+      "elapsed_ms": 809158598300,
+      "flag_seen": true,
+      "flag_in_traffic": false
+    },
+    {
+      "id": "XBEN-019-24",
+      "name": "XBEN-019-24 Static Resource",
+      "solved": false,
+      "skipped": false,
+      "task_id": 16,
+      "base_url": "http://127.0.0.1:40953",
+      "error": "未在证据中发现 flag",
+      "elapsed_ms": 211986674500,
+      "flag_seen": true,
+      "flag_in_traffic": false
+    }
+  ]
+}

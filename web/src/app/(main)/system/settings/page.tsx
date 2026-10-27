@@ -15,6 +15,7 @@ import { api } from "@/lib/api";
 import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSendMode } from "@/lib/chat-send-mode";
 import type { Settings } from "@/lib/types";
 
+import { SystemPersonaCard } from "./_components/system-persona-card";
 import { UpdateCard } from "./_components/update-card";
 
 export default function SystemSettingsPage() {
@@ -260,6 +261,10 @@ export default function SystemSettingsPage() {
         <h1 className="text-xl font-semibold tracking-tight">系统配置</h1>
         <p className="text-muted-foreground text-sm">全局运行时开关</p>
       </div>
+
+      {/* 系统级人设排在最前、且不放进多列容器：它是**最高优先级层**（身份/授权声明），
+          UI 顺序应体现层级；且它是长文本编辑器，塞进 columns 会被压得很窄、很难用。 */}
+      <SystemPersonaCard />
 
       {/* 多列而非 grid：网络搜索卡片比其余高数倍，且高度随所选后端变化（brave/tavily
           的 key 输入是条件渲染）。grid 会按最高的一张撑满整行、在旁边留下大片空白，
