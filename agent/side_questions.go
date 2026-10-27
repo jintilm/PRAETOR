@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Autumn-27/norma/agentcore"
+	"github.com/jintilm/praetor/internal/norma/agentcore"
 	"github.com/jintilm/praetor/sidequestion"
 )
 

@@ -7,13 +7,13 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Autumn-27/norma/agentcore"
-	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/norma/permission"
-	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/norma/transcript"
 	"github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/intercept"
+	"github.com/jintilm/praetor/internal/norma/agentcore"
+	"github.com/jintilm/praetor/internal/norma/llm"
+	"github.com/jintilm/praetor/internal/norma/permission"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
+	"github.com/jintilm/praetor/internal/norma/transcript"
 )
 
 // Planner is the event-driven LLM planner (docs §4.3): each time the asset or

@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/Autumn-27/norma/harness"
-	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/norma/permission"
-	"github.com/Autumn-27/norma/subagent"
-	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/norma/transcript"
+	"github.com/jintilm/praetor/internal/norma/harness"
+	"github.com/jintilm/praetor/internal/norma/llm"
+	"github.com/jintilm/praetor/internal/norma/permission"
+	"github.com/jintilm/praetor/internal/norma/subagent"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
+	"github.com/jintilm/praetor/internal/norma/transcript"
 )
 
 // 本文件把 DomainPack（零依赖的声明）翻译成 norma SDK 的真实装配件：

@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	actool "github.com/Autumn-27/norma/tool"
 	"github.com/jintilm/praetor/db"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
 )
 
 // assetInterceptCandidates 提取一条待插入资产输入项的 域名/IP/URL 候选串，用于资产拦截匹配。

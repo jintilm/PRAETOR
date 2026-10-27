@@ -6,11 +6,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Autumn-27/norma/agentcore"
-	"github.com/Autumn-27/norma/harness"
-	"github.com/Autumn-27/norma/llm"
 	"github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/intercept"
+	"github.com/jintilm/praetor/internal/norma/agentcore"
+	"github.com/jintilm/praetor/internal/norma/harness"
+	"github.com/jintilm/praetor/internal/norma/llm"
 	"github.com/jintilm/praetor/sidequestion"
 )
 

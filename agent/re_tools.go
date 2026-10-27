@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	actool "github.com/Autumn-27/norma/tool"
 	"github.com/jintilm/praetor/internal/binfmt"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
 )
 
 // reTriageMaxRead 是单次读取上限。样本动辄几百 MB，全量读进内存既慢又可能打爆 worker；

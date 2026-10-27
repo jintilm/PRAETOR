@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"sort"
 
-	actool "github.com/Autumn-27/norma/tool"
 	"github.com/jintilm/praetor/agent/domain"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
 )
 
 // 本文件把「内置工具」从纯代码变成可枚举、可被 DB 覆盖的目录：

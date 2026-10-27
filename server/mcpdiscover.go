@@ -6,9 +6,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/Autumn-27/norma/mcp"
-	actool "github.com/Autumn-27/norma/tool"
 	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/internal/norma/mcp"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
 	"github.com/jintilm/praetor/mcphttp"
 )
 

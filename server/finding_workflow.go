@@ -8,9 +8,9 @@ import (
 	"log"
 	"strconv"
 
-	actool "github.com/Autumn-27/norma/tool"
 	"github.com/jintilm/praetor/agent"
 	"github.com/jintilm/praetor/db"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
 	"github.com/jintilm/praetor/traffic"
 )
 

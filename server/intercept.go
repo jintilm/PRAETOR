@@ -11,10 +11,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Autumn-27/norma/llm"
 	"github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/guard"
 	"github.com/jintilm/praetor/intercept"
+	"github.com/jintilm/praetor/internal/norma/llm"
 	"github.com/jintilm/praetor/llmrec"
 )
 

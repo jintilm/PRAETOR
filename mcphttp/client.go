@@ -23,9 +23,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/norma/permission"
-	actool "github.com/Autumn-27/norma/tool"
+	"github.com/jintilm/praetor/internal/norma/llm"
+	"github.com/jintilm/praetor/internal/norma/permission"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
 )
 
 const protocolVersion = "2025-06-18"

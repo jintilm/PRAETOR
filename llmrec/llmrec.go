@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/norma/transcript"
 	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/internal/norma/llm"
+	"github.com/jintilm/praetor/internal/norma/transcript"
 )
 
 type taskIDContextKey struct{}

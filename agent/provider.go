@@ -23,11 +23,11 @@ import (
 	"github.com/jintilm/praetor/config"
 	"time"
 
-	"github.com/Autumn-27/norma/agentcore"
-	"github.com/Autumn-27/norma/compaction"
-	"github.com/Autumn-27/norma/llm"
-	acperm "github.com/Autumn-27/norma/permission"
-	"github.com/Autumn-27/norma/transcript"
+	"github.com/jintilm/praetor/internal/norma/agentcore"
+	"github.com/jintilm/praetor/internal/norma/compaction"
+	"github.com/jintilm/praetor/internal/norma/llm"
+	acperm "github.com/jintilm/praetor/internal/norma/permission"
+	"github.com/jintilm/praetor/internal/norma/transcript"
 	"github.com/jintilm/praetor/llmrec"
 )
 

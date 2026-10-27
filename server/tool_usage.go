@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"log"
 
-	actool "github.com/Autumn-27/norma/tool"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
 
 	"github.com/jintilm/praetor/agent"
 	"github.com/jintilm/praetor/db"

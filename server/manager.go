@@ -14,12 +14,12 @@ import (
 	"sync"
 	"time"
 
-	actool "github.com/Autumn-27/norma/tool"
 	"github.com/jintilm/praetor/agent"
 	pgdb "github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/enrich"
 	"github.com/jintilm/praetor/guard"
 	"github.com/jintilm/praetor/intercept"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
 	"github.com/jintilm/praetor/traffic"
 )
 

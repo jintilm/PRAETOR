@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	actool "github.com/Autumn-27/norma/tool"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
 	"github.com/jintilm/praetor/sandbox"
 )
 

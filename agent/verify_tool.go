@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	actool "github.com/Autumn-27/norma/tool"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
 )
 
 // FindingVerifyResult 是确定性验证的结构化结论，直接作为工具结果回给模型。

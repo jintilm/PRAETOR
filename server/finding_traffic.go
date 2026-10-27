@@ -13,10 +13,10 @@ import (
 	"strconv"
 	"unicode/utf8"
 
-	actool "github.com/Autumn-27/norma/tool"
 	"github.com/jintilm/praetor/agent"
 	"github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/evidence"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
 )
 
 func (s *Server) evidenceStore() *evidence.Store {

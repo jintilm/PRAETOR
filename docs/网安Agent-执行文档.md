@@ -20,7 +20,7 @@
 | R3 | **文档先行** | 先在本文件建任务条目（含验收标准），再写代码；代码完成即回填状态与本日验证结果。 |
 | R4 | **许可证红线** | 复制代码前先看 LICENSE：MIT / Apache-2.0 / BSD 可复制（保留版权头）；**AGPL / GPL 只读思路，不复制代码**。 |
 | R5 | **不碰主栈数据** | 见 §1.3：绝不连 `praetor` 库跑测试，绝不 `down -v` 主栈。 |
-| R6 | **自包含优先：不依赖第三方 GitHub 项目** | 运行时的**核心能力**必须只用本项目代码 + Go 标准库/SDK 实现。外部 CLI（rizin / Ghidra / capa / FLOSS / DIE / jadx / angr…）只能是**可选加速器**：装了就更好，没装必须降级为明确的「缺 X」，而不是整条路径不可用。禁止把「必须先 clone 某仓库 / 先起某个 MCP」当作交付前提。判据：干净机器上 `go build && ./praetor` 之后，各域主路径都能走通。这条是实测逼出来的——开发机上 rizin/ghidra/jadx 一个都没有。 |
+| R6 | **自包含优先：不依赖第三方 GitHub 项目** | 运行时的**核心能力**必须只用本项目代码 + Go 标准库/SDK 实现。外部 CLI（rizin / Ghidra / capa / FLOSS / DIE / jadx / angr…）只能是**可选加速器**：装了就更好，没装必须降级为明确的「缺 X」，而不是整条路径不可用。禁止把「必须先 clone 某仓库 / 先起某个 MCP」当作交付前提。判据：干净机器上 `go build && ./praetor` 之后，各域主路径都能走通。这条是实测逼出来的——开发机上 rizin/ghidra/jadx 一个都没有。**2026-10-27 起再进一步：agent 运行时 norma 已内联进 `internal/norma/`，构建期零外部仓库依赖（见 §1.14）。** |
 
 ---
 
@@ -123,6 +123,30 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 3. 任务容器**不复用**（每任务一个），冷启动成本约 1~2s（`docker run` + 镜像已在本地）。任务多时注意磁盘/容器数量，reaper 兜底。
 
 **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
+
+### 1.14 依赖边界：norma 内联（构建期零外部仓库）
+
+**为什么动这个**：`go.mod` 里挂着 `github.com/Autumn-27/norma`（agent 运行时，上游作者），
+虽然它只是编译期库依赖（不联网、不起进程），但构建仍要去外部仓库取一次；上游删库/改 API 会卡住构建。
+
+**做法**：把 v0.4.3 源码内联到 `internal/norma/`（**101 个文件 / 19,659 行**），
+import 前缀改为 `github.com/jintilm/praetor/internal/norma/...`，`go.mod` 里删掉该 require。
+
+| 项 | 结果 |
+| --- | --- |
+| 许可 | Apache-2.0；`internal/norma/LICENSE` 取自上游仓库根（模块 zip 里没带），`NOTICE.md` 记录来源/版本/校验和/改动 |
+| 未拷贝 | `*_test.go`（98 个）、`cmd/`、`examples/`、`go.mod`、`go.sum` —— 上游测试依赖其自身模块路径与 fixture，放进来会污染 `go test ./...` |
+| 代码改动 | **仅 import 前缀**，无逻辑改动 |
+| 依赖收敛 | `creack/pty`、`hinshun/vt10x` 由 indirect 转为直接依赖；`golang.org/x/net` 原本已有 |
+| 验证 | `GOPROXY=off go build ./cmd/praetor` **成功产出 43MB**（证明构建不需要网络）；二进制里已不含外部 norma 模块；`go test ./...` **21 包全绿** |
+
+**边界（写进 `internal/norma/NOTICE.md`）**：
+- 那是第三方代码，**自研逻辑不要写进去**（升级会被覆盖）；要改行为优先在调用侧适配；
+- 确需改内部默认值（压缩预算、输出上限）时，改动要留注释说明原因，并记在升级核对清单里；
+- 升级路径：`go mod download -json <新版本>` → 覆盖目录 → 同样替换前缀 → `go build && go test`。
+
+**ScopeSentry 保持保留**：它是**外部服务集成**（513 行客户端，走其 MCP 接口按项目/任务拉资产），
+不是编译依赖；未配置 URL 时完全休眠。其仓库**没有 LICENSE**，所以只调 API、不复制任何代码。
 
 ### 1.13 可选组件面板（P3-1 前置：把「装什么」交给用户，但只装进镜像）
 
@@ -517,6 +541,7 @@ go test ./... -count=1
 | 2026-10-27 | **可选组件面板（沙箱镜像层）**：`internal/components`（14 项清单 + Dockerfile/探测脚本生成器，单一数据源）+ `server/components.go`（清单/应用/探测/SSE 四个接口，构建串行单例、日志环形缓冲 400 行、失败回传尾部）+ 设置页「可选组件」卡片（分组勾选/体积估算/已装徽章/构建日志实时滚动）；镜像 tag 由选择集 hash 决定，切回 `:latest` 即回滚；`WireSandboxWithImage` 让 settings 里的镜像优先生效 | components 7 用例 + server 5 用例；真机接口验证：清单 14 项、未知 ID→400、基础镜像缺失→409（带可执行构建命令）、无镜像探测→409 |
 | 2026-10-27 | **组件面板端到端跑通 + 修真机构建暴露的 3 个 bug**：①Dockerfile 续行（单命令组件生成 `;` 开头新行）②extras 层缺 `apt-get update`（基镜像删了包索引）③kali 官方源被镜像 403（改默认阿里云 + 重试）④`errorLines()` 按特征挑错误行而不是只回传尾部 | 基础镜像 553MB → 应用 gdb → custom-eb685c80 658MB；探测 `gdb ok=true 18.1`；重复应用 0.57s 走 skipped；新增 `validateDockerfile` 语法校验用例 |
 | 2026-10-27 | **module 路径改为本人仓库**：`github.com/Autumn-27/praetor` → **`github.com/jintilm/praetor`**（158 个 Go 文件 import + go.mod）；`selfupdate.Repo` 由 `Autumn-27/praetor` 改为 `jintilm/PRAETOR`——这是**真 bug**：自动更新此前会去查上游作者的仓库，永远拿不到自己的发布；README 的 clone/Releases 链接同步 | `go build ./...` OK；`go vet` 干净；`internal/components`/`agent/domain`/`internal/binfmt` 用例全绿；`grep Autumn-27` 仅剩 SDK `norma` 与 ScopeSentry 关联（第三方，正确保留） |
+| 2026-10-27 | **norma 内联（构建期零外部仓库依赖）**：`internal/norma/` 101 文件 19,659 行，import 前缀改本项目路径，`go.mod` 移除 `github.com/Autumn-27/norma`；Apache-2.0 许可与来源写入 `NOTICE.md`；未拷贝上游测试/cmd/examples。ScopeSentry 保持为可选集成（无 LICENSE，仅调 API） | `GOPROXY=off go build` 成功（43MB）；`go version -m` 不含外部 norma；`go test ./...` 21 包全绿 |
 
 ---
 

@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Autumn-27/norma/skill"
-	actool "github.com/Autumn-27/norma/tool"
 	"github.com/jintilm/praetor/agent"
 	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/internal/norma/skill"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
 	"github.com/jintilm/praetor/traffic"
 )
 

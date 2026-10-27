@@ -10,14 +10,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Autumn-27/norma/agentcore"
-	"github.com/Autumn-27/norma/harness"
-	"github.com/Autumn-27/norma/llm"
-	"github.com/Autumn-27/norma/permission"
-	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/norma/transcript"
 	"github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/intercept"
+	"github.com/jintilm/praetor/internal/norma/agentcore"
+	"github.com/jintilm/praetor/internal/norma/harness"
+	"github.com/jintilm/praetor/internal/norma/llm"
+	"github.com/jintilm/praetor/internal/norma/permission"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
+	"github.com/jintilm/praetor/internal/norma/transcript"
 )
 
 // Worker is an LLM work agent (docs §4.4): it claims ONE intent, completes it

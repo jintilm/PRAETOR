@@ -4,9 +4,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/Autumn-27/norma/llm"
 	"github.com/jintilm/praetor/agent"
 	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/internal/norma/llm"
 	"github.com/jintilm/praetor/llmpool"
 )
 
