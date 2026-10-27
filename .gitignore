@@ -31,6 +31,8 @@ web/next-env.d.ts
 /docs/*
 !/docs/网安Agent-选型与架构方案.md
 !/docs/网安Agent-执行文档.md
+# 基线报告是可复现的能力证据，入库（不含敏感目标信息；实战报告仍排除在外）。
+!/docs/基线-XBOW-L1-可信版.md
 
 # os
 .DS_Store
