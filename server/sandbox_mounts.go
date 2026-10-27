@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"path"
 	"path/filepath"
 	"strings"
@@ -146,32 +147,44 @@ func (s *Server) sandboxPathMapper(t *Task) func(string) (string, bool) {
 	}
 }
 
-// sandboxReadOnly 返回「这个容器路径是不是只读挂载」的判断器，供写文件工具用。
+// sandboxWriteDeny 返回「沙箱模式下这个路径能不能写」的判断器：
+// 空串 = 可写，非空 = 拒绝理由（直接进 tool_result）。
 //
-// 判据与 sandboxPathMapper 同源（都来自 mountsForTask 的 ReadOnly 标记），
-// 不是另写一套路径规则 —— 两处一旦对不上，就会出现"能写进只读挂载"或
-// "草稿纸工作目录突然不能写"这类只有真跑才发现的错位。
-func (s *Server) sandboxReadOnly(t *Task) func(string) bool {
+// 为什么不是"只挡只读挂载"：`/tmp/x`、`/etc/x` 这类**没有挂载**的容器路径
+// resolvePath 会原样返回，于是 Write 会落到宿主的 /tmp（Linux）或盘根的 E:\tmp
+// （Windows）—— 那是绕开沙箱在宿主上写文件，比只读那个口子更严重。
+// 所以规则反过来写：**只有映射过的可写挂载（/work）才允许写**，其余一律拒绝。
+//
+// 判据与 sandboxPathMapper 同源（同一份 mountsForTask），不另写一套路径规则 ——
+// 两套规则对不上时，错法都是"只有真跑才发现"。
+func (s *Server) sandboxWriteDeny(t *Task) func(string) string {
 	if s == nil || t == nil || t.ID == "" {
 		return nil
 	}
-	return func(p string) bool {
+	return func(p string) string {
 		p = filepath.ToSlash(strings.TrimSpace(p))
 		if p == "" {
-			return false
+			return ""
 		}
+		// 工作目录永远可写：它是模型的草稿纸。
+		if hitsMount(p, SandboxContainerRoot) {
+			return ""
+		}
+		// 每次重取，理由同 sandboxPathMapper：题面目录是任务建好之后才配的。
 		for _, m := range s.mountsForTask(t) {
-			// 每次重取，理由同 sandboxPathMapper：题面目录是任务建好之后才配的。
-			if !m.ReadOnly {
-				continue
-			}
-			// 两种写法都要挡：容器路径（/chal/x）是常态，但提示词里偶尔会出现宿主路径
-			// （映射缺位时的兜底），只挡容器写法等于留一个后门 —— 而这条后门通向题库本身。
 			if hitsMount(p, m.Target) || hitsMountFold(p, m.Source) {
-				return true
+				if m.ReadOnly {
+					return fmt.Sprintf("%s 是只读挂载（题面附件），不能修改；把产物写到 %s/ 下",
+						p, SandboxContainerRoot)
+				}
+				return ""
 			}
 		}
-		return false
+		if strings.HasPrefix(p, "/") {
+			return fmt.Sprintf("沙箱里没有 %s 这条路径的挂载，写不到（宿主的 /tmp、/etc 不属于本任务）；"+
+				"把产物写到 %s/ 下", p, SandboxContainerRoot)
+		}
+		return ""
 	}
 }
 

@@ -111,19 +111,24 @@ func resolvePath(tc *ToolContext, p string) string {
 	return filepath.Join(tc.WorkingDir, p)
 }
 
-// denyReadOnly 拦下「往只读挂载里写」。
+// denyWrite 拦下「沙箱模式下写到不该写的地方」。
 //
-// 容器里 /chal 是 `-v ...:ro`，Bash 写不进去；但写文件的三件工具（Write/Edit/MultiEdit）
-// 跑在宿主进程上，拿到的是普通宿主路径 —— 内核不知道"这块在容器里是只读的"，
-// 于是会真的写进题面目录。没有答案文件的题，脱敏视图就是题库原目录本身，
-// 一次误写会污染之后所有跑同一道题的运行，而现象只是"题目好像被改坏了"。
+// 两类目标必须挡，理由不同但后果一样严重：
+//   - 只读挂载（/chal）：容器里是 `-v ...:ro`，Bash 写不进去；但写文件的工具跑在宿主上，
+//     拿到的是普通宿主路径 —— 内核不知道那层约束，会真的写进题面目录。没有答案文件的题，
+//     脱敏视图就是题库原目录本身，一次误写污染之后所有跑同一道题的运行。
+//   - 没挂载的容器路径（/tmp、/etc）：resolvePath 对它们原样返回，于是写到宿主的 /tmp
+//     （Linux）或盘根 E:\tmp（Windows）—— 绕开沙箱在宿主上写文件。
 //
-// 报错要说明原因，否则模型会以为路径打错了、换个写法重试。
-func denyReadOnly(tc *ToolContext, p string) error {
-	if tc == nil || tc.SandboxReadOnly == nil || !tc.SandboxReadOnly(p) {
+// 报错要说明原因和可写位置，否则模型会以为路径打错了、换个写法重试，白烧几轮上下文。
+func denyWrite(tc *ToolContext, p string) error {
+	if tc == nil || tc.SandboxWriteDeny == nil {
 		return nil
 	}
-	return fmt.Errorf("Error: %s 是只读挂载（题面附件），不能修改；把产物写到工作目录（如 /work/ 下）", p)
+	if why := tc.SandboxWriteDeny(p); why != "" {
+		return fmt.Errorf("Error: %s", why)
+	}
+	return nil
 }
 
 // truncate trims s to max characters, keeping head and tail.

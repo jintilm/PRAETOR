@@ -158,9 +158,10 @@ type Options struct {
 	// SandboxPath translates container paths to host paths for file tools; nil = not
 	// sandboxed. See harness.QueryInput.SandboxPath.
 	SandboxPath func(string) (string, bool)
-	// SandboxReadOnly reports whether a container path is on a read-only mount;
-	// nil = not sandboxed. See harness.QueryInput.SandboxReadOnly.
-	SandboxReadOnly func(string) bool
+	// SandboxWriteDeny returns "" when the path may be written, else the reason to
+	// refuse (empty result = allowed). nil = not sandboxed. Covers both read-only
+	// mounts and container paths with no mount at all. See harness.QueryInput.
+	SandboxWriteDeny func(string) string
 
 	// ToolOutputDir, when set, makes oversized tool output spill to a file there
 	// (full content preserved) and the tool return a head + pointer instead of
@@ -504,7 +505,7 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 		MaxConcurrency:     s.opts.MaxConcurrency,
 		WorkingDir:         s.opts.WorkingDir,
 		SandboxPath:        s.opts.SandboxPath,
-		SandboxReadOnly:    s.opts.SandboxReadOnly,
+		SandboxWriteDeny:   s.opts.SandboxWriteDeny,
 		Todos:              s.opts.Todos,
 		ToolOutputDir:      s.opts.ToolOutputDir,
 		MaxToolOutputChars: s.opts.MaxToolOutputChars,

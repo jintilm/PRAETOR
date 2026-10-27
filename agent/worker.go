@@ -82,11 +82,11 @@ type Worker struct {
 	// 两者必须成对：只改提示词，模型会用 /chal/... 调 LS/Read，而文件工具跑在宿主进程里，
 	// 于是报 ENOENT（Windows 上还会把 /chal 当相对路径，错信息里混进宿主 data 目录）。
 	sandboxPath func(string) (string, bool)
-	// sandboxReadOnly 报告某个容器路径是否落在只读挂载上（nil = 不在沙箱）。
+	// sandboxWriteDeny 回答「沙箱模式下这个路径能不能写」：空串 = 可以，非空 = 拒绝理由。
 	//
 	// 与 sandboxPath 成对：路径能翻过去，不等于能写 —— 容器里 /chal 是 ro，
-	// 而写文件的三件工具跑在宿主上，内核不知道这层约束。
-	sandboxReadOnly func(string) bool
+	// 而未挂载的 /tmp、/etc 会落到宿主上，两者都必须在写入口挡住。
+	sandboxWriteDeny func(string) string
 	// extraTools are host-provided tools (e.g. traffic query, oast) appended to
 	// the worker's graph write-back tools.
 	// domain 是任务领域（pentest/reverse/ctf），用于裁剪 worker 工具面。
@@ -157,8 +157,8 @@ func (w *Worker) SetSandboxWorkRoot(dir string) { w.sandboxWorkRoot = strings.Tr
 // SetSandboxPath 注入「容器内路径 → 宿主路径」的翻译器（nil = 不在沙箱）。
 func (w *Worker) SetSandboxPath(fn func(string) (string, bool)) { w.sandboxPath = fn }
 
-// SetSandboxReadOnly 注入「这个容器路径是不是只读挂载」的判断（nil = 不在沙箱）。
-func (w *Worker) SetSandboxReadOnly(fn func(string) bool) { w.sandboxReadOnly = fn }
+// SetSandboxWriteDeny 注入「这个容器路径能不能写」的判断（nil = 不在沙箱）。
+func (w *Worker) SetSandboxWriteDeny(fn func(string) string) { w.sandboxWriteDeny = fn }
 
 // promptRunDir 返回**写进系统提示词**的工作目录。
 //
@@ -526,11 +526,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		DeepSeekSearchModel:   w.webSearch.DeepSeekModel,
 		WebSearchProxy:        w.webSearch.Proxy,
 		// Bash 子命令的 HTTP 默认走记录代理 + 信任其 CA（工具无需 -x/-k）。
-		BashEnv:         proxyEnv(w.proxyAddr, w.proxyCACert),
-		WorkingDir:      runDir,
-		SandboxPath:     w.sandboxPath,
-		SandboxReadOnly: w.sandboxReadOnly,
-		MaxTurns:        w.maxTurns, // 0 = unlimited (configurable in agent management)
+		BashEnv:          proxyEnv(w.proxyAddr, w.proxyCACert),
+		WorkingDir:       runDir,
+		SandboxPath:      w.sandboxPath,
+		SandboxWriteDeny: w.sandboxWriteDeny,
+		MaxTurns:         w.maxTurns, // 0 = unlimited (configurable in agent management)
 		// 墙钟预算,轮边界判,不打断半路;0 = 不限。有任务级 deadline 时夹逼到 min(自身预算,
 		// 距 deadline 剩余),让本 run 在任务到点时自然进收尾(见 taskclock.go)。
 		MaxDuration: maxDur,

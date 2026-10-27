@@ -289,7 +289,7 @@ go run ./cmd/ctftarget -challenge /path/to/corpus/very-easy-delulu -up
 真机验证：模型只用文件工具（禁用 Bash）跑完 `LS /chal`、`LS /chal/files/challenge`、
 `Read /chal/name.txt`，三个都成功，且 `/chal` 的列表里**没有** `flag.txt`（脱敏视图仍然生效）。
 
-**能翻路径 ≠ 能写**（修完上面那条才暴露出来）：
+**能翻路径 ≠ 能写**（修完上面那条才暴露出来，两个口子）：
 
 容器里的 `/chal` 是 `-v ...:ro`，Bash 写不进去；但 `Write`/`Edit`/`MultiEdit` 跑在宿主进程上，
 拿到的是普通宿主路径，内核根本不知道"这块在容器里是只读的"。也就是说路径映射一通，
@@ -297,10 +297,14 @@ go run ./cmd/ctftarget -challenge /path/to/corpus/very-easy-delulu -up
 那时脱敏视图就是题库原目录本身（`ensureChallengeView` 直接返回 `srcDir`），一次误写会污染
 之后所有跑同一道题的运行，而现象只是"题目好像被改坏了"。
 
-修法：`ToolContext.SandboxReadOnly` + `denyReadOnly`，三个写工具入口统一拦，错误信息给出可写位置
-（`/work/` 下），否则模型会以为路径打错、换个写法重试。判据与路径映射同源（同一份
-`mountsForTask` 的 `ReadOnly` 标记），避免两套规则对不上。容器写法（`/chal/x`）和宿主写法
-（`E:\...\corpus\...`）都要挡 —— 后者是提示词兜底时可能出现的形态，只挡前者等于留后门。
+第二个口子更隐蔽：`/tmp/x`、`/etc/x` 这类**没挂载**的容器路径，`resolvePath` 会原样返回，
+于是写操作落到宿主的 `/tmp`（Linux）或盘根的 `E:\tmp`（Windows）—— 绕开沙箱在宿主上写文件。
+
+所以规则不是"挡掉只读挂载"，而是反过来写：**沙箱模式下只有映射过的可写挂载（`/work`）才允许写**。
+实现是 `ToolContext.SandboxWriteDeny`（空串 = 可以，非空 = 拒绝理由）+ 三个写工具入口的 `denyWrite`。
+判据与路径映射同源（同一份 `mountsForTask` 的 `ReadOnly` 标记），避免两套规则对不上。
+容器写法（`/chal/x`）和宿主写法（`E:\...\corpus\...`）都要挡 —— 后者是提示词兜底时可能出现的形态。
+拒绝理由必须带可写位置（`/work/` 下），否则模型会以为路径打错、换个写法重试。
 
 #### 1.22.3 去重表的副作用：每道题只有第一次跑有效
 

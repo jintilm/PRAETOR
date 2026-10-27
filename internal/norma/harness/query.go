@@ -77,11 +77,12 @@ type QueryInput struct {
 	// filepath.IsAbs rejects it, turning it into a relative path under WorkingDir).
 	SandboxPath func(string) (string, bool)
 
-	// SandboxReadOnly reports whether a container path sits on a read-only mount
-	// (e.g. /chal). The write tools run in the host process, so the kernel never
-	// sees the container's `:ro` — without this check Write/Edit would happily
-	// modify the challenge corpus. nil = not sandboxed.
-	SandboxReadOnly func(string) bool
+	// SandboxWriteDeny returns "" if the path may be written, else the reason to
+	// refuse. nil = not sandboxed (host mode writes anywhere, as before).
+	// The write tools run in the host process, so the kernel never enforces the
+	// container's `:ro`, and an unmapped container path (/tmp/x) would silently
+	// land on the host filesystem — both have to be stopped here.
+	SandboxWriteDeny func(string) string
 
 	// Permission policy.
 	PermissionMode     permission.Mode
