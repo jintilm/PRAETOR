@@ -849,6 +849,7 @@ func (s *Server) Handler() http.Handler {
 	// 系统级人设（身份/授权声明层，跨所有 agent）+ 门禁与审计。
 	s.registerPersonaRoutes(mux)
 	s.registerComponentRoutes(mux) // 可选组件（装进沙箱镜像，不动宿主）
+	s.registerCTFRoutes(mux)       // CTF 任务级配置（期望 flag / 题面目录）与判分查询
 	mux.HandleFunc("POST /api/agents", s.pgCreateAgent)
 	mux.HandleFunc("GET /api/agents/{key}", s.pgGetAgent)
 	mux.HandleFunc("PATCH /api/agents/{key}", s.pgUpdateAgent)

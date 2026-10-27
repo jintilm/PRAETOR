@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -142,8 +143,9 @@ func (c *ctfSubmitter) SubmitFlag(ctx context.Context, challengeID, flag string)
 	}
 
 	// ③ 落库（主键仲裁并发：抢输的那一方按 duplicate 处理）
+	taskID, _ := strconv.ParseInt(c.taskID, 10, 64)
 	inserted, err := c.pg.InsertCTFSubmission(&db.CTFSubmission{
-		FlagSHA: sha, ChallengeID: challengeID, Flag: flag, Verdict: verdict, Raw: raw,
+		TaskID: taskID, FlagSHA: sha, ChallengeID: challengeID, Flag: flag, Verdict: verdict, Raw: raw,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("记录提交结果失败：%w", err)

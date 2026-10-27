@@ -6,9 +6,17 @@ import (
 	"time"
 )
 
+// CTF 提交结论（判分口径的唯一来源，别在别处写字符串字面量）。
+const (
+	CTFVerdictAccepted  = "accepted"
+	CTFVerdictRejected  = "rejected"
+	CTFVerdictDuplicate = "duplicate"
+)
+
 // CTFSubmission 是一次 flag 提交的去重记录（主键 = flag 的 sha256）。
 type CTFSubmission struct {
 	FlagSHA     string    `json:"flag_sha256"`
+	TaskID      int64     `json:"task_id,omitempty"` // 归属任务（0 = 无任务上下文）
 	ChallengeID string    `json:"challenge_id,omitempty"`
 	Flag        string    `json:"flag"`
 	Verdict     string    `json:"verdict"` // accepted | rejected
@@ -32,6 +40,50 @@ FROM ctf_submissions WHERE flag_sha256=$1`, flagSHA).
 	return &s, nil
 }
 
+// ListCTFSubmissions 返回某任务的提交记录（按时间倒序）。
+//
+// 评分要用它：bench 只能从"平台判对过没有"来判分，而不是看模型说自己解出来了。
+func (d *DB) ListCTFSubmissions(taskID int64, limit int) ([]CTFSubmission, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := d.Query(`
+SELECT flag_sha256, COALESCE(task_id,0), challenge_id, flag, verdict, raw_response, created_at
+FROM ctf_submissions
+WHERE task_id = $1
+ORDER BY created_at DESC, flag_sha256
+LIMIT $2`, taskID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []CTFSubmission{}
+	for rows.Next() {
+		var s CTFSubmission
+		if err := rows.Scan(&s.FlagSHA, &s.TaskID, &s.ChallengeID, &s.Flag, &s.Verdict, &s.Raw, &s.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// AcceptedFlagForTask 报告该任务是否至少有一个被判对的 flag（bench 判分口径）。
+func (d *DB) AcceptedFlagForTask(taskID int64) (string, bool, error) {
+	var flag string
+	err := d.QueryRow(`
+SELECT flag FROM ctf_submissions
+WHERE task_id = $1 AND verdict = 'accepted'
+ORDER BY created_at LIMIT 1`, taskID).Scan(&flag)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return flag, true, nil
+}
+
 // InsertCTFSubmission 只在 flag 未提交过时写入，返回是否真的插入了。
 //
 // 用 ON CONFLICT DO NOTHING 而不是"先查再写"：并发下两个 solver 可能同时拿到同一个 flag，
@@ -39,10 +91,10 @@ FROM ctf_submissions WHERE flag_sha256=$1`, flagSHA).
 // 让主键做仲裁，插入失败的那一方按"已提交过"处理。
 func (d *DB) InsertCTFSubmission(s *CTFSubmission) (bool, error) {
 	tag, err := d.Exec(`
-INSERT INTO ctf_submissions(flag_sha256, challenge_id, flag, verdict, raw_response)
-VALUES ($1,$2,$3,$4,$5)
+INSERT INTO ctf_submissions(flag_sha256, task_id, challenge_id, flag, verdict, raw_response)
+VALUES ($1,$2,$3,$4,$5,$6)
 ON CONFLICT (flag_sha256) DO NOTHING`,
-		s.FlagSHA, s.ChallengeID, s.Flag, s.Verdict, s.Raw)
+		s.FlagSHA, nullIfZero(s.TaskID), s.ChallengeID, s.Flag, s.Verdict, s.Raw)
 	if err != nil {
 		return false, err
 	}

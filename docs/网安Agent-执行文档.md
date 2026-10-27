@@ -124,6 +124,57 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 
 **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
 
+### 1.19 CTF 基准跑分（P2-4）：分数只从"平台认不认"来
+
+跑分器的全部意义是**别信 agent 的自述**。所以 `bench/ctf` 的判分口径只有一条：
+`GET /api/ctf/submissions?task_id=` 里存在 `verdict=accepted` 的记录 → 这题算解出，其余一律不算。
+不看任务状态是不是 `completed`、不看 agent 说没说过"flag 是 xxx"、不看工具调用次数。
+
+**目录约定**（`Discover` 只认含 `flag.txt` 的子目录，其它目录直接跳过——没有 flag 就没法判分）：
+
+```
+<root>/<challenge_id>/flag.txt        必需，期望 flag（判分依据，绝不进提示词）
+<root>/<challenge_id>/name.txt        可选，题目名
+<root>/<challenge_id>/README.md       可选，题面正文（喂给 ctf_challenge）
+<root>/<challenge_id>/docker-compose.yml  可选，有则先 up 再跑，跑完 down
+<root>/<challenge_id>/*               其余当附件
+```
+
+**单题流程**（`runner.Run`）：`compose up` → 建任务（`domain=ctf`，`seed_first_intent`）→
+`POST /api/tasks/{id}/ctf` 写入期望 flag + 题面目录 → 轮询到终态/超时 → 查 `solved` → `compose down`。
+**不管中途哪步失败都要 down**（`defer`），否则下一题会撞端口。
+
+**不泄题**：`buildPrompt` 只拼题目名 + 题面目录 + 实例地址，**期望 flag 一个字符都不写进提示词**。
+这是跑分可信的前提——泄了题的分数没有意义。
+
+**三个接口**（都在 `/api`，需登录）：
+
+| 接口 | 用途 |
+| --- | --- |
+| `POST /api/tasks/{id}/ctf` | 写 `expected_flag` / `challenge_dir`；校验领域必须是 ctf、flag 形状 `xx{...}`、目录必须存在 |
+| `GET  /api/tasks/{id}/ctf` | 读当前配置 + `submitter_ready` / `challenge_ready`（"配了"和"真能用"是两件事） |
+| `GET  /api/ctf/submissions?task_id=` | `{solved, submissions}`，跑分器唯一判分入口 |
+
+**为什么另开任务级接口而不复用 `PUT /api/settings`**：设置项是**白名单固定键**，
+把逐任务的 `ctf.expected_flag.<id>` 塞进去要么破坏类型安全，要么让设置面板出现一堆动态条目。
+
+**跑**：
+
+```bash
+go run ./cmd/ctfbench -root /path/to/corpus -dry-run        # 只看发现了哪些题，不烧 token
+go run ./cmd/ctfbench -root /path/to/corpus -limit 3        # 真跑前 3 题
+go run ./cmd/ctfbench -root /path/to/corpus -api http://127.0.0.1:8797 -token <JWT>
+```
+
+**已知限制**：
+
+1. **题库自备**：Cybench（Apache-2.0）与 NYU CTF Bench（GPL-2.0，**只作评测、不复制代码**）都不随仓库分发；
+   仓库里只有跑分器。"出基线分"必须在有题库的机器上跑一次才有数字，本文档不预填。
+2. **判分只看 accepted**：想统计"被拒提交次数/去重拦截次数"从 `submissions` 里数，但**不能**把它们当分数。
+3. **成本只记 input/output token**：工具调用次数、time-to-flag 目前靠 `Item.Elapsed` 与 `submissions.created_at` 推，
+   没有独立列；要更细的画像得从 `llm_usage` / `tool_usage` 另外汇总。
+4. **单题 30 分钟、单轮几千 token**：40 题全量约 25M input，必须 `-limit` 分批跑（与 P1-3 同一条纪律）。
+
 ### 1.18 题面拉取（P2-2b）：附件落盘，只回路径
 
 `ctf_challenge` 只做一件事：把题面和附件整理成"模型能直接用"的形态，**附件正文绝不进上下文**。
@@ -633,6 +684,8 @@ go test ./... -count=1
 | 2026-10-27 | **P2-1 延迟竞速调度**：`SchedulerPlan` 新增 `Lanes`（注册数 vs 启动放行数）；race → 2 worker/1 lane；`startRaceGate` 按「有产出不放行 / 轮数达标 / 时长兜底 / eager」放行，日志带原因；`Engine.ConvergeTask` 收敛原语（steer 而非硬 cancel）；race 一并接入预算闸门 | server 7 用例（放行规则 7 分支/环境变量解析/race 拓扑/lane 上限/explore 行为不变/收敛空值安全/steer 管道）；真机 `domain=ctf` 日志 1 planner/2 worker 且无放行；真库 `go test -p 1 ./...` **22 包全绿** |
 | 2026-10-27 | **P2-2 `ctf_submit` + 去重表 + 双判分 + 收敛**：`agent/ctf_tools.go`（工具 + `CTFSubmitter` 接口）、`db/ctf_submit.go`（`ctf_submissions`，主键=flag sha256，`ON CONFLICT DO NOTHING` 仲裁并发）、`server/ctf_submit.go`（offline/ctfd 两个 judge；判对调 `ConvergeTask`；判题失败不落库）；**工具面按领域裁剪**：`ToolSet.SetDomain` + `domainTools()`，`re_evidence` 从无条件改为 reverse 专属，索引补 `domainScopedTools()` | agent 5 用例（后端缺失/形状校验/verdict 透传/后端错误/未接入清单）+ 领域裁剪 3 态断言；server 4 用例（离线精确比对/去重与不复投/判题失败不落库/配置解析）；golden 仅 `re_evidence→worker` 一行移除；真库 `go test -p 1 ./...` **22 包全绿** |
 | 2026-10-27 | **P2-2b `ctf_challenge`**：`agent/ctf_challenge.go`（接口 + 工具，只回路径；长题面截断 + `truncated`）；`server/ctf_challenge.go`（离线目录来源 + CTFd 来源，附件落盘、HTML 去标签、文件名 sanitize）；接线到 worker（仅 ctf 域） | agent 3 用例（未配置不可用/只回路径不回正文/截断与 resets=-1）；server 4 用例（离线目录元信息与附件过滤/CTFd 下载与鉴权头/路径穿越/配置解析）；`TestCTFResolvesAllTools` 断言 CTF 未接入清单**为空**且工具面仍是 2 个；真库 `go test -p 1 ./...` **22 包全绿** |
+| 2026-10-27 | **修全新库建不起来的真 bug（P3-1 遗留）**：`db/schema.sql` 里 `ALTER TABLE tasks ADD COLUMN IF NOT EXISTS domain` 被放在 `CREATE TABLE tasks` **之前**，空库上整份 schema 的 Exec 以 `42P01 relation "tasks" does not exist` 整体失败 → `db.Open` 直接报 `apply schema:` 错，**全新安装根本起不来**。存量库因为 tasks 早已存在而从不触发，正是这次跑门禁（`test-with-db.sh` 每次 `down -v` 重建）才暴露 | 全新库整份应用：50 张表、`tasks.domain` 默认 `'pentest'`、零报错；真库全量 **23 包全绿** |
+| 2026-10-27 | **P2-4 CTF 基准跑分器**：`bench/ctf`（`challenge.go` 发现 / `client.go` HTTP 客户端含 Login·CreateTask·ConfigureCTF·Solved·Done·**Stats** / `runner.go` 逐题跑 + `Summary.Score`/`Markdown`）+ `cmd/ctfbench` CLI；`server/ctf_api.go`（`POST/GET /api/tasks/{id}/ctf`、`GET /api/ctf/submissions`，校验领域/flag 形状/目录存在）；`db` 新增 `task_id` 列 + `ListCTFSubmissions` + `AcceptedFlagForTask` | 判分**唯一口径**=平台 `accepted`（不看任务状态、不看模型自述）；提示词**不含期望 flag**（用例断言）；每题同时记 input tokens，报告出 `分数 + 成本`；`solved` 判定收敛到 `AcceptedFlagForTask` 一处；`-compose` 默认开（题目自带靶场没起=跑分器的错，不是模型的分）；真机六条负例（非 ctf 任务/flag 形状/目录不存在/任务不存在/缺 task_id）+ 正向 solved 翻转全部符合预期 |
 
 ---
 
@@ -793,7 +846,7 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 | P2-2 | `ctf_submit`（唯一提交出口）+ `ctf_submissions` 去重表 + 双判分（offline 精确比对 / ctfd API）+ 判对后 **ConvergeTask** 收敛 | CTFd API（Apache-2.0，外部服务调用）；离线模式用于基准 | ✅ 同一 flag 只打一次平台（主键 sha256 仲裁并发）；rejected 不复投；判题失败**不落库**（否则重试会被永久判 duplicate）；判对才收敛；未配置判题后端时工具**明确报不可用** | ✅ 已完成（`ctf_challenge` 见 P2-2b） |
 | P2-2b | `ctf_challenge`：题面/附件/实例地址拉取，**附件落盘只回路径** | 离线目录约定（`name.txt`/`README.md`/`connection.txt` + 其余文件当附件）或 CTFd API | ✅ 两种来源都实现；离线支持子目录（`<root>/<id>/`）；HTML 题面去标签；附件名先 basename 再过滤（防 `../` 写穿）；长题面截断并标 `truncated`；平台不提供重置次数时返回 -1 并说明 | ✅ 已完成 |
 | P2-3 | CTF 沙箱镜像：基础层 + crypto 可选层 | 按 `CTFToolchain()` 构建；重依赖不进基础层 | 基础镜像 ≤12 项且能跑通 1 道 pwn + 1 道 forensics；`angr/sage` 按需装 | 待做 |
-| P2-4 | Cybench 40 题 + NYU 子集出分（复用 `bench/xbow` 结构） | 接入 benchmark，离线判分 | 出基线分并记录到本文件；含 time-to-flag 与每题 token | 待做 |
+| P2-4 | CTF 基准跑分器（复用 `bench/xbow` 结构：Discover / Run / Summary） | 接入 benchmark，**离线判分**（唯一口径：平台 `accepted`） | ✅ `bench/ctf` 三件套 + `cmd/ctfbench` CLI；发现只认含 `flag.txt` 的子目录；跑完必 `compose down`；提示词不写期望 flag；任务级 CTF 配置接口（写/读/查提交）；`solved` 由 accepted 记录推导 | ✅ **跑分器完成**（题库自备，基线分待有题库机器上跑出后回填） |
 | P2-5 | **per-intent 模型路由**（换模型竞速） | 自研：模型现在是任务级 profile 链（`task_llm.go` 的 `ActiveLLMProfileID`），要做 per-intent 需改解析层 | 同一题两路可用不同 profile；失败路回退换模型 | 待做 |
 | P2-6 | 题目优先级与放弃策略（按分值/剩余时间/预算动态排序） | 自研；参考 ctf-agent 的"先易后难 + 限时放弃" | 预算紧时优先高分易题；放弃的题有记录 | 待做 |
 
