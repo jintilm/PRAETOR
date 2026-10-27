@@ -778,13 +778,25 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 	// plan.Planners 目前恒为 1（explore）：多 planner 拓扑随 campaign/race 一起实现，
 	// 这里先按计数登记，避免到时再改例程账本。
 	runTaskRoutine(rt, func(loopCtx context.Context) { e.plannerLoop(loopCtx, t) })
+	// 延迟竞速：先只放行 plan.Lanes 条；其余等竞速放行器（仅 race 会真的延迟）。
+	release := e.startRaceGate(ctx, t, plan)
 	for i := 0; i < workers; i++ {
 		name := fmt.Sprintf("work#%d", i+1)
-		runTaskRoutine(rt, func(loopCtx context.Context) { e.workerLoop(loopCtx, t, name) })
+		lane := i
+		runTaskRoutine(rt, func(loopCtx context.Context) {
+			if lane >= plan.Lanes {
+				select {
+				case <-release:
+				case <-loopCtx.Done():
+					return // 任务结束前都没放行：这条例程直接退出
+				}
+			}
+			e.workerLoop(loopCtx, t, name)
+		})
 	}
 	e.startDeadlineCoordinator(ctx, t) // 任务级超时定时器(仅 timeout>0;去重)
 	// 预算闸门：目前只对 evidence 调度器启用（见 budget_gate.go 头注里的取舍）。
-	if plan.Kind == domain.ScheduleEvidence {
+	if plan.Kind == domain.ScheduleEvidence || plan.Kind == domain.ScheduleRace {
 		e.startBudgetGate(ctx, t, DomainPackFor(t))
 	}
 	// 仅在「完全没有活动意图(open+running)」时才 kick 首轮规划。带种子意图的任务:种子已

@@ -23,7 +23,11 @@ import (
 type SchedulerPlan struct {
 	Kind     domain.SchedulerKind
 	Planners int // planner 循环数（explore 固定 1）
-	Workers  int // worker 循环数
+	Workers  int // worker 循环数（含延迟放行的那几条）
+	// Lanes 是**启动时立即放行**的 worker 数。race 用它实现延迟竞速：
+	// 例程账本按 Workers 注册（运行中不动态增删），但第 Lanes 条之后先阻塞，
+	// 由竞速放行器（engine_race.go）在停滞时放行。
+	Lanes int
 }
 
 // errSchedulerNotImplemented 是「域已注册但调度器还没写」的统一错误。
@@ -80,11 +84,16 @@ func SchedulerPlanFor(p domain.DomainPack, workers int) (SchedulerPlan, error) {
 	}
 	switch p.Scheduler() {
 	case domain.ScheduleExplore:
-		return SchedulerPlan{Kind: domain.ScheduleExplore, Planners: 1, Workers: workers}, nil
+		return SchedulerPlan{Kind: domain.ScheduleExplore, Planners: 1, Workers: workers, Lanes: workers}, nil
 	case domain.ScheduleEvidence:
 		// 证据链要求**串行**：一条结论验证完再下一条，并行会重复付"理解样本"的成本
 		// 且让证据顺序变得不可解释。所以这里**刻意忽略传入的 workers**。
-		return SchedulerPlan{Kind: domain.ScheduleEvidence, Planners: 1, Workers: 1}, nil
+		return SchedulerPlan{Kind: domain.ScheduleEvidence, Planners: 1, Workers: 1, Lanes: 1}, nil
+	case domain.ScheduleRace:
+		// 竞速：注册 N 条 worker 例程，但**默认只放行 1 条**（延迟竞速）。
+		// 第 2 条由 engine_race.go 的放行器在停滞/eager 时放开。
+		n := raceLaneCount(p)
+		return SchedulerPlan{Kind: domain.ScheduleRace, Planners: 1, Workers: n, Lanes: 1}, nil
 	default:
 		return SchedulerPlan{}, errSchedulerNotImplemented{pk: p.Key(), kind: p.Scheduler()}
 	}
