@@ -263,6 +263,24 @@ go run ./cmd/ctftarget -challenge /path/to/corpus/very-easy-delulu -up
 > 一眼看不出是"工具没进沙箱"。目前靠 Bash 兜底（模型通常一两步内就改用 `ls`/`cat`，实测 3 秒），
 > 彻底修法是把沙箱句柄从 harness 一路传到 `tool.ToolContext`，属于独立重构。
 
+#### 1.22.3 去重表的副作用：每道题只有第一次跑有效
+
+`ctf_submissions` 原本以 `flag_sha256` 单列作主键 —— 去重的目的很正当（同一个 flag 不重复问平台，
+省判题次数也避开平台风控）。但它连带做了一件没人想要的事：**第二个任务提交同一个 flag 时，
+命中已有记录就直接返回 `duplicate` 且不落库**，而 bench 的判分口径是"本任务有没有 accepted 行"。
+
+于是回归测试、复现、多人各自验证同一道题，从第二次开始全被判成"未解出"。真机表现很迷惑：
+task 29 明确把靶机打穿、`%48879c%7$hn` 改掉校验值、拿到 `HTB{m45t3r_0f_d3c3pt10n}`，
+模型自己写"ctf_submit verdict=accepted(duplicate)"，而 `ctf_submissions` 里一条都没有。
+模型随后用 `prove_goal` 宣布完成 —— 任务状态 `done`，分数为零。
+
+修法是把主键改成 `(flag_sha256, task_id)`：**去重仍然按 flag（不打第二次平台），但每个任务各留一行**。
+跨任务时沿用此前判定落库，并照常触发收敛。判重则分两步问：先问"本任务交过没"（→ duplicate），
+再问"别的任务交过没"（→ 沿用 verdict 落本任务）。少了第一步会让本任务每交一次都多收敛一次。
+
+旧库迁移在 `schema.sql` 里用 `DO` 块改主键（先判 `pg_get_constraintdef` 是否已是复合键，
+所以每次启动重复执行也安全）；`task_id` 从 NULL 收敛到 `0`，因为复合主键不能含 NULL。
+
 ### 1.21 竞速分模型（P2-5）：两路换的不是起点，是脑子
 
 race 之前的两条路换的是**起点**（另一条攻击面），模型是同一个。问题在于：

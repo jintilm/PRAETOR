@@ -172,20 +172,45 @@ CREATE TRIGGER trg_exp_upd BEFORE UPDATE ON explorations
 -- 注意：这条 ALTER 必须放在 CREATE TABLE tasks 之后 —— 放在前面时，全新库上
 -- tasks 还不存在，整份 schema 的 Exec 会以 42P01 整体失败（一句错，全库都建不出来）。
 
--- CTF 提交去重表（P2-2）。主键就是 flag 的 sha256：**同一个 flag 全局只提交一次**。
+-- CTF 提交去重表（P2-2）。**同一个 flag 全局只问平台一次**，但每个任务各留一行。
 -- 为什么去重放数据库而不是内存：进程重启/多实例下内存会失效，重复提交会浪费判题次数、还可能触发平台风控。
 -- rejected 也留档：被判错的 flag 不允许复投（复投不会变对，只会浪费）。
+--
+-- 主键是 (flag_sha256, task_id) 而不是单独的 flag_sha256：去重的目的是"不打第二次平台"，
+-- 不是"第二个任务拿不到分"。早期单列主键下，重跑同一道题时第二个任务提交同一个 flag 会
+-- 被判 duplicate 且**不落库**，于是 bench 的判分口径（本任务有 accepted 行）把它算成未解出
+-- —— 每道题只有第一次跑有效，复现和回归全废。
 CREATE TABLE IF NOT EXISTS ctf_submissions (
-    flag_sha256  TEXT PRIMARY KEY,
+    flag_sha256  TEXT NOT NULL,
     challenge_id TEXT NOT NULL DEFAULT '',
     flag         TEXT NOT NULL,
-    verdict      TEXT NOT NULL,          -- accepted | rejected（duplicate 不入库，直接返回已有结论）
+    verdict      TEXT NOT NULL,          -- 只存 accepted | rejected（结论来自平台；duplicate 不是结论）
     raw_response TEXT NOT NULL DEFAULT '',
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- task_id: 归属任务（评分/复盘要按任务看"这一题有没有被解出"）。
+    -- 0 = 无任务上下文（早期记录或人工提交），不用 NULL：复合主键不能含 NULL。
+    task_id      BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (flag_sha256, task_id)
 );
--- task_id: 归属任务（评分/复盘要按任务看"这一题有没有被解出"）。
--- 允许 NULL：早期记录或非任务场景（如人工提交）没有任务上下文。
+-- 旧库迁移：早期 task_id 允许 NULL，且主键是单列。每一步都必须幂等
+-- （这份 schema 每次启动都会整体执行一遍）。
 ALTER TABLE ctf_submissions ADD COLUMN IF NOT EXISTS task_id BIGINT;
+UPDATE ctf_submissions SET task_id = 0 WHERE task_id IS NULL;
+ALTER TABLE ctf_submissions ALTER COLUMN task_id SET DEFAULT 0;
+ALTER TABLE ctf_submissions ALTER COLUMN task_id SET NOT NULL;
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='ctf_submissions'::regclass
+          AND conname='ctf_submissions_pkey'
+          AND pg_get_constraintdef(oid) NOT LIKE '%,%'
+    ) THEN
+        ALTER TABLE ctf_submissions DROP CONSTRAINT ctf_submissions_pkey;
+        ALTER TABLE ctf_submissions ADD CONSTRAINT ctf_submissions_pkey
+            PRIMARY KEY (flag_sha256, task_id);
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_ctf_submissions_challenge ON ctf_submissions(challenge_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ctf_submissions_task ON ctf_submissions(task_id, created_at DESC);
 

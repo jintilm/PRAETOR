@@ -25,12 +25,36 @@ type CTFSubmission struct {
 }
 
 // GetCTFSubmission 按 flag 哈希取已有记录；没有返回 (nil, nil)。
+//
+// 同一个 flag 现在可能有多行（每个任务各一行），取**最早**那一行的判定：
+// 平台的结论不会因为谁提交而变，最早的结论最接近原始判定。
 func (d *DB) GetCTFSubmission(flagSHA string) (*CTFSubmission, error) {
 	var s CTFSubmission
 	err := d.QueryRow(`
-SELECT flag_sha256, challenge_id, flag, verdict, raw_response, created_at
-FROM ctf_submissions WHERE flag_sha256=$1`, flagSHA).
-		Scan(&s.FlagSHA, &s.ChallengeID, &s.Flag, &s.Verdict, &s.Raw, &s.CreatedAt)
+SELECT flag_sha256, COALESCE(task_id,0), challenge_id, flag, verdict, raw_response, created_at
+FROM ctf_submissions WHERE flag_sha256=$1
+ORDER BY created_at LIMIT 1`, flagSHA).
+		Scan(&s.FlagSHA, &s.TaskID, &s.ChallengeID, &s.Flag, &s.Verdict, &s.Raw, &s.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// GetCTFSubmissionForTask 取**本任务**对这个 flag 的提交记录；没有返回 (nil, nil)。
+//
+// 判重必须按任务粒度问：只查全局最早一条会让"本任务已交过"和"别的任务交过"混在一起。
+// 后者要走"沿用判定并落库"，前者只是 duplicate —— 两者后果不同（前者不该再收敛一次）。
+func (d *DB) GetCTFSubmissionForTask(flagSHA string, taskID int64) (*CTFSubmission, error) {
+	var s CTFSubmission
+	err := d.QueryRow(`
+SELECT flag_sha256, COALESCE(task_id,0), challenge_id, flag, verdict, raw_response, created_at
+FROM ctf_submissions WHERE flag_sha256=$1 AND task_id=$2
+ORDER BY created_at LIMIT 1`, flagSHA, taskID).
+		Scan(&s.FlagSHA, &s.TaskID, &s.ChallengeID, &s.Flag, &s.Verdict, &s.Raw, &s.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -84,7 +108,11 @@ ORDER BY created_at LIMIT 1`, taskID).Scan(&flag)
 	return flag, true, nil
 }
 
-// InsertCTFSubmission 只在 flag 未提交过时写入，返回是否真的插入了。
+// InsertCTFSubmission 只在「该任务还没记过这个 flag」时写入，返回是否真的插入了。
+//
+// 主键是 (flag_sha256, task_id)：同一任务重复提交同一个 flag 只留一行（去重），
+// 但不同任务各留一行 —— 否则重跑同一道题时第二个任务永远没有 accepted 记录，
+// 评分会把"已经解出来"算成未解出。
 //
 // 用 ON CONFLICT DO NOTHING 而不是"先查再写"：并发下两个 solver 可能同时拿到同一个 flag，
 // 先查再写会让两边都判"没提交过"，于是都打到平台（正是去重要避免的事）。
@@ -93,8 +121,8 @@ func (d *DB) InsertCTFSubmission(s *CTFSubmission) (bool, error) {
 	tag, err := d.Exec(`
 INSERT INTO ctf_submissions(flag_sha256, task_id, challenge_id, flag, verdict, raw_response)
 VALUES ($1,$2,$3,$4,$5,$6)
-ON CONFLICT (flag_sha256) DO NOTHING`,
-		s.FlagSHA, nullIfZero(s.TaskID), s.ChallengeID, s.Flag, s.Verdict, s.Raw)
+ON CONFLICT (flag_sha256, task_id) DO NOTHING`,
+		s.FlagSHA, s.TaskID, s.ChallengeID, s.Flag, s.Verdict, s.Raw)
 	if err != nil {
 		return false, err
 	}

@@ -128,11 +128,47 @@ func (c *ctfSubmitter) SubmitFlag(ctx context.Context, challengeID, flag string)
 	flag = strings.TrimSpace(flag)
 	sum := sha256.Sum256([]byte(flag))
 	sha := hex.EncodeToString(sum[:])
+	taskID, _ := strconv.ParseInt(c.taskID, 10, 64)
 
-	// ① 已提交过 → 直接返回上次结论，**不再打平台**
+	// ① 已提交过 → **不再打平台**，但要分清是哪种"提交过"。
+	//
+	// 去重省的是"第二次问平台"，不是"第二个任务拿不到分"。早期这里一律返回
+	// duplicate 且不落库，后果是重跑同一道题时第二个任务没有任何记录，
+	// 而 bench 的判分口径是「本任务有 accepted 行」——于是每道题只有第一次跑有效，
+	// 复现和回归全废（真机踩过：task 29 明明打穿了靶机，表里却查不到一条）。
+	// 先问"本任务交过没"：这一步必须按任务粒度，不能拿全局最早一条来代替
+	// （全局最早往往是别的任务的，会让本任务每交一次都再收敛一次）。
+	if own, err := c.pg.GetCTFSubmissionForTask(sha, taskID); err == nil && own != nil {
+		detail := "该 flag 本任务已提交过（verdict=" + own.Verdict + "），本次未再次提交"
+		return &agent.CTFSubmitResult{Verdict: "duplicate", Detail: detail, Raw: own.Raw}, nil
+	}
+	// 再看有没有别的任务/别的运行交过：不再问平台，但要为本任务落一行。
 	if prior, err := c.pg.GetCTFSubmission(sha); err == nil && prior != nil {
-		detail := "该 flag 之前已提交（verdict=" + prior.Verdict + "），本次未再次提交"
-		return &agent.CTFSubmitResult{Verdict: "duplicate", Detail: detail, Raw: prior.Raw}, nil
+		// 跨任务/跨运行：沿用此前判定，为本任务落一行。
+		inserted, ierr := c.pg.InsertCTFSubmission(&db.CTFSubmission{
+			TaskID: taskID, FlagSHA: sha, ChallengeID: challengeID,
+			Flag: flag, Verdict: prior.Verdict, Raw: prior.Raw,
+		})
+		if ierr != nil {
+			return nil, fmt.Errorf("记录提交结果失败：%w", ierr)
+		}
+		accepted := prior.Verdict == db.CTFVerdictAccepted
+		if accepted {
+			if c.onAccept != nil {
+				c.onAccept(challengeID)
+			}
+			if c.converge != nil {
+				c.converge("flag 已通过平台判题：" + flag)
+			}
+		}
+		detail := fmt.Sprintf("该 flag 此前已由平台判为 %s（task %d），本次未重复请求平台", prior.Verdict, prior.TaskID)
+		if !inserted {
+			// 并发：另一条请求刚为同一任务记过同一个 flag，结论一致，不必再写。
+			detail += "；并发提交已由另一条请求记录本任务"
+		} else {
+			detail += "；已按同一结论记录本任务"
+		}
+		return &agent.CTFSubmitResult{Verdict: prior.Verdict, Detail: detail, Raw: prior.Raw}, nil
 	}
 
 	// ② 问平台
@@ -146,7 +182,6 @@ func (c *ctfSubmitter) SubmitFlag(ctx context.Context, challengeID, flag string)
 	}
 
 	// ③ 落库（主键仲裁并发：抢输的那一方按 duplicate 处理）
-	taskID, _ := strconv.ParseInt(c.taskID, 10, 64)
 	inserted, err := c.pg.InsertCTFSubmission(&db.CTFSubmission{
 		TaskID: taskID, FlagSHA: sha, ChallengeID: challengeID, Flag: flag, Verdict: verdict, Raw: raw,
 	})
