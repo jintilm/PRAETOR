@@ -33,7 +33,10 @@ type errSchedulerNotImplemented struct {
 }
 
 func (e errSchedulerNotImplemented) Error() string {
-	return fmt.Sprintf("领域 %q 的调度器 %q 尚未实现（P2/P3/P4 分别对应 race/evidence/campaign）；"+
+	// 文案里不再引用阶段编号（P2/P3/P4）：逆向域已移出执行计划，evidence 调度器暂无排期，
+	// 阶段号会随排期变化、写死必然过期。这里只讲「哪个调度器缺」和「不会启动」。
+	return fmt.Sprintf("领域 %q 的调度器 %q 尚未实现"+
+		"（race=CTF 竞速 / evidence=逆向证据链 / campaign=红队战役；逆向域已暂缓，evidence 暂无排期）；"+
 		"为避免行为错误，本任务不会启动", e.pk, e.kind)
 }
 

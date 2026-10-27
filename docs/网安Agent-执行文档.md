@@ -4,7 +4,10 @@
 > 文档与代码不一致时，以「门禁通过」为准，并立即修文档。
 >
 > 项目代号：**PRAETOR**（`praetor`，统帅 → 将领 → 百夫长，对应 Commander → 域 Lead → Specialist 三级）
-> 起点：2026-10-26 · 基座：PRAETOR（fork 自 ARTEX）· 形态：内部自用 · 模型：混合（逆向本地，其余云 API）
+> 起点：2026-10-26 · 基座：PRAETOR（fork 自 ARTEX）· 形态：内部自用 · 模型：云 API（OpenAI 兼容网关，按任务 Profile 覆盖）
+>
+> 范围：**渗透 / 红队 / CTF 三域**。逆向域已移出执行计划（原 P3，2026-10-27 移除），
+> 代码里 `agent/domain/reverse.go` 的声明保留、标注暂缓，不参与调度，也不在默认启用域内。
 
 ---
 
@@ -454,6 +457,7 @@ go test ./... -count=1
 | 2026-10-26 | **P0-7 一任务一容器**：`sandbox/per_task.go` + `BackgroundRunner` + 代理注入 + 任务 ID 透传（`RunInfo.TaskID`）+ reaper；修复 Windows `docker -v` 反斜杠路径 | `sandbox` 18 个用例 + `server` 5 个接线用例全绿 |
 | 2026-10-26 | **P0-6**：`sandbox` 包 + worker Bash 装饰 + `praetor-sandbox` 容器；修复自测发现的 **fail-open bug**（docker exec 非零退出被当成成功，导致容器不存在也判可用） | `sandbox` 7 个用例 + `agent` 沙箱 8 个用例全绿；16 包全绿 |
 | 2026-10-26 | **P0-5**：`server/engine_scheduler.go` — `DomainPackFor` / `SchedulerPlanFor` / `SchedulerPlan`；`Engine.Run` 改为「问领域包要调度拓扑」；启动期 `WarnUnresolvedDomainTools()`；新增 `PRAETOR_DOMAINS` 环境变量（默认 `pentest`） | 6 个新测试全绿（explore 拓扑=1+N、非 explore 明确报错、默认域、env 解析）；全仓 16 包全 ok |
+| 2026-10-27 | **移除逆向域执行计划（原 P3）**：范围收敛为 **渗透 / 红队 / CTF 三域**。删掉 P3-1~P3-4 任务表与复刻清单里 3 条逆向来源（`morluto/rea`、GhidraMCP、`open-reverselab`）；`agent/domain/reverse.go` 的声明**保留但标注暂缓**（该 pack 的 `ScheduleEvidence` 本就未实现，从来无法启动任务） | 文档一致性核对：`grep 逆向` 仅剩说明性引用；CTF `solver-rev` 的替代工具面已在 P2-3 注明（沙箱内 rizin/binwalk CLI） |
 
 ---
 
@@ -461,7 +465,10 @@ go test ./... -count=1
 
 状态：`待做` / `进行中` / `已完成` / `阻塞`
 
-### P0 骨架（目标：四域可插拔，渗透行为零变化）
+### P0 骨架（目标：领域可插拔，渗透行为零变化）
+
+> 当时按四域设计，`agent/domain` 里 4 个 pack 都注册着；**逆向域现已暂缓**（2026-10-27），
+> 实际在推进的是渗透 / 红队 / CTF 三域。pack 骨架本身不变。
 
 | ID | 任务 | 做法 / 复刻来源 | 验收 | 状态 |
 | --- | --- | --- | --- | --- |
@@ -504,17 +511,12 @@ go test ./... -count=1
 | --- | --- | --- | --- | --- |
 | P2-1 | `raceScheduler`：同题多解并行、首解收敛、失败换模型 | **复刻 `verialabs/ctf-agent` 的 coordinator + solver swarm 结构**（MIT，可复制） | 单题可在 2 个 solver 并行下收敛 | 待做 |
 | P2-2 | CTFd 答题 + flag 仲裁（去重，避免重复提交） | 同上（其 CTFd token 接入方式） | 重复 flag 只提交一次 | 待做 |
-| P2-3 | CTF 沙箱工具链（pwntools/pwndbg/angr/z3） | 复刻 `chainreactors/tinyctfer` 的 sandbox 镜像构成（先确认许可） | 能跑通 1 道 pwn | 待做 |
+| P2-3 | CTF 沙箱工具链（pwntools/pwndbg/angr/z3，逆向题另需 rizin/binwalk） | 复刻 `chainreactors/tinyctfer` 的 sandbox 镜像构成（先确认许可） | 能跑通 1 道 pwn，且 1 道 rev 可反汇编定位校验点 | 待做 |
 | P2-4 | Cybench 40 题 + NYU CTF Bench 子集出分 | 接入 benchmark | 分数记录到本文件 | 待做 |
 
-### P3 逆向
-
-| ID | 任务 | 做法 / 复刻来源 | 验收 | 状态 |
-| --- | --- | --- | --- | --- |
-| P3-1 | 接 REA MCP（本地，LocalOnly） | 直接接入 `morluto/rea`（MIT） | `decompile/xrefs/strings` 可用 | 待做 |
-| P3-2 | 接 headless Ghidra MCP | `clearbluejar/pyghidra-mcp` 或 `bethington/ghidra-mcp`（Apache-2.0） | 无 GUI 环境可批量分析 | 待做 |
-| P3-3 | 证据链 schema + 可续跑 | **复刻 open-reverselab 的「输入信号→证据链」模型**（GPL-3，只读思路） | 结论缺 xref/trace 时 Verifier 拒绝判 Done | 待做 |
-| P3-4 | 样本治理：加密存储 + 哈希索引 + 禁止整包进 LLM | 自研（合规要求） | 请求日志里无完整样本 | 待做 |
+> **逆向题的工具面变化（2026-10-27）**：P3 移出后，CTF 的 `solver-rev` 不再依赖 Ghidra/REA 的 MCP，
+> 改为用沙箱内 CLI（`rizin`/`radare2`、`binwalk`、`gdb`）做事 —— 与 P2-3 的镜像一起准备。
+> 若将来恢复逆向域，`solver-rev` 再复用它的统一工具面（`ctf.go` 里那条 `rea` MCP 声明按注释保留着，恢复时一并启用）。
 
 ### P4 红队
 
@@ -535,17 +537,18 @@ go test ./... -count=1
 | `vxcontrol/pentagi` | MIT | 沙箱内跑工具的做法、summarizer 压缩策略、pgvector 长期记忆 | 可复制代码 |
 | `norma`（已在依赖里） | 同源 SDK | `subagent` / `coordinator` / `filterTools` / `skill` | 直接用 |
 | `verialabs/ctf-agent` | MIT | coordinator + solver swarm、CTFd 接入 | 可复制代码 |
-| `morluto/rea` | MIT | 逆向 MCP 工具面 | 直接接入 |
-| `LaurieWired/GhidraMCP` / `bethington/ghidra-mcp` | Apache-2.0 | Ghidra 能力暴露 | 直接接入 |
 | `apache/caldera` / `redcanaryco/atomic-red-team` | Apache-2.0 / MIT | 战役编排、TTP 原子 | 直接接入 |
 | `Armur-Ai/Pentest-Swarm-AI` | AGPL-3.0 | 信息素黑板、JEV 打分、**非 LLM oracle 复核** | **只读思路** |
 | `KeygraphHQ/shannon` | AGPL-3.0 | 源码 × 运行时对撞推路径 | **只读思路** |
-| `LING71671/open-reverselab` | GPL-3.0 | 证据链工作流模型 | **只读思路** |
 | `ASCIT31/Dark-Moon` | GPL-3.0 | 50 specialist 角色清单 | **只读思路** |
 | `elder-plinius/T3MP3ST` | AGPL-3.0 | 「把已有 agent CLI 当执行单元」 | **只读思路** |
 | `chainreactors/tinyctfer` | 未标注 | intent 运行时 + 元工具 | **先确认许可，暂只读** |
 | `m-sec-org/BreachWeave` | 未标注 | Manager/Observer/Solver 三角色 | **先确认许可，暂只读** |
 | `orange-Cyberdefense/GOAD` | — | AD 靶场 | 作为环境使用 |
+
+> 逆向相关来源（`morluto/rea`、`LaurieWired/GhidraMCP` / `bethington/ghidra-mcp`、`LING71671/open-reverselab`）
+> 随 P3 逆向计划一并移出（2026-10-27）。恢复逆向域时再按 R1 补回；
+> **不要**在 CTF 域里顺手引入它们的代码 —— CTF 的逆向题走沙箱内 CLI 工具（见 P2-3）。
 
 新增复刻来源时，必须在本表补一行（含许可），否则视为违反 R1/R4。
 

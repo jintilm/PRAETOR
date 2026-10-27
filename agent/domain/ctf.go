@@ -94,7 +94,9 @@ func (ctfPack) MCP() []MCPRef {
 	return []MCPRef{
 		// 判题/计分走 CTFd API，Verifier 依赖它做仲裁。
 		{Name: "ctfd", Transport: "http", URL: "http://127.0.0.1:8000"},
-		// 逆向题复用统一逆向工具面（见 reverse 域），避免两套实现。
+		// 逆向题的 MCP 面：原计划复用逆向域（reverse）的统一工具面，但该域已暂缓（2026-10-27 移出执行计划）。
+		// 现在 solver-rev 走沙箱内 CLI（rizin/binwalk/gdb，见执行文档 P2-3），这里的声明先保留，
+		// 等逆向域恢复时再启用 —— 别让 CTF 变成第二套逆向实现的起点。
 		{Name: "rea", Transport: "stdio", Command: "rea-mcp", Allowed: []string{"decompile", "disasm", "strings", "xrefs"}},
 	}
 }

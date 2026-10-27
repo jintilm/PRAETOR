@@ -2,6 +2,20 @@ package domain
 
 import "time"
 
+// ⚠️ 状态：**暂缓（2026-10-27 移出执行计划）**。
+//
+// 项目范围已收敛为「渗透 / 红队 / CTF」三域，逆向域不再排期（原 P3 阶段整体移除）。
+// 声明保留的理由：pack 结构（角色/工具/证据链/MCP）本身是可复用的设计资产，
+// 删掉后恢复成本高；保留它也不会影响运行 —— 原因有两条：
+//  1. `Scheduler()` 返回 ScheduleEvidence，而该调度器尚未实现，
+//     `SchedulerPlanFor` 会直接返回 errSchedulerNotImplemented，**任务不会启动**（不静默回落 explore）；
+//  2. 默认启用域只有 pentest（`PRAETOR_DOMAINS` 未设时），逆向域的 MCP/工具告警不会被触发。
+//
+// 恢复时要做的事：实现 evidence 调度器 → 把本域加进启用列表 → 在 docs 执行文档补回 P3 任务条目
+// 与 §4 复刻清单（rea / GhidraMCP / open-reverselab 三行），并让 CTF 的 solver-rev 复用本域工具面。
+//
+// 以下为原始设计说明（保留）：
+//
 // 逆向域：不追求「一次对话给出结论」，而要求【可复核的证据链 + 可中断续跑】。
 //
 // 三条硬约束（来自样本治理要求）：
