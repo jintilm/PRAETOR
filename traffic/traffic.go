@@ -93,6 +93,10 @@ const (
 	// blobPreview is how much of a spilled body stays inline so readers can tell
 	// what it is (JSON shape, SQL dump header, ZIP magic) without fetching it.
 	blobPreview = 8 * 1024
+	// maxBatchGet 是 traffic_get 单次批量取回的上限。不是怕慢，是怕一次塞进上下文太多，
+	// 把之后每一轮都拖贵（工具输出会留在上下文里反复重发）。
+	maxBatchGet = 8
+
 	// maxIndexBody caps a single body's contribution to the full-text index. Text
 	// is indexed in full below this; binary never reaches the index at all.
 	maxIndexBody = 4 * 1024 * 1024
@@ -131,7 +135,7 @@ const (
 // TrafficSearchDescription is persisted into the tool catalog for new and
 // upgraded installations. Keep it in the traffic package so the runtime tool
 // and the catalog migration cannot drift apart.
-const TrafficSearchDescription = "查询记录代理已抓取的目标流量（必须指定 host；支持裸主机、主机:端口或完整 URL，可再按 URL 子串或正文关键词过滤）。指定端口时只返回该服务的流量，避免同一 IP 的不同端口串包。body_contains 会在已抓取的请求/响应头与正文中做全文搜索，支持任意子串和中文（至少 3 个字符）。仅返回极轻量索引(id/method/url/status/resp_len)，不含响应内容；结果非空后必须用 traffic_get 逐条核实请求/响应，再把确实支持当前漏洞的 ID 交给 bind_finding_traffic。默认只返回 3 条、每页最多 10 条；结果多时用 page 翻页。"
+const TrafficSearchDescription = "查询记录代理已抓取的目标流量（必须指定 host；支持裸主机、主机:端口或完整 URL，可再按 URL 子串或正文关键词过滤）。指定端口时只返回该服务的流量，避免同一 IP 的不同端口串包。body_contains 会在已抓取的请求/响应头与正文中做全文搜索，支持任意子串和中文（至少 3 个字符）。仅返回极轻量索引(id/method/url/status/resp_len)，不含响应内容；默认 20 条、每页最多 50 条，需要更多用 page 翻页。**核对候选流量时优先用 traffic_get 的 ids 批量取**（别一条一次地调），再把确实支持当前漏洞的 ID 交给 bind_finding_traffic。"
 
 // Traffic runs the recording proxy and owns the file tree + index.
 type Traffic struct {
@@ -1892,14 +1896,18 @@ func (t *Traffic) legacyBlobRefs(refs map[string]struct{}) error {
 }
 
 // query returns one page of exchange metadata filtered by host and/or a url
-// substring. Default page size is intentionally small (3) to keep tool results
-// lightweight and capped at 10; page is 0-based (page*limit offset).
+// substring. page is 0-based (page*limit offset).
+//
+// 默认与上限的调整依据（实测 2026-10-27）：索引行极轻（大约 100 字节/行，
+// 只含 id/method/url/status/resp_len），而原默认 3 条 / 上限 10 条会逼出
+// 「分页翻好几轮」的调用模式——每次调用都要重发整个上下文，翻页比多回几行贵得多。
+// 现在默认 20 条、上限 50 条：一次就能看清一个 host 的流量全貌。
 func (t *Traffic) query(host, contains, bodyContains string, page, limit int) ([]ExchangeMeta, error) {
 	if limit <= 0 {
-		limit = 3
+		limit = 20
 	}
-	if limit > 10 {
-		limit = 10
+	if limit > 50 {
+		limit = 50
 	}
 	if page < 0 {
 		page = 0
@@ -2056,22 +2064,55 @@ func (t *Traffic) Tools() []actool.CoreTool {
 
 	get := actool.Build(actool.Spec{
 		Name:        "traffic_get",
-		Description: "按 id 取一条已抓流量的请求/响应原文（过大会截断）。配合 traffic_search 用，避免重复 curl。",
+		Description: "按 id 取已抓流量的请求/响应原文（过大会截断）。配合 traffic_search 用，避免重复 curl。\n**支持一次传多个 id（ids: [\"a\",\"b\",…]）批量取**——核对同一条漏洞链的多条候选流量时优先用批量，别一条一次地调（每次调用都要重发整个上下文，逐条取是纯浪费）。单次最多 8 条。",
 		Schema: map[string]any{
-			"type":       "object",
-			"properties": map[string]any{"id": map[string]any{"type": "string", "description": "traffic_search 返回的 id"}},
-			"required":   []any{"id"},
+			"type": "object",
+			"properties": map[string]any{
+				"id":  map[string]any{"type": "string", "description": "[单条] traffic_search 返回的 id"},
+				"ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "【优先用这个】要一次取回的多个 id（≤8）。返回按数组顺序拼接，每条都带 id 分隔，便于直接比对。"},
+			},
 		},
 		ReadOnly:    ro,
 		Permissions: allow,
 		Run: func(_ context.Context, in json.RawMessage, _ *actool.ToolContext) (actool.Result, error) {
-			var a struct{ ID string }
-			_ = json.Unmarshal(in, &a)
-			req, resp, err := t.Get(a.ID)
-			if err != nil {
-				return actool.Errorf(err.Error()), nil
+			var a struct {
+				ID  string   `json:"id"`
+				IDs []string `json:"ids"`
 			}
-			return actool.Text("=== REQUEST ===\n" + clip(req, 2500) + "\n\n=== RESPONSE ===\n" + clip(resp, 4000)), nil
+			_ = json.Unmarshal(in, &a)
+			want := a.IDs
+			if len(want) == 0 && strings.TrimSpace(a.ID) != "" {
+				want = []string{a.ID}
+			}
+			if len(want) == 0 {
+				return actool.Errorf("需要 id 或 ids（至少一个）"), nil
+			}
+			// 上限不是怕慢，是怕一次塞进上下文太多把后面的轮次都拖贵。
+			if len(want) > maxBatchGet {
+				want = want[:maxBatchGet]
+			}
+			var b strings.Builder
+			var failed []string
+			for i, id := range want {
+				req, resp, err := t.Get(strings.TrimSpace(id))
+				if err != nil {
+					// 单条失败不中断整批：模型拿到其余结果仍可继续，失败的 id 在尾部汇总。
+					failed = append(failed, fmt.Sprintf("%s: %v", id, err))
+					continue
+				}
+				if i > 0 {
+					b.WriteString("\n\n")
+				}
+				fmt.Fprintf(&b, "### traffic %s\n=== REQUEST ===\n%s\n\n=== RESPONSE ===\n%s",
+					id, clip(req, 2500), clip(resp, 4000))
+			}
+			if b.Len() == 0 {
+				return actool.Errorf("全部 id 都取不到：" + strings.Join(failed, "; ")), nil
+			}
+			if len(failed) > 0 {
+				b.WriteString("\n\n[取不到的 id] " + strings.Join(failed, "; "))
+			}
+			return actool.Text(b.String()), nil
 		},
 	})
 

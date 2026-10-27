@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Autumn-27/praetor/config"
@@ -108,15 +109,42 @@ const (
 	defaultWindowK = 200  // unset → assume a 200K window (Claude default)
 	minWindowK     = 32   // floor so effectiveWindow stays comfortably positive
 	maxWindowK     = 1000 // cap at 1M tokens (user request)
+
+	// defaultCompactBudgetK 是「未显式配置时」压缩窗口采用的**用途预算**（不是模型容量）。
+	//
+	// 为什么不直接用模型容量（200K）：压缩阈值是按容量算的
+	// (window − min(MaxOutput,20K) − buffer)，200K 容量 ⇒ auto 阈值 167K。
+	// 而实测渗透任务的上下文峰值只有 33~46K、单题通常 30~70 次调用就结束，
+	// **压缩永远不会触发**，于是每轮都全额重发整个上下文（实测单题最高 2.57M 输入）。
+	//
+	// 取 80K 的依据（算出来的，不是拍的）：
+	//   micro 阈值 = 80K·0.6 = 48K —— MicroCompact 只是把**陈旧的工具输出清空**
+	//   （非破坏性、正文仍在磁盘，模型可重读），48K 就介入正好压在实测峰值附近；
+	//   auto 阈值 = 80K − 20K 预留 − 13K buffer = 47K —— 有损摘要的门槛与实测峰值
+	//   持平/略高，绝大多数简单题不会被摘要（不丢信息），只有真的跑长的任务才触发。
+	// 想更激进省 token 就把 PRAETOR_LLM_COMPACT_WINDOW_K 调小。
+	defaultCompactBudgetK = 80
 )
 
-// CompactionWindow returns the model context window in TOKENS for compaction
-// thresholds, resolved from the user-configured size (ContextWindowK). 0/unset →
-// a 200K default; otherwise clamped to [32K, 1M] so compaction stays effective.
+// CompactionWindow returns the token budget used to size compaction thresholds.
+//
+// 语义澄清（重要）：这个值**只是压缩的记账预算**，不是模型容量，也不会随请求发出。
+// 取小一点并不影响能力 —— 模型照样按自己的真实窗口处理请求；变小的只是
+// 「什么时候开始清陈旧工具输出 / 摘要」，即**成本控制**。
+//
+// 解析顺序：
+//  1. 用户显式配置（ContextWindowK）—— 配置了就完全尊重，不做任何默认覆盖；
+//  2. 环境变量 PRAETOR_LLM_COMPACT_WINDOW_K；
+//  3. 都没有 → defaultCompactBudgetK（用途预算，见其注释）。
+//
+// 1、2 仍按 [minWindowK, maxWindowK] 夹逼，避免阈值算出非正数或永不触发。
 func (c Config) CompactionWindow() int {
 	k := c.ContextWindowK
 	if k <= 0 {
-		k = defaultWindowK
+		k = compactWindowKFromEnv()
+	}
+	if k <= 0 {
+		k = defaultCompactBudgetK
 	}
 	if k < minWindowK {
 		k = minWindowK
@@ -127,12 +155,31 @@ func (c Config) CompactionWindow() int {
 	return k * 1000
 }
 
+// compactWindowKFromEnv 读压缩窗口预算的显式覆盖（K tokens，0/非法 = 未设置）。
+//
+// 用 localOnly 读取：这是**本项目自有的调优项**，不该跟着共享前缀在别处被赋值的
+// 键走（同一份二进制多实例部署时，一个实例设了不该影响另一个）。
+func compactWindowKFromEnv() int {
+	v := config.Env("LLM_COMPACT_WINDOW_K")
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // compactionConfig builds the agent-core compaction config for a context window
 // in tokens. agentcore.NewSession wires the summarizer (same provider) when this
 // is set on Options.Compaction.
+//
+// 兜底必须与 CompactionWindow 同口径：两处若一个用 200K、一个用 80K，
+// 传 0 的调用点就会退回「永不触发压缩」的老行为。
 func compactionConfig(windowTokens int) *compaction.Config {
 	if windowTokens <= 0 {
-		windowTokens = defaultWindowK * 1000
+		windowTokens = defaultCompactBudgetK * 1000
 	}
 	return &compaction.Config{ContextWindow: windowTokens}
 }

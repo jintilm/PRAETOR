@@ -576,9 +576,14 @@ func isThinkingOnlyTurn(messages []llm.Message) bool {
 }
 
 func (h steerHooks) PreToolUse(ctx context.Context, name string, input []byte) (bool, string, []byte) {
-	if msg, ok := h.drain(); ok {
-		return true, "【规划者实时纠偏】" + msg +
-			"\n（这是规划者对本意图的即时指令；本次工具调用未执行，请据此调整下一步。若与你当前打算冲突，以此为准。）", nil
+	// drain 必须判空：它是可选注入项（测试/无纠偏通道时可为 nil），
+	// 直接调用会让**每一次工具调用**都 panic。生产路径一直有值所以从没暴露，
+	// 但这属于「少写一个 nil 判断就全盘崩」的隐患，代价极不对称。
+	if h.drain != nil {
+		if msg, ok := h.drain(); ok {
+			return true, "【规划者实时纠偏】" + msg +
+				"\n（这是规划者对本意图的即时指令；本次工具调用未执行，请据此调整下一步。若与你当前打算冲突，以此为准。）", nil
+		}
 	}
 	if h.inner != nil {
 		return h.inner.PreToolUse(ctx, name, input)

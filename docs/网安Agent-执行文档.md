@@ -120,6 +120,52 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 
 **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
 
+### 1.12 三项修补（通用性说明）
+
+上一节列的三个未解决问题**不是靶场专属**，每一项对真实作业都有直接价值，
+所以修补都做在通用路径上，而不是给 benchmark 打补丁。
+
+**① 压缩窗口：从「模型容量」改为「用途预算」**
+
+改在 `agent/provider.go` 的 `CompactionWindow()`，**四个 agent 共用**
+（chat / mainagent / planner / worker 全部经它，见 server.go 的 `win := cfg.CompactionWindow()`），
+所以生产对话与任务执行同样受益，不只是基准跑。
+
+| | 旧 | 新 |
+| --- | --- | --- |
+| 默认预算 | 200K（模型容量假设） | **80K**（用途预算） |
+| micro 阈值（清陈旧工具输出，非破坏） | 108K | **36K** |
+| auto 阈值（有损摘要） | 167K | **47K** |
+| 实际效果 | 峰值 33~46K ⇒ **从不触发**，每轮全额重发 | micro 在 36K 介入，把陈旧工具输出清掉（正文仍在磁盘可重读） |
+| 覆盖方式 | — | `PRAETOR_LLM_COMPACT_WINDOW_K`（本项目专用，不污染共享前缀） |
+
+语义澄清（已写进代码注释）：这个值**只是压缩的记账预算，不是模型容量，也不随请求发出**。
+调小不影响模型能力，只是让「什么时候开始清陈旧输出」提前——纯成本控制。
+
+**② 取证边界：从提示词升级为 guard 硬拦截（生产合规项）**
+
+`agent/constraints.go` 的 `evidenceRedline`（提示词）+ `guard/guard.go` 的
+`evidenceBoundaryReason`（执行前拦截）。后者挂在每个任务已有的 `Guard` 上
+（`t.Guard.Hooks()` 已经包在 worker 的 hooks 里），**拦截 + 审计留痕**。
+
+> 为什么必须做成硬约束：这类行为在真实授权作业里本身就是**越界取证**——
+> 合规报告里若出现「从靶场宿主机 .env / 镜像层读到口令」，客户现场不可接受；
+> 它同时会把预算烧在找答案而非打漏洞上。提示词只能「劝」，且 DB 拦截规则是
+> **用户可编辑可删除**的（设计如此），不能承载系统级不变量。
+
+拦截面（只匹配命令串，不做语义判断，避免误伤）：
+`docker exec/inspect/history/cp/save/export`、`docker [compose] run/build/up/start/create`、
+`cat/Get-Content` 指向 `.env` / `/flag` / `flag.txt`。
+**明确放行**：`docker ps/logs`、一切指向目标地址的 curl/扫描/nmap/sqlmap、工作区内的代码检索。
+
+**③ 调用次数：`traffic_get` 批量取 + `traffic_search` 放宽默认条数**
+
+- `traffic_get` 新增 `ids: []`（一次最多 8 条），返回按序拼接、单条失败不中断整批。
+- `traffic_search` 默认 3 → **20 条**、上限 10 → **50 条**（索引行约 100 字节/行，
+  翻页比多回几行贵得多：每次调用都要重发整个上下文）。
+- 依据：实测 XBEN-006 有 **13 次 traffic_get + 8 次 traffic_search**，
+  而每次返回仅几百字符 —— **贵在次数不在体积**。
+
 ### 1.11 基线首跑：名义 50%、**可信 40%**，以及三个必须记住的结论
 
 `-levels 1 -limit 10`（spread 取样）**两轮对比**：
