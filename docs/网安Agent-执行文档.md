@@ -124,6 +124,17 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 
 **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
 
+### 1.15 新增探索图节点种类的清单（踩过两次）
+
+`exploration_nodes` 有两道 CHECK 约束，光在 Go 里加常量不够，必须同步 schema：
+
+1. `ck_node_kind`：种类白名单（`begin/goal/intent/fact/finding/hint/digest/evidence`）；
+2. `ck_node_state`：**按 kind 分别**限制 state（如 `evidence` 只允许 `confirmed|inferred`）。
+
+老库靠 `DO $$ ... pg_get_constraintdef(oid) NOT LIKE '%<新值>%' ... $$` 重建约束（见 schema.sql 里
+digest / paused / inferred 三次迁移的写法）。忘了同步的表现是：**单测全绿，真库写入报
+`violates check constraint`**——这就是为什么 P3-4 一定要有真库集成测试。
+
 ### 1.14 依赖边界：norma 内联（构建期零外部仓库）
 
 **为什么动这个**：`go.mod` 里挂着 `github.com/Autumn-27/norma`（agent 运行时，上游作者），
@@ -542,6 +553,7 @@ go test ./... -count=1
 | 2026-10-27 | **组件面板端到端跑通 + 修真机构建暴露的 3 个 bug**：①Dockerfile 续行（单命令组件生成 `;` 开头新行）②extras 层缺 `apt-get update`（基镜像删了包索引）③kali 官方源被镜像 403（改默认阿里云 + 重试）④`errorLines()` 按特征挑错误行而不是只回传尾部 | 基础镜像 553MB → 应用 gdb → custom-eb685c80 658MB；探测 `gdb ok=true 18.1`；重复应用 0.57s 走 skipped；新增 `validateDockerfile` 语法校验用例 |
 | 2026-10-27 | **module 路径改为本人仓库**：`github.com/Autumn-27/praetor` → **`github.com/jintilm/praetor`**（158 个 Go 文件 import + go.mod）；`selfupdate.Repo` 由 `Autumn-27/praetor` 改为 `jintilm/PRAETOR`——这是**真 bug**：自动更新此前会去查上游作者的仓库，永远拿不到自己的发布；README 的 clone/Releases 链接同步 | `go build ./...` OK；`go vet` 干净；`internal/components`/`agent/domain`/`internal/binfmt` 用例全绿；`grep Autumn-27` 仅剩 SDK `norma` 与 ScopeSentry 关联（第三方，正确保留） |
 | 2026-10-27 | **norma 内联（构建期零外部仓库依赖）**：`internal/norma/` 101 文件 19,659 行，import 前缀改本项目路径，`go.mod` 移除 `github.com/Autumn-27/norma`；Apache-2.0 许可与来源写入 `NOTICE.md`；未拷贝上游测试/cmd/examples。ScopeSentry 保持为可选集成（无 LICENSE，仅调 API） | `GOPROXY=off go build` 成功（43MB）；`go version -m` 不含外部 norma；`go test ./...` 21 包全绿 |
+| 2026-10-27 | **P3-4 `re_evidence` 落地（证据链闭环）**：新增 `db.KindEvidence` 节点种类 + `WriteCounts.Evidence`；工具调 `domain.Reverse.Verifier()` 判定（**规则只有一份**，不在工具里重写）；claim/ref 硬校验；文件 ref 哈希内容、非文件哈希引用串并标注 `sha256_source`；判定不通过**也落库**（state=inferred，返回 chain_ok=false + 补证 hint），既不丢上下文也不让推测冒充成果；**schema 同步**：`ck_node_kind` 白名单加 `evidence`、`ck_node_state` 加 `(kind='evidence' AND state IN ('confirmed','inferred'))`，并对老库加了重建约束的迁移块；注册进 `WorkerTools`（worker 工具面 +1，约 250 tokens/轮） | agent 新增 6 用例（输入校验/哈希来源/无任务上下文降级/worker 接线/**真库落库**）；真库测试当场抓到两个问题：①`ck_node_kind` 约束白名单没含 evidence（写入被 CHECK 拒）；②payload 字段名与返回值不一致（`hashed_from` vs `sha256_source`）——都是单测覆盖不到、只有真库才暴露的；golden 有意变更且仅 `re_evidence	worker` 一行（按纪律 `-update-seed-golden` 并核对 diff）；真库 `go test -p 1 ./...` **21 包全绿**（0 失败） |
 
 ---
 
@@ -556,7 +568,7 @@ go test ./... -count=1
 | P0 骨架 | 领域包 / 测试门禁 / 装配层 / 调度接缝 / 沙箱（常驻 + 一任务一容器） | ✅ 6/6 |
 | P1 渗透对齐 | hexstrike 配置层 / 确定性验证闭环（`verify_finding` + 落库）/ XBOW 基线 runner | ✅ 3/3（基线可信 **40%**，见 `docs/基线-XBOW-L1-可信版.md`） |
 | P2 CTF | **已完整设计（2 工具 + 延迟竞速 + 提交去重 + 分层镜像）**，实现未开始 | 设计完成，P2-1~P2-6 待做 |
-| P3 逆向 | 3 工具 + 配方 + 零 MCP；**`re_triage` 已落地（纯 Go，零依赖）** | 实现进行中 1/5 |
+| P3 逆向 | 3 工具 + 配方 + 零 MCP；`re_triage`（纯 Go 解析）+ `re_evidence`（证据链）已落地 | 实现进行中 2/5 |
 | P4 红队 | campaign 调度器 / Caldera / Sliver / GOAD | 未开始 0/4 |
 
 > 下一步只有两个正当入口：**P3-1**（evidence 调度闸门，逆向域的总开关）或 **P2-1**（race 调度器，CTF 的总开关）。
@@ -792,7 +804,7 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 | P3-1 | `evidenceScheduler`：串行推进 + checkpoint 续跑 + **预算闸门** | 自研（设计见上） | 中途 kill 后能续跑、不重复已完成阶段；轮数/token 到顶时强制「收束并写未确认」而不是硬撑 | 待做 |
 | P3-2 | `re_triage`：纯 Go 解析 PE/ELF/Mach-O（头/段表/熵/导入/字符串摘要/加壳依据） | 自研（`internal/binfmt`），字段划分参考 `lief-project/LIEF`（Apache-2.0，只读思路） | ✅ 用真实 23.6MB PE 验证：8 段/51 导入/熵/可疑 API 全部解析；摘要 **795 字节**（≤1.4KB）、JSON 落盘、零外部依赖 | ✅ 已完成 |
 | P3-3 | `re_recipe` 骨架 + 静态配方（`disasm`/`xrefs`/`decompile`/`strings`/`capability`/`packer`） | 外部进程调用 rizin / Ghidra headless / FLOSS / capa / DIE（**不复制、不链接代码**） | 装了该 CLI 时可用；未装时明确报「缺 X」而非空结果 | 待做 |
-| P3-4 | `re_evidence` + 证据链闭环（`reverseVerifier` 已就绪） | 自研 | 无 xref 无 trace 一律不判 Done（已有单测守着） | 待做 |
+| P3-4 | `re_evidence` + 证据链闭环：`db.KindEvidence` 节点 + 调 `domain.Reverse.Verifier()` 判定 + `WriteCounts.Evidence` | 自研（规则只有一份：直接复用领域判定器，不在工具里重写） | ✅ 工具注册在 worker；claim/ref 必填硬校验；ref 是文件则哈希**内容**、否则哈希引用串并标注来源；判定不通过也落库但 state=inferred 且返回 `chain_ok=false`+hint | ✅ 已完成（含真库集成测试） |
 | P3-5 | 动态/移动配方（`trace`/`mobile`）+ 样本治理（加密存储、哈希索引、禁止整包进 LLM） | 自研（合规要求） | 请求日志里无完整样本；`trace` 只回调用序列 | 待做 |
 
 **域级验收口径**：一道中等难度 rev 题 —— **input ≤ 300K tokens、调用 ≤ 40 次、结论有 xref 或 trace 支撑**。

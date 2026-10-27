@@ -181,7 +181,7 @@ CREATE TABLE IF NOT EXISTS exploration_nodes (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at   TIMESTAMPTZ,
-    CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest')),
+    CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest','evidence')),
     CONSTRAINT ck_node_state CHECK (
         (kind='begin'   AND state IN ('open')) OR
         (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped','deleted')) OR
@@ -189,7 +189,9 @@ CREATE TABLE IF NOT EXISTS exploration_nodes (
         (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
         (kind='finding' AND state IN ('confirmed','dismissed')) OR
         (kind='hint'    AND state IN ('active','consumed')) OR
-        (kind='digest'  AND state IN ('active','superseded'))
+        (kind='digest'  AND state IN ('active','superseded')) OR
+        -- 逆向域证据节点：通过领域判定器为 confirmed；否则 inferred（允许留痕但不算成果）
+        (kind='evidence' AND state IN ('confirmed','inferred'))
     )
 );
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS blocked_reason TEXT;
@@ -207,11 +209,12 @@ BEGIN
         SELECT 1 FROM pg_constraint
         WHERE conrelid='exploration_nodes'::regclass
           AND conname='ck_node_kind'
-          AND pg_get_constraintdef(oid) NOT LIKE '%digest%'
+          AND (pg_get_constraintdef(oid) NOT LIKE '%digest%'
+               OR pg_get_constraintdef(oid) NOT LIKE '%evidence%')
     ) THEN
         ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_kind;
         ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_kind
-            CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest'));
+            CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest','evidence'));
     END IF;
 END $$;
 -- ck_node_state: recreate when it lacks the 'paused' (older), 'superseded' (digest rev),
@@ -224,7 +227,8 @@ BEGIN
           AND conname='ck_node_state'
           AND (pg_get_constraintdef(oid) NOT LIKE '%paused%'
                OR pg_get_constraintdef(oid) NOT LIKE '%superseded%'
-               OR pg_get_constraintdef(oid) NOT LIKE '%deleted%')
+               OR pg_get_constraintdef(oid) NOT LIKE '%deleted%'
+               OR pg_get_constraintdef(oid) NOT LIKE '%inferred%')
     ) THEN
         ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_state;
         ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_state CHECK (
@@ -234,7 +238,8 @@ BEGIN
             (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
             (kind='finding' AND state IN ('confirmed','dismissed')) OR
             (kind='hint'    AND state IN ('active','consumed')) OR
-            (kind='digest'  AND state IN ('active','superseded'))
+            (kind='digest'  AND state IN ('active','superseded')) OR
+            (kind='evidence' AND state IN ('confirmed','inferred'))
         );
     END IF;
 END $$;

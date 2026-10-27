@@ -657,6 +657,10 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		t.searchAllWorkerTraces(), t.getWorkerTrace(),
 		// node_detail：worker 拿到 intent_id/节点 id 后可查该节点完整详情（配合上面的回看）。
 		t.nodeDetail(),
+		// re_evidence：逆向域唯一结论出口（证据节点 + 领域判定器）。
+		// 只在 worker 上注册：它是执行者，也是唯一产出"可复核结论"的角色。
+		// 代价是 worker 工具面 +1（约 250 tokens/轮），换来证据链闭环 —— 这是 P3-4 的核心。
+		t.reEvidence(),
 		// 以下工具仍【不给】worker，只留给 planner/main（读上下文、跨 work 复盘是规划职责，
 		// worker 只做单条意图的执行与写回）：list_facts / list_companies / list_worker_traces。
 	}

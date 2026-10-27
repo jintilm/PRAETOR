@@ -145,15 +145,16 @@ type WriteCounts struct {
 	Facts    int
 	Assets   int
 	Findings int
+	Evidence int // 逆向域证据节点（re_evidence）
 }
 
 // Total is every node persisted this run, regardless of kind — the
 // "explored but persisted nothing" signal (Total == 0).
-func (w WriteCounts) Total() int { return w.Facts + w.Assets + w.Findings }
+func (w WriteCounts) Total() int { return w.Facts + w.Assets + w.Findings + w.Evidence }
 
 // String renders the per-kind breakdown for logs, e.g. "事实1 资产25 漏洞0".
 func (w WriteCounts) String() string {
-	return fmt.Sprintf("事实%d 资产%d 漏洞%d", w.Facts, w.Assets, w.Findings)
+	return fmt.Sprintf("事实%d 资产%d 漏洞%d 证据%d", w.Facts, w.Assets, w.Findings, w.Evidence)
 }
 
 // Writes reports what this run wrote back, split by node kind (so the engine can

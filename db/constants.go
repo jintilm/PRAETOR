@@ -8,7 +8,11 @@ const (
 	KindFact    = "fact"    // a worker's exploration result/conclusion (incl. negative results), tied to its intent
 	KindFinding = "finding" // a confirmed vulnerability (report_finding), distinct from a fact
 	KindHint    = "hint"
-	KindDigest  = "digest" // a compressed fold of cold intents/facts (cold-digest-spec §1); lossless — members kept, restorable by id
+	// KindEvidence 是逆向域的**证据节点**：一条结论 + 它挂的交叉引用/动态 trace。
+	// 与 fact 的区别：fact 是"探索中看到的结论"，evidence 是"为某条结论提交的、必须可复核的依据"，
+	// 由 reverseVerifier 判定是否成立（无 xref 无 trace 一律不算数）。
+	KindEvidence = "evidence"
+	KindDigest   = "digest" // a compressed fold of cold intents/facts (cold-digest-spec §1); lossless — members kept, restorable by id
 )
 
 // Digest node states (kind='digest'). A digest is 'active' while it renders in
