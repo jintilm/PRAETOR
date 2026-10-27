@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -158,6 +159,12 @@ func copyTreeSkipping(src, dst string, skip func(string) bool) error {
 		}
 		target := filepath.Join(dst, rel)
 		if d.IsDir() {
+			// 点开头的目录不进视图：`.git`（题库 clone 后常带）与 `.praetor-target`
+			// （ctftarget 生成的靶机产物）都不是题目附件，发给模型只会让它以为
+			// "题目里有个 Dockerfile 可看"，而真正要它看的是 files/ 下的东西。
+			if p != src && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
 			return os.MkdirAll(target, 0o755)
 		}
 		if skip(d.Name()) {

@@ -122,6 +122,11 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string, routing San
 	}
 
 	agent.SandboxExec = runner
+	// 网络配错时容器起不来，而报错发生在每条 Bash 上——启动期说一次比重复几十遍便宜。
+	// 这里只警告不降级：不跑靶机的任务不受影响，不该被别人的配置失误牵连。
+	if err := sandbox.CheckNetwork(ctx, config.Env("SANDBOX_NETWORK")); err != nil {
+		log.Printf("[sandbox] 警告：%v", err)
+	}
 	// 只有走到这里才是真的"Bash 跑在任务容器里"，附件才需要（也才可能）挂到 /chal。
 	if isolation == sandbox.IsolationPerTask {
 		sandboxPerTaskActive.Store(true)
