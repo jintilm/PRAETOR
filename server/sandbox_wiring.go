@@ -23,7 +23,17 @@ import (
 // shared  ：改造前的「常驻容器 + docker exec」，任务间共享文件系统。
 //
 // 探测失败不阻断服务启动——否则 Docker 没起时连 UI 都进不去；真正的拒绝发生在每次工具调用。
-func WireSandbox(ctx context.Context, dataDir string) {
+// WireSandboxWithImage 与 WireSandbox 相同，但允许用 settings 里记录的镜像（组件面板构建的 tag）。
+//
+// 为什么镜像来自 settings 而不是只有环境变量：面板构建出的镜像是 `praetor/sandbox:custom-<hash>`，
+// 让用户改环境变量再重启既反直觉也容易忘。环境变量仍作为回落，保持"零配置能用"。
+func WireSandboxWithImage(ctx context.Context, dataDir, image string) {
+	wireSandbox(ctx, dataDir, image)
+}
+
+func WireSandbox(ctx context.Context, dataDir string) { wireSandbox(ctx, dataDir, "") }
+
+func wireSandbox(ctx context.Context, dataDir, imageOverride string) {
 	mode := sandbox.ModeFromEnv()
 	if mode == sandbox.ModeOff {
 		agent.SandboxExec = nil // 不包 Bash，行为与改造前一致
@@ -41,8 +51,12 @@ func WireSandbox(ctx context.Context, dataDir string) {
 	case "shared", "container", "single":
 		runner = sandbox.NewDocker(sandbox.ContainerFromEnv(), "/work")
 	default:
+		image := strings.TrimSpace(imageOverride)
+		if image == "" {
+			image = envOr("SANDBOX_IMAGE", "praetor/sandbox:latest")
+		}
 		pt := sandbox.NewPerTask(sandbox.PerTaskConfig{
-			Image:         envOr("SANDBOX_IMAGE", "praetor/sandbox:latest"),
+			Image:         image,
 			HostWorkRoot:  envOr("SANDBOX_WORK_ROOT", filepath.Join(dataDir, "work")),
 			ContainerRoot: "/work",
 			Network:       config.Env("SANDBOX_NETWORK"),

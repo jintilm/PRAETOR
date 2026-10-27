@@ -23,6 +23,12 @@ import type {
   CommandRecord,
   Company,
   CompanyScopeMutation,
+  ComponentItem,
+  ComponentJob,
+  ComponentProbe,
+  ComponentsResp,
+  PersonaAudit,
+  SystemPersonaResp,
   CompanyScopeRule,
   Conversation,
   ConvTokenSummary,
@@ -820,6 +826,14 @@ export const api = {
   clearSystemPersona: (note: string, actor?: string) =>
     del<{ ok: boolean; audit: PersonaAudit }>(`/system-persona`, { note, actor }),
   systemPersonaAudits: () => get<{ audits: PersonaAudit[] }>(`/system-persona/audits`),
+
+  // ---- 可选组件（装进沙箱镜像，不动宿主；命令只来自后端清单）----
+  components: () => get<ComponentsResp>(`/components`),
+  // 应用选择：后端后台构建镜像，进度走 /components/stream（SSE 日志）
+  applyComponents: (ids: string[]) =>
+    post<{ ok: boolean; image: string; skipped?: boolean; message?: string }>(`/components/apply`, { ids }),
+  // 探测当前镜像里每个组件是否已装（一次 docker run 跑全部）
+  probeComponents: () => post<ComponentProbe>(`/components/probe`, {}),
 
   // ---- app settings (runtime toggles) ----
   settings: () => get<Settings>(`/settings`),

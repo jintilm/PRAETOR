@@ -1610,3 +1610,56 @@ export interface InterceptExecution {
   seq: number;
   items: Activity[];
 }
+
+// ---- 系统级人设（身份/授权声明层）----
+export interface PersonaAudit {
+  ts: string;
+  actor: string;
+  action: "save" | "clear";
+  note: string;
+  chars: number;
+  version: number;
+}
+
+export interface SystemPersonaResp {
+  text: string;
+  configured: boolean;
+  max_chars: number;
+  audits: PersonaAudit[] | null;
+}
+
+// ---- 可选组件（装进沙箱镜像，不动宿主）----
+export interface ComponentItem {
+  id: string;
+  group: string;
+  title: string;
+  why: string;
+  license: string;
+  size_mb: number;
+  needs?: string[];
+  selected: boolean;
+}
+
+export interface ComponentJob {
+  running: boolean;
+  ids: string[] | null;
+  image: string;
+  error: string;
+  lines: string[] | null;
+  started_at: string;
+  finished_at: string;
+}
+
+export interface ComponentsResp {
+  items: ComponentItem[];
+  selected: string[] | null;
+  image: string;
+  base_image: string;
+  job: ComponentJob;
+}
+
+export interface ComponentProbe {
+  image: string;
+  probed: number;
+  results: Record<string, { ok: boolean; detail?: string }>;
+}

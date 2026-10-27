@@ -124,6 +124,30 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 
 **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
 
+### 1.13 可选组件面板（P3-1 前置：把「装什么」交给用户，但只装进镜像）
+
+R6 说外部工具是可选加速器 —— 但「可选」不等于「让用户自己去翻文档敲 apt」。
+系统设置页新增**可选组件**卡片：勾选 → 应用 → 后台构建镜像 → 日志实时回显 → 一键回滚。
+
+| 维度 | 决定 | 理由 |
+| --- | --- | --- |
+| 装到哪 | **只装沙箱镜像**（`FROM praetor/sandbox:latest` + 每个组件一层 `RUN`） | 宿主安装要提权（sudo/UAC）、卸载留残渣、三平台三套逻辑；镜像层可切回 `:latest` 回滚，且与「一任务一容器」隔离模型一致 |
+| 谁定义清单 | `internal/components/catalog.go`（**唯一数据源**） | Dockerfile 与探测脚本都由它生成；手写两份必然漂移，而漂移的表现是「面板说装了、容器里没有」 |
+| 镜像 tag | `praetor/sandbox:custom-<hash8>`（hash = 排序后 ID 集合） | 同一组选择永远同 tag（构建缓存命中），换一组就是另一个 tag（旧镜像还在 = 可回滚） |
+| 构建并发 | **同时只允许一个**（409） | 并发构建既可能打满磁盘，也让「当前用哪个镜像」变含糊 |
+| 状态判断 | `POST /api/components/probe`：**一次 `docker run` 跑完全部探测** | 每项起一个容器要十几秒；探测必须用 `"$@"` 直呼 argv，**不能接管道**——管道会把「命令不存在」掩盖成成功，面板就会撒谎 |
+| 进度回显 | SSE `/api/components/stream`（轮询 job 日志，400ms） | 构建是串行单例，轮询够用；channel 广播要处理订阅/丢事件，收益不成比例 |
+
+**安全边界（硬性）**：接口只接受清单内的 ID（`components.Validate` 拒绝未知值），
+服务端**不执行任何用户提供的命令**——命令只来自代码里的清单。这条有测试守着
+（`TestApplyRejectsUnknownComponent`）；否则这个按钮等于给 Web 面板开了个远程命令执行入口。
+
+**失败必须说真话**：构建失败时把日志尾部原样回传（`tailLines`），并区分三类原因——
+基础镜像缺失（409 + 可复制的构建命令）、构建失败（含 docker 输出尾行）、保存选择失败（镜像已建但不切换）。
+
+**当前环境实测**：四个接口行为正确（清单 14 项 / 未知 ID→400 / 基础镜像缺失→409 带可执行命令 / 探测无镜像→409）；
+**沙箱基础镜像 `praetor/sandbox:latest` 在本机尚未构建**，所以「应用」目前会明确报缺基础镜像，而不是静默失败。
+
 ### 1.12 三项修补（通用性说明）
 
 上一节列的三个未解决问题**不是靶场专属**，每一项对真实作业都有直接价值，
@@ -461,6 +485,7 @@ go test ./... -count=1
 | 2026-10-27 | **逆向域重新设计（配方化，零 MCP）**：不接 REA / GhidraMCP 全家桶。工具面收敛为 3 个（`re_triage` 纯 Go 全貌 / `re_recipe` 配方枚举 / `re_evidence` 唯一结论出口），外部能力以**配方表**（9 条，≤10 硬约束）挂 rizin / Ghidra headless / capa / FLOSS / DIE / jadx 等 CLI；角色 5→2、MaxTurns 190→50、并发 2→1。顺带查实 `Budget` 的 `MaxTokens`/`MaxToolCalls`/`MaxParallel` **没有任何执行层消费**（初版「6M tokens / 3000 次」从未生效），成本控制改由 P3-1 的调度闸门承担 | 新增设计契约测试 6 个（工具面=设计集、零 MCP、角色≤2、角色不得声明域外工具、预算串行有界、配方必须写许可且≤10）；`agent/domain` 19 用例全绿；`ctf.go` 的 `rea` MCP 声明同步删除 |
 | 2026-10-27 | **P2 CTF 完整设计**：工具面 2 个（`ctf_challenge`/`ctf_submit`）+ 零 MCP；竞速改为**延迟竞速（默认单路，停滞才起第二路）**，`MaxParallel` 8→2、MaxTurns 合计 285→195；首解收敛用已有 steer hook（不硬 cancel ctx、不引入 subagent）；提交侧建 `ctf_submissions`（PK=flag sha256）做去重 + ctfd/offline 双判分模式；镜像工具链改为 `CTFToolchain()` 分层表（基础层 ≤12，angr/sage/volatility3 按需）；并清掉 5 个 solver 上 **13 个不存在的工具 key**（`curl_run`/`burp_repeater`/`pwntools_run`/`gdb_run`/`checksec`/`ghidra_decompile`/`rizin_analyze`/`sagemath_run`/`ciphey_decode`/`tshark_run`/`binwalk_run`/`zsteg_run`/`volatility_run`） | 新增设计契约测试 6 个（工具面=设计集/零 MCP/角色≤6 且 MaxTurns≤200/角色必须有 Bash/不得发明工具名/预算并发≤2/工具链分层与许可）；`agent/domain` 27 用例全绿 |
 | 2026-10-27 | **P3-2 `re_triage` 落地 + R6 铁律**：新增 `internal/binfmt`（纯 Go 解析 PE/ELF/Mach-O：头/段表/熵/导入表/导出数/安全缓解/加壳依据/字符串分类）+ `agent/re_tools.go` 的 `re_triage` 工具（摘要 ≤1.4KB、完整 JSON 落盘、不执行样本、畸形输入只降级不 panic）；`toolcatalog` 新增 `domainOwnedTools()` —— 领域专属工具**可解析但不播种给平台 agent**；文档 §0 新增 **R6 自包含优先（不依赖第三方 GitHub 项目）** | binfmt 8 个用例（含拿测试二进制自身当样本、畸形 PE 不 panic、熵边界、字符串提取与版本号误判、渲染预算）；agent 4 个用例（真实 PE 全链路/坏入参/未接入清单/领域工具不污染平台种子）；平台 golden 未变 |
+| 2026-10-27 | **可选组件面板（沙箱镜像层）**：`internal/components`（14 项清单 + Dockerfile/探测脚本生成器，单一数据源）+ `server/components.go`（清单/应用/探测/SSE 四个接口，构建串行单例、日志环形缓冲 400 行、失败回传尾部）+ 设置页「可选组件」卡片（分组勾选/体积估算/已装徽章/构建日志实时滚动）；镜像 tag 由选择集 hash 决定，切回 `:latest` 即回滚；`WireSandboxWithImage` 让 settings 里的镜像优先生效 | components 7 用例 + server 5 用例；真机接口验证：清单 14 项、未知 ID→400、基础镜像缺失→409（带可执行构建命令）、无镜像探测→409 |
 
 ---
 
