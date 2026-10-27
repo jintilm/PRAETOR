@@ -6,8 +6,8 @@
 > 项目代号：**PRAETOR**（`praetor`，统帅 → 将领 → 百夫长，对应 Commander → 域 Lead → Specialist 三级）
 > 起点：2026-10-26 · 基座：PRAETOR（fork 自 ARTEX）· 形态：内部自用 · 模型：云 API（OpenAI 兼容网关，按任务 Profile 覆盖）
 >
-> 范围：**渗透 / 红队 / CTF 三域**。逆向域已移出执行计划（原 P3，2026-10-27 移除），
-> 代码里 `agent/domain/reverse.go` 的声明保留、标注暂缓，不参与调度，也不在默认启用域内。
+> 范围：**渗透 / 红队 / CTF / 逆向四域**。逆向域**不接 REA 系全家桶**，按「3 工具 + 配方 + 零 MCP」
+> 重新设计（2026-10-27，见 §3 P3）；样本类任务仍强制本地模型。
 
 ---
 
@@ -457,7 +457,7 @@ go test ./... -count=1
 | 2026-10-26 | **P0-7 一任务一容器**：`sandbox/per_task.go` + `BackgroundRunner` + 代理注入 + 任务 ID 透传（`RunInfo.TaskID`）+ reaper；修复 Windows `docker -v` 反斜杠路径 | `sandbox` 18 个用例 + `server` 5 个接线用例全绿 |
 | 2026-10-26 | **P0-6**：`sandbox` 包 + worker Bash 装饰 + `praetor-sandbox` 容器；修复自测发现的 **fail-open bug**（docker exec 非零退出被当成成功，导致容器不存在也判可用） | `sandbox` 7 个用例 + `agent` 沙箱 8 个用例全绿；16 包全绿 |
 | 2026-10-26 | **P0-5**：`server/engine_scheduler.go` — `DomainPackFor` / `SchedulerPlanFor` / `SchedulerPlan`；`Engine.Run` 改为「问领域包要调度拓扑」；启动期 `WarnUnresolvedDomainTools()`；新增 `PRAETOR_DOMAINS` 环境变量（默认 `pentest`） | 6 个新测试全绿（explore 拓扑=1+N、非 explore 明确报错、默认域、env 解析）；全仓 16 包全 ok |
-| 2026-10-27 | **移除逆向域执行计划（原 P3）**：范围收敛为 **渗透 / 红队 / CTF 三域**。删掉 P3-1~P3-4 任务表与复刻清单里 3 条逆向来源（`morluto/rea`、GhidraMCP、`open-reverselab`）；`agent/domain/reverse.go` 的声明**保留但标注暂缓**（该 pack 的 `ScheduleEvidence` 本就未实现，从来无法启动任务） | 文档一致性核对：`grep 逆向` 仅剩说明性引用；CTF `solver-rev` 的替代工具面已在 P2-3 注明（沙箱内 rizin/binwalk CLI） |
+| 2026-10-27 | **逆向域重新设计（配方化，零 MCP）**：不接 REA / GhidraMCP 全家桶。工具面收敛为 3 个（`re_triage` 纯 Go 全貌 / `re_recipe` 配方枚举 / `re_evidence` 唯一结论出口），外部能力以**配方表**（9 条，≤10 硬约束）挂 rizin / Ghidra headless / capa / FLOSS / DIE / jadx 等 CLI；角色 5→2、MaxTurns 190→50、并发 2→1。顺带查实 `Budget` 的 `MaxTokens`/`MaxToolCalls`/`MaxParallel` **没有任何执行层消费**（初版「6M tokens / 3000 次」从未生效），成本控制改由 P3-1 的调度闸门承担 | 新增设计契约测试 6 个（工具面=设计集、零 MCP、角色≤2、角色不得声明域外工具、预算串行有界、配方必须写许可且≤10）；`agent/domain` 19 用例全绿；`ctf.go` 的 `rea` MCP 声明同步删除 |
 
 ---
 
@@ -467,8 +467,7 @@ go test ./... -count=1
 
 ### P0 骨架（目标：领域可插拔，渗透行为零变化）
 
-> 当时按四域设计，`agent/domain` 里 4 个 pack 都注册着；**逆向域现已暂缓**（2026-10-27），
-> 实际在推进的是渗透 / 红队 / CTF 三域。pack 骨架本身不变。
+> 四域 pack 均已注册；逆向域 2026-10-27 重新设计实现方式（不再接 MCP 全家桶），pack 骨架不变。
 
 | ID | 任务 | 做法 / 复刻来源 | 验收 | 状态 |
 | --- | --- | --- | --- | --- |
@@ -514,9 +513,80 @@ go test ./... -count=1
 | P2-3 | CTF 沙箱工具链（pwntools/pwndbg/angr/z3，逆向题另需 rizin/binwalk） | 复刻 `chainreactors/tinyctfer` 的 sandbox 镜像构成（先确认许可） | 能跑通 1 道 pwn，且 1 道 rev 可反汇编定位校验点 | 待做 |
 | P2-4 | Cybench 40 题 + NYU CTF Bench 子集出分 | 接入 benchmark | 分数记录到本文件 | 待做 |
 
-> **逆向题的工具面变化（2026-10-27）**：P3 移出后，CTF 的 `solver-rev` 不再依赖 Ghidra/REA 的 MCP，
-> 改为用沙箱内 CLI（`rizin`/`radare2`、`binwalk`、`gdb`）做事 —— 与 P2-3 的镜像一起准备。
-> 若将来恢复逆向域，`solver-rev` 再复用它的统一工具面（`ctf.go` 里那条 `rea` MCP 声明按注释保留着，恢复时一并启用）。
+> **逆向题的工具面（2026-10-27 随 P3 重新设计同步）**：CTF 的 `solver-rev` **不挂任何逆向 MCP**。
+> 解题用沙箱内 CLI（`rizin`/`radare2`、`binwalk`、`gdb`，与 P2-3 的镜像一起准备），
+> 或直接复用逆向域的配方（`disasm`/`xrefs`/`decompile`）。`ctf.go` 里原来那条 `rea` MCP 声明已删除。
+
+### P3 逆向（2026-10-27 重新设计：配方化，零 MCP）
+
+**为什么推倒重来**（三条都是本项目实测，不是推测）：
+
+1. **固定成本每轮重发**：现网实测每轮 ~10.7K tokens（32 个工具 schema + 8 段提示词），工具越多这笔钱越贵。
+2. **贵在调用次数，不在单次体积**：实测一道渗透题 13 次 `traffic_get`（每次仅几百字符）≈ 630K tokens ——
+   因为每次调用都要重发整个上下文。工具多 = 选择多 = 试错多 = 次数多。
+3. **MCP 全家桶的规模是量级问题**：`bethington/ghidra-mcp` 自称 **200+ 个工具**；`morluto/rea` 是
+   多家族 monorepo（二进制 + 应用包 + 浏览器运行时 + android/apktool + cutter + artifact 对比）。
+   即使每个工具描述只值 60 tokens，200 个就是 12K tokens/轮 —— **固定成本直接翻倍**，
+   而且 200 条「可能路径」会让模型反复浅尝，而不是把一条证据链走完。
+
+**设计原则：能力活在工具面之外。**
+
+> 模型永远只看到 3 个工具；底下挂多少 CLI、来自哪个项目，模型不需要知道，也就不会为「该用哪个」付试错成本。
+> **接一个新能力 = 加一行配方**，schema 不变、模型选择空间不变、每轮固定成本不变。
+
+**工具面（3 个，零 MCP）**
+
+| 工具 | 作用 | 输出上限 |
+| --- | --- | --- |
+| `re_triage(target)` | 纯 Go 解析 PE/ELF/Mach-O：格式/架构/位数/编译器/加壳迹象/入口/段熵/高风险导入/字符串摘要 | 摘要 ≤1.5KB，全文落盘 `re/<sha256>/triage.json` |
+| `re_recipe(recipe, target, page)` | 按配方名执行已固化的 CLI 管道 | 单次 ≤2KB（`decompile` ≤4KB），超出落盘 |
+| `re_evidence(claim, ref, xref_count, trace_ref)` | **唯一结论出口**，交给 `reverseVerifier` 判 | — |
+
+**配方表（9 条；≤10 是硬约束，超了先问「哪条能合并」）**
+
+| 配方 | 上游 | 许可 | 依赖 | 返回 |
+| --- | --- | --- | --- | --- |
+| `triage` | 自研（纯 Go） | — | **无** | 全貌摘要 + 落盘 |
+| `disasm` | `rizinorg/rizin` | LGPL-3.0 | `rizin` | 函数/地址区间反汇编，分页 ≤60 条 |
+| `xrefs` | `rizinorg/rizin` | LGPL-3.0 | `rizin` | 交叉引用（谁调用/谁读取），分页 |
+| `decompile` | `NationalSecurityAgency/ghidra` | Apache-2.0 | `analyzeHeadless` | 单函数伪代码 ≤4KB（headless 脚本，**不接 MCP**） |
+| `strings` | `mandiant/flare-floss` | Apache-2.0 | `floss` | 还原混淆串，去重分类 ≤2KB，全量落盘 |
+| `capability` | `mandiant/capa` | Apache-2.0 | `capa` | 命中的能力与地址 ≤2KB |
+| `packer` | `horsicq/Detect-It-Easy` | MIT | `diec` | 编译器/加壳判定与依据（配合段熵） |
+| `trace` | `gdb` | GPL-3.0 | `gdb` | 指定函数的动态调用序列（只输出序列，不输出全文） |
+| `mobile` | `iBotPeaches/Apktool` + `skylot/jadx` | Apache-2.0 | `apktool`、`jadx` | APK 清单关键项 + 类名清单（分页），不返回反编译全文 |
+
+> 选择标准只有一条：**单命令、可 JSON 化、确定性输出**。需要长交互会话、需要 GUI、或自带几百个工具的一律不进表。
+> 缺依赖时**明确报「缺 X」**，不静默降级（与沙箱 `required` 同一条纪律）。
+
+**角色 5 → 2**：`re-lead`（定路线 + 证据链，20 turns）、`re-analyst`（执行单条意图，30 turns）。
+砍掉的 `malware-analyst` / `mobile-analyst` 是**场景差异不是能力差异**（同一个分析者换目标而已），
+而每个角色都是一份常驻 system prompt；静态/动态合并是因为串行证据链本来就交替，拆开会多一次交接。
+
+**成本账**
+
+| 指标 | 初版设计（REA/GhidraMCP 路线） | 新设计 |
+| --- | --- | --- |
+| 进 schema 的工具数 | 全家桶 + 3 个 MCP | **3** |
+| 每轮固定成本增量 | +12K tokens 量级 | **+约 400 tokens** |
+| 角色数 / 常驻提示词份数 | 5 | **2** |
+| MaxTurns 合计 | 190（30+60+50+50+50） | **50** |
+| 并发 | 2 | **1（串行）** |
+| 缺依赖时 | 静默少工具，模型自己找路 | 配方明确报「缺 X」 |
+
+> **诚实说明**：`Budget` 里的 `MaxTokens` / `MaxToolCalls` / `MaxParallel` **目前没有任何执行层消费**
+> （全仓只有 `MaxDepth` 透传给了 subagent），所以初版的「6M tokens / 3000 次工具调用」从来没生效过。
+> 真正的成本控制落在 P3-1 的调度器闸门；现在这些数字改成贴近现实的目标值。
+
+| ID | 任务 | 做法 / 复刻来源 | 验收 | 状态 |
+| --- | --- | --- | --- | --- |
+| P3-1 | `evidenceScheduler`：串行推进 + checkpoint 续跑 + **预算闸门** | 自研（设计见上） | 中途 kill 后能续跑、不重复已完成阶段；轮数/token 到顶时强制「收束并写未确认」而不是硬撑 | 待做 |
+| P3-2 | `re_triage`：纯 Go 解析 PE/ELF/Mach-O（头/段表/熵/导入/字符串摘要） | 自研；字段划分参考 `lief-project/LIEF`（Apache-2.0，只读思路） | 三类样本各 1 个：输出 ≤1.5KB、JSON 落盘、**零外部依赖** | 待做 |
+| P3-3 | `re_recipe` 骨架 + 静态配方（`disasm`/`xrefs`/`decompile`/`strings`/`capability`/`packer`） | 外部进程调用 rizin / Ghidra headless / FLOSS / capa / DIE（**不复制、不链接代码**） | 装了该 CLI 时可用；未装时明确报「缺 X」而非空结果 | 待做 |
+| P3-4 | `re_evidence` + 证据链闭环（`reverseVerifier` 已就绪） | 自研 | 无 xref 无 trace 一律不判 Done（已有单测守着） | 待做 |
+| P3-5 | 动态/移动配方（`trace`/`mobile`）+ 样本治理（加密存储、哈希索引、禁止整包进 LLM） | 自研（合规要求） | 请求日志里无完整样本；`trace` 只回调用序列 | 待做 |
+
+**域级验收口径**：一道中等难度 rev 题 —— **input ≤ 300K tokens、调用 ≤ 40 次、结论有 xref 或 trace 支撑**。
 
 ### P4 红队
 
@@ -537,6 +607,17 @@ go test ./... -count=1
 | `vxcontrol/pentagi` | MIT | 沙箱内跑工具的做法、summarizer 压缩策略、pgvector 长期记忆 | 可复制代码 |
 | `norma`（已在依赖里） | 同源 SDK | `subagent` / `coordinator` / `filterTools` / `skill` | 直接用 |
 | `verialabs/ctf-agent` | MIT | coordinator + solver swarm、CTFd 接入 | 可复制代码 |
+| `rizinorg/rizin` | **LGPL-3.0** | 反汇编 / 交叉引用 CLI（`disasm`、`xrefs` 配方） | 外部进程调用，不链接代码 |
+| `NationalSecurityAgency/ghidra` | Apache-2.0 | headless 反编译脚本（`decompile` 配方，**不接 MCP**） | 外部进程调用 |
+| `mandiant/capa` | Apache-2.0 | 能力识别（`capability` 配方） | 外部进程调用 |
+| `mandiant/flare-floss` | Apache-2.0 | 混淆字符串还原（`strings` 配方） | 外部进程调用 |
+| `horsicq/Detect-It-Easy` | MIT | 编译器/加壳判定（`packer` 配方） | 外部进程调用 |
+| `skylot/jadx` + `iBotPeaches/Apktool` | Apache-2.0 | APK 解包与类清单（`mobile` 配方） | 外部进程调用 |
+| `lief-project/LIEF` | Apache-2.0 | 可执行格式的字段划分（`re_triage` 纯 Go 自研，只参考字段口径） | **只读思路** |
+| `hasherezade/pe-sieve` | BSD-2-Clause | 进程注入 / hollowing dump（候选配方，未进默认表） | 外部进程调用 |
+| `Angr/angr` | BSD-2-Clause | 符号执行（候选，重，默认不开） | 外部进程调用 |
+| `qilingframework/qiling` | GPL-2.0 | 模拟执行 | **只读思路** |
+| `morluto/rea`、`bethington/ghidra-mcp`（200+ 工具）、`LaurieWired/GhidraMCP`、`cyberkaida/ReVa`、`clearbluejar/pyghidra-mcp`、`mrexodia/ida-pro-mcp` | Apache-2.0 / MIT | **反面参照：MCP 工具面过大，明确不接**（理由见 P3 设计） | 不采用 |
 | `apache/caldera` / `redcanaryco/atomic-red-team` | Apache-2.0 / MIT | 战役编排、TTP 原子 | 直接接入 |
 | `Armur-Ai/Pentest-Swarm-AI` | AGPL-3.0 | 信息素黑板、JEV 打分、**非 LLM oracle 复核** | **只读思路** |
 | `KeygraphHQ/shannon` | AGPL-3.0 | 源码 × 运行时对撞推路径 | **只读思路** |
@@ -546,9 +627,8 @@ go test ./... -count=1
 | `m-sec-org/BreachWeave` | 未标注 | Manager/Observer/Solver 三角色 | **先确认许可，暂只读** |
 | `orange-Cyberdefense/GOAD` | — | AD 靶场 | 作为环境使用 |
 
-> 逆向相关来源（`morluto/rea`、`LaurieWired/GhidraMCP` / `bethington/ghidra-mcp`、`LING71671/open-reverselab`）
-> 随 P3 逆向计划一并移出（2026-10-27）。恢复逆向域时再按 R1 补回；
-> **不要**在 CTF 域里顺手引入它们的代码 —— CTF 的逆向题走沙箱内 CLI 工具（见 P2-3）。
+> 逆向能力**只取 CLI，不取 MCP 工具面**：装了就用的走「外部进程调用」，纯 Go 自研的只参考字段口径。
+> 恢复/新增能力时的判断标准见 P3 配方表上方那句话 —— 单命令、可 JSON 化、确定性输出才进表。
 
 新增复刻来源时，必须在本表补一行（含许可），否则视为违反 R1/R4。
 
