@@ -58,8 +58,15 @@ type ToolSet struct {
 	ctfBoard        CTFBoardProvider   // nil = 未配置题目看板（ctf_board 会明确报不可用）
 	as              *db.AssetStore     // asset store (optional; nil = asset tools not available)
 	cs              *db.CompanyStore   // company store (optional)
-	ts              *db.ExplorationStore
-	worker          string
+	// campaignGate 是红队战役的"这一步能不能下发"闸门（nil = 非战役域）。
+	// 由 server 注入（server/campaign_gate.go）：判定逻辑在 internal/campaign，
+	// 这里只负责"在意图落地之前问一句"。
+	campaignGate func(phase string) error
+	// cleanupGuard 在"任务要判完成"时问一句"战役清理做完了吗"（nil = 非战役域）。
+	// 返回 (是否欠清理, 涉及的阶段)。两个收尾出口（prove_goal 全达成、goal_met）都要过它。
+	cleanupGuard func() (bool, []string)
+	ts           *db.ExplorationStore
+	worker       string
 	// domain 是任务所属领域（pentest/reverse/ctf/...）。用于**按领域裁剪工具面**：
 	// 逆向/CTF 专属工具不该出现在渗透任务的提示词里（每个工具每轮都要付 schema）。
 	domain string
@@ -1039,6 +1046,9 @@ type intentItem struct {
 	AssetIDs  []json.RawMessage `json:"asset_ids"`
 	ParentIDs []json.RawMessage `json:"parent_ids"`
 	Priority  int               `json:"priority"`
+	// Phase 只对红队战役有意义：ATT&CK 阶段名。战役调度器靠它判断"这一步该不该下发"，
+	// 并把它写进节点 payload 供下一轮算前置（见 internal/campaign）。
+	Phase string `json:"phase"`
 }
 
 // addOneIntent 创建一条意图节点并连上游血缘，返回 id。
@@ -1084,6 +1094,11 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
+	// 阶段写进 payload：战役调度按它算"哪些前置已完成"，
+	// 不另开一列 —— 阶段是意图的属性，不是图谱的新维度。
+	if ph := strings.TrimSpace(it.Phase); ph != "" {
+		payload["phase"] = ph
+	}
 	id, err := t.ts.AddIntent(payload, priority, anchors, "planner")
 	if err != nil {
 		return 0, err
@@ -1104,6 +1119,29 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	return id, nil
 }
 
+// SetCampaignGate 注入红队战役的阶段闸门（nil = 不在战役域，不校验阶段）。
+func (t *ToolSet) SetCampaignGate(fn func(phase string) error) { t.campaignGate = fn }
+
+// SetCleanupGuard 注入"战役欠不欠清理"的判定（nil = 非战役域）。
+func (t *ToolSet) SetCleanupGuard(fn func() (bool, []string)) { t.cleanupGuard = fn }
+
+// campaignCleanupBlock 在判完成前拦一道：留痕阶段做过而清理没做，不许收尾。
+//
+// 为什么拦在收尾而不是提醒：收尾之后再想补清理，模型已经没有执行机会了 ——
+// 任务状态已 done，worker 不会再被派活，等于把后门留在目标上还写了个"完成"。
+func (t *ToolSet) campaignCleanupBlock() error {
+	if t.cleanupGuard == nil {
+		return nil
+	}
+	need, phases := t.cleanupGuard()
+	if !need {
+		return nil
+	}
+	return fmt.Errorf("战役还欠清理：%s 做过但 cleanup 未完成，本次不收尾。"+
+		"先下发 phase=cleanup 的意图做清理并核验（残留账号/计划任务/上传文件/服务都要覆盖）",
+		strings.Join(phases, "、"))
+}
+
 func (t *ToolSet) addIntent() actool.CoreTool {
 	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
@@ -1113,6 +1151,9 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
 			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
 			"priority":   intp("优先级 0-10，默认5"),
+			"phase": str("红队战役阶段（仅 domain=redteam 必填）：recon/initial-access/execution/persistence/" +
+				"privilege-escalation/lateral-movement/collection/exfiltration/cleanup。" +
+				"前置阶段未完成时本意图会被拒绝 —— 不要跳过前置"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -1130,6 +1171,15 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			errs := map[string]string{}
 			createdAny := false
 			for i, it := range items {
+				// 战役闸门：前置未满足的意图不下发（红队域的硬约束）。
+				// 放在最前面：被拦下的意图不该先通过锚点/资产校验再失败，
+				// 那会让模型以为问题出在锚点上。
+				if t.campaignGate != nil {
+					if err := t.campaignGate(it.Phase); err != nil {
+						errs[strconv.Itoa(i)] = err.Error()
+						continue
+					}
+				}
 				id, err := t.addOneIntent(it)
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
@@ -1209,6 +1259,9 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 					}
 				}
 				if allMet {
+					if err := t.campaignCleanupBlock(); err != nil {
+						return actool.Errorf(err.Error()), nil
+					}
 					t.GoalMet = true
 					t.Reason = fmt.Sprintf("所有 %d 个目标均已 met（最后由 goal %d 触发）", len(goals), goal)
 					return actool.Text(fmt.Sprintf("goal %d marked met；本任务所有目标均已达成，任务自动判定完成", goal)), nil
@@ -1224,6 +1277,9 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct{ Reason string }
 			_ = json.Unmarshal(in, &a)
+			if err := t.campaignCleanupBlock(); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
 			t.GoalMet = true
 			t.Reason = a.Reason
 			return actool.Text("acknowledged: goal marked met"), nil

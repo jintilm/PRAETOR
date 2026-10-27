@@ -89,6 +89,11 @@ func SchedulerPlanFor(p domain.DomainPack, workers int) (SchedulerPlan, error) {
 		// 证据链要求**串行**：一条结论验证完再下一条，并行会重复付"理解样本"的成本
 		// 且让证据顺序变得不可解释。所以这里**刻意忽略传入的 workers**。
 		return SchedulerPlan{Kind: domain.ScheduleEvidence, Planners: 1, Workers: 1, Lanes: 1}, nil
+	case domain.ScheduleCampaign:
+		// 战役：**串行**（1 planner / 1 worker）。红队的约束在顺序上，不在并发上 ——
+		// 前置闸门（server/campaign_gate.go）决定"下一步能不能下发"，并发多开只会
+		// 同时撞同一个前置。所以这里同样刻意忽略传入的 workers。
+		return SchedulerPlan{Kind: domain.ScheduleCampaign, Planners: 1, Workers: 1, Lanes: 1}, nil
 	case domain.ScheduleRace:
 		// 竞速：注册 N 条 worker 例程，但**默认只放行 1 条**（延迟竞速）。
 		// 第 2 条由 engine_race.go 的放行器在停滞/eager 时放开。

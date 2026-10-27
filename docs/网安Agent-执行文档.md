@@ -1317,7 +1317,12 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 
 | ID | 任务 | 做法 / 复刻来源 | 验收 | 状态 |
 | --- | --- | --- | --- | --- |
-| P4-1 | `campaignScheduler`：ATT&CK 阶段 DAG + 前置判定 + cleanup 强制 | **复刻 `m-sec-org/BreachWeave` 的 Manager/Observer/Solver 三角色**（先确认许可） | 前置未满足不下发下一步 | 待做 |
+| P4-1 | `campaignScheduler`：ATT&CK 阶段 DAG + 前置判定 + cleanup 强制 | 自研（`internal/campaign` 纯判定 + `server/campaign_gate.go`）；只读参考 `m-sec-org/BreachWeave` 的职责切分 | ✅ 闸门接在 `add_intent` 创建**之前**：前置未满足的阶段既下发不了、也不落节点，拒绝理由列出缺哪几步；拓扑 1 planner/1 worker（串行）；`PendingCleanup` 在收尾时按「留痕阶段做过但清理没做」拦住结束 | ✅ 已完成 |
+
+**战役为什么不是「三角色并发」**：BreachWeave 的 Manager/Observer/Solver 解决的是"多 Solver 抢同一目标时谁管节奏"，它需要一套常驻的多角色提示词。本项目的红队问题是**顺序**：侦察没出结果就下不去初始访问，持久化做完不清理就不能收尾。所以只取"谁决定下一阶段"这一层，落到阶段 DAG 上；并发沿用既有的 1 planner + 1 worker，不为红队再写一套执行链——多开只会同时撞同一个前置。
+
+闸门放在 `add_intent` 的**创建之前**而不是落库之后：被拒的方向连节点都不留下，图上不会出现"一条永远不该存在的路"。阶段本身存在意图 payload 的 `phase` 里（不新开列），判定时按 `state=done` 折叠成"哪些阶段已完成"——`blocked/exhausted` 不算，那表示这一步没做成。
+
 | P4-2 | Caldera / Atomic Red Team 编排接入 | 直接接入（Apache-2.0 / MIT） | 能下发一条 ability 并回收结果 | 待做 |
 | P4-3 | Sliver / NetExec / BloodHound 接入（独立服务 + MCP） | 直接接入（Sliver GPL 只做外部服务，不复制） | 会话列表可读、路径可查 | 待做 |
 | P4-4 | GOAD 靶场跑通一条端到端战役 | 靶场 `Orange-Cyberdefense/GOAD` | 有证据链 + 有 cleanup 记录 | 待做 |
@@ -1354,7 +1359,7 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 | `ASCIT31/Dark-Moon` | GPL-3.0 | 50 specialist 角色清单 | **只读思路** |
 | `elder-plinius/T3MP3ST` | AGPL-3.0 | 「把已有 agent CLI 当执行单元」 | **只读思路** |
 | `chainreactors/tinyctfer` | 未标注 | intent 运行时 + 元工具 | **先确认许可，暂只读** |
-| `m-sec-org/BreachWeave` | 未标注 | Manager/Observer/Solver 三角色 | **先确认许可，暂只读** |
+| `m-sec-org/BreachWeave` | Apache-2.0（GitHub API `license` 字段；README 无徽章、raw LICENSE 被代理挡住未直读） | Manager/Observer/Solver 职责切分 | **只读思路**：不复制 TS 代码，只取「谁决定下一阶段」这一层 |
 | `orange-Cyberdefense/GOAD` | — | AD 靶场 | 作为环境使用 |
 
 > 逆向能力**只取 CLI，不取 MCP 工具面**：装了就用的走「外部进程调用」，纯 Go 自研的只参考字段口径。

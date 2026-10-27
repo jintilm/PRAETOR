@@ -82,6 +82,11 @@ type Worker struct {
 	// 两者必须成对：只改提示词，模型会用 /chal/... 调 LS/Read，而文件工具跑在宿主进程里，
 	// 于是报 ENOENT（Windows 上还会把 /chal 当相对路径，错信息里混进宿主 data 目录）。
 	sandboxPath func(string) (string, bool)
+	// campaignGate 是红队战役的阶段闸门（nil = 不在战役域）。
+	// 判定在 internal/campaign，server 注入一个"读进度 + 判定"的闭包。
+	campaignGate func(string) error
+	// cleanupGuard 是收尾前的清理判定（nil = 不在战役域）。
+	cleanupGuard func() (bool, []string)
 	// sandboxWriteDeny 回答「沙箱模式下这个路径能不能写」：空串 = 可以，非空 = 拒绝理由。
 	//
 	// 与 sandboxPath 成对：路径能翻过去，不等于能写 —— 容器里 /chal 是 ro，
@@ -156,6 +161,12 @@ func (w *Worker) SetSandboxWorkRoot(dir string) { w.sandboxWorkRoot = strings.Tr
 
 // SetSandboxPath 注入「容器内路径 → 宿主路径」的翻译器（nil = 不在沙箱）。
 func (w *Worker) SetSandboxPath(fn func(string) (string, bool)) { w.sandboxPath = fn }
+
+// SetCampaignGate 注入红队战役的阶段闸门（nil = 不在战役域）。
+func (w *Worker) SetCampaignGate(fn func(string) error) { w.campaignGate = fn }
+
+// SetCleanupGuard 注入"战役欠不欠清理"的判定（nil = 不在战役域）。
+func (w *Worker) SetCleanupGuard(fn func() (bool, []string)) { w.cleanupGuard = fn }
 
 // SetSandboxWriteDeny 注入「这个容器路径能不能写」的判断（nil = 不在沙箱）。
 func (w *Worker) SetSandboxWriteDeny(fn func(string) string) { w.sandboxWriteDeny = fn }
@@ -433,6 +444,8 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetFindingVerifier(w.findingVerifier)
 	tsx.SetTaskID(taskID)
+	tsx.SetCampaignGate(w.campaignGate) // 红队战役：前置未满足的意图不下发（nil = 非战役域）
+	tsx.SetCleanupGuard(w.cleanupGuard) // 红队战役：欠清理不许收尾
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
 	tsx.SetCoverageEnabled(coverageEnabled)
 	if as != nil {

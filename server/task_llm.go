@@ -591,6 +591,10 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 		// 写文件的三件工具跑在宿主进程里，内核不会替我们守这两条，必须在写入口判。
 		wk.SetSandboxWriteDeny(s.sandboxWriteDeny(t))
 	}
+	// 红队战役：只有前置阶段完成的意图才下得去（非红队域返回 nil，不产生任何校验）。
+	wk.SetCampaignGate(s.campaignGate(t))
+	// 同一域的第二道：留痕阶段做过而清理没做，不许用 prove_goal / goal_met 收尾。
+	wk.SetCleanupGuard(s.campaignCleanupGuard(t))
 	// 判题后端同样用惰性句柄：先建任务、后配 expected_flag 是最常见的顺序，
 	// 快照式注入会让后配的 flag 对已在跑的 worker 无效（见 ctf_submit.go 的 liveSubmitter）。
 	if sub := s.liveCTFSubmitter(t); sub != nil {
@@ -617,6 +621,8 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetWebSearch(s.webSearchFor("worker"))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
 	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
+	pl.SetCampaignGate(s.campaignGate(t))
+	pl.SetCleanupGuard(s.campaignCleanupGuard(t))
 	pl.SetFindingRecorder(s.evidenceStore())
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
 	pl.SetNonStreaming(plannerRuntime.nonStreaming)

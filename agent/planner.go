@@ -21,6 +21,9 @@ import (
 // assets, judges whether the task goal is met, and emits 0..N exploration intents
 // into the frontier. It is the sole intent generator.
 type Planner struct {
+	// campaignGate / cleanupGuard 由 server 注入（红队战役的阶段闸门与收尾清理判定）。
+	campaignGate      func(string) error
+	cleanupGuard      func() (bool, []string)
 	findingRecorder   FindingRecorder
 	findingVerifier   FindingVerifier // nil = 未启用确定性验证
 	prov              llm.Provider
@@ -116,6 +119,12 @@ func (p *Planner) todoFor(expID int64) *actool.TodoStore {
 	}
 	return s
 }
+
+// SetCampaignGate 注入红队战役的阶段闸门（nil = 非战役域）。
+func (p *Planner) SetCampaignGate(fn func(string) error) { p.campaignGate = fn }
+
+// SetCleanupGuard 注入"战役欠不欠清理"的判定（nil = 非战役域）。
+func (p *Planner) SetCleanupGuard(fn func() (bool, []string)) { p.cleanupGuard = fn }
 
 // SetKillWork wires the engine's per-work terminate callback so the planner's
 // kill_work tool can stop a single running worker.
@@ -360,6 +369,8 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// runs in a detached goroutine so it never adds latency to this round.
 	p.compactor.OnPlannerRound(ctx, ts)
 	tsx := NewToolSet(ts, "planner")
+	tsx.SetCampaignGate(p.campaignGate)
+	tsx.SetCleanupGuard(p.cleanupGuard)
 	tsx.SetFindingRecorder(p.findingRecorder)
 	tsx.SetFindingVerifier(p.findingVerifier)
 	if as != nil {
