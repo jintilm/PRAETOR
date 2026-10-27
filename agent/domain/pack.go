@@ -196,9 +196,14 @@ type DomainPack interface {
 	Roles() []RoleSpec
 	// Tools 返回该域自有的工具 key（engine 从既有 toolcatalog 解析）。
 	Tools() []string
-	// MCP 返回该域的 MCP server 声明（REA / GhidraMCP / hexstrike …）。
+	// MCP 返回该域的 MCP server 声明（如 hexstrike / ctfd）。
+	//
+	// 注意：**没有任何消费点**（`grep '\.MCP()'` 为空），当前纯声明。
+	// 而且逆向域刻意返回空 —— MCP 的工具面会全量进上下文，几百个工具等于把固定成本翻倍（见 reverse.go 头注）。
 	MCP() []MCPRef
 	// Skills 返回默认加载的 SKILL.md 目录名。
+	//
+	// 同样**没有消费点**：技能不会因为这里写了名字而被加载，写了不存在的名字也不会报错。
 	Skills() []string
 
 	Policy() PolicySpec

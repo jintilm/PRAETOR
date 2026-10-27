@@ -113,6 +113,20 @@
 
 ### 2.5 逆向工程
 
+> **⚠️ 2026-10-27 设计变更：本节结论已作废，保留作调研记录。**
+>
+> 最终**没有接入 REA / GhidraMCP / open-reverselab 中的任何一个 MCP**。原因在表的规模一栏就能看出来：
+> `open-reverselab` 自称 100+ 工具、`bethington/ghidra-mcp` 200+ 工具，而**工具 schema 每一轮都要随上下文重发**
+> （本项目实测固定成本 ~10.7K tokens/轮）。接进来等于固定成本翻倍，还会制造大量「先试试这个」的浅尝路径 ——
+> 而实测最贵的是**调用次数**，不是单次体积。
+>
+> 现在的做法：**只取 CLI 能力做配方**（rizin / Ghidra headless / capa / FLOSS / DIE / jadx+apktool / gdb），
+> 模型侧工具面固定 3 个（`re_triage` / `re_recipe` / `re_evidence`）。
+> 设计与理由见 `网安Agent-执行文档.md` §3「P3 逆向（2026-10-27 重新设计）」。
+>
+> 本表仍然可用的部分：各项目的**许可**（rizin LGPL-3、x64dbg GPL-3、bincat GPL-3 → 只读思路）
+> 与单点能力定位（反编译引擎、调试器、格式解析）。
+
 | 项目 | Star | 语言 | 许可 | 定位 | 用法 |
 | --- | --- | --- | --- | --- | --- |
 | [morluto/rea](https://github.com/morluto/rea) | 385k* | — | MIT | 「一个 MCP 搞定逆向」：二进制 / 应用 / 运行时行为统一分析入口 | ⭐ **逆向工具面首选**：接入成本最低，一个 MCP 顶掉一堆胶水（*Star 异常高，注意甄别热度） |

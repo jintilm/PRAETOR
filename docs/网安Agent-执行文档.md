@@ -465,6 +465,19 @@ go test ./... -count=1
 
 状态：`待做` / `进行中` / `已完成` / `阻塞`
 
+**当前进度快照（2026-10-27）**
+
+| 阶段 | 内容 | 状态 |
+| --- | --- | --- |
+| P0 骨架 | 领域包 / 测试门禁 / 装配层 / 调度接缝 / 沙箱（常驻 + 一任务一容器） | ✅ 6/6 |
+| P1 渗透对齐 | hexstrike 配置层 / 确定性验证闭环（`verify_finding` + 落库）/ XBOW 基线 runner | ✅ 3/3（基线可信 **40%**，见 `docs/基线-XBOW-L1-可信版.md`） |
+| P2 CTF | race 调度器 / CTFd 仲裁 / 沙箱工具链 / Cybench 出分 | 未开始 0/4 |
+| P3 逆向 | **已重新设计（3 工具 + 配方 + 零 MCP）**，实现未开始 | 设计完成，P3-1~P3-5 待做 |
+| P4 红队 | campaign 调度器 / Caldera / Sliver / GOAD | 未开始 0/4 |
+
+> 下一步只有两个正当入口：**P3-1**（evidence 调度闸门，逆向域的总开关）或 **P2-1**（race 调度器，CTF 的总开关）。
+> 两者都是「调度器」，说明现在的瓶颈已经从"能力"转到"第二轮执行模型"——渗透域的 explore 调度器已经在跑（基线 40% 就是它跑出来的）。
+
 ### P0 骨架（目标：领域可插拔，渗透行为零变化）
 
 > 四域 pack 均已注册；逆向域 2026-10-27 重新设计实现方式（不再接 MCP 全家桶），pack 骨架不变。
@@ -483,7 +496,7 @@ go test ./... -count=1
 > 实际落地：**实例由代码提供，清单由 pack 提供，且分两条通道播种**。
 > - `BuiltinToolSeeds()` 保持原样（平台 6 个 agent，`mergeSeeds` 原逻辑抽出复用）→ 存量库与新装库的绑定**逐条不变**，由 `testdata/seeds_platform.golden` 锁定。
 > - `DomainToolSeeds(pack)` 单独展开某域的角色，**只在装配该域时调用**；不让四域的 agent 参与每次启动的全局播种（否则每个装了 PRAETOR 的库都会多出 `ctf-lead`、`solver-pwn` 等用不到的 agent 行）。
-> - `UnresolvedDomainTools(pack)` 供装配期告警：声明了但还解析不出实例的 key（待接入的 MCP 工具）。
+> - `UnresolvedDomainTools(pack)` 供装配期告警：声明了但还解析不出实例的 key（例：逆向域待接入的 `re_triage`/`re_evidence`、红队域的 `sliver_session`、CTF 的 `pwntools_run`）。
 >
 > **踩到的坑（值得记）**：初版 pack 里 `add_finding` / `coverage` / `asset_coverage` / `list_worker_traces` / `bind_finding_traffic` 这些名字是我按 grep 猜的，真实清单里是 `report_finding` / `list_untested_assets` / `get_worker_trace` / `search_all_worker_traces`，其余根本不存在。`UnresolvedDomainTools` 第一次跑就把它们全抓出来了——这正是这个函数存在的理由。
 | P0-5 | engine 按 `Scheduler()` 选调度器；`explore` 复用现有 `plannerLoop`；启动期用 `agent.UnresolvedDomainTools()` 打「声明了但未接入」的工具警告 | 自研 | 现有渗透用例回归通过（行为不变）；启动日志能看到缺失工具清单 | 已完成 |
@@ -502,7 +515,7 @@ go test ./... -count=1
 | --- | --- | --- | --- | --- |
 | P1-1 | hexstrike MCP 接入：`db.SeedMCPServer`（幂等、不覆盖用户改动）+ `server/mcp_presets.go`（配了 `PRAETOR_HEXSTRIKE_DIR` 才注册，否则只打提示）+ 文档配方 | 直接接入 `0x4m4/hexstrike-ai`（外部进程，不复制代码） | 预设记录构造/校验有单测；幂等播种真库验证；**实际工具可用需用户安装 hexstrike 后确认工具列表** | 已完成（配置层） |
 | P1-2 | 确定性验证闭环：`internal/replay` + `agent.VerifyBinding` + `verify_finding` 工具 + `verification_state` 落库（unverified/verified/suspected） | **复刻 Pentest-Swarm 的 oracle 思路**（AGPL，只读思路，自行实现） | 重放一致→verified；不一致/无证据/重放失败→suspected 并写明 reasons；**均有单测** | 已完成 |
-| P1-3 | benchmark runner | 接入 `xbow-engineering/validation-benchmarks`（104 题）+ `auto-pen-bench` | 出基线分并记录到本文件 | 待做 |
+| P1-3 | **已实现**：`bench/xbow`（Discover 读 `benchmark.json` 的 level/tags / 分层取样 spread / `PrepareImages` 预拉 / `ComposeCLI` 起停 / 端口优先 web / flag 判分**含流量来源校验**）+ `cmd/bench`（`-levels -tags -strategy -prepull -dry-run -md -out`）+ 可信基线报告 | 接入 `xbow-engineering/validation-benchmarks`（104 题） | **已出分**：`-levels 1 -limit 10` 名义 50% → 剔除 1 个假阳性后**可信 40%（4/10）**，逐题给出 flag 命中的流量 URL 作为依据 | 已完成（基线已记录） |
 
 ### P2 CTF
 
@@ -513,9 +526,11 @@ go test ./... -count=1
 | P2-3 | CTF 沙箱工具链（pwntools/pwndbg/angr/z3，逆向题另需 rizin/binwalk） | 复刻 `chainreactors/tinyctfer` 的 sandbox 镜像构成（先确认许可） | 能跑通 1 道 pwn，且 1 道 rev 可反汇编定位校验点 | 待做 |
 | P2-4 | Cybench 40 题 + NYU CTF Bench 子集出分 | 接入 benchmark | 分数记录到本文件 | 待做 |
 
-> **逆向题的工具面（2026-10-27 随 P3 重新设计同步）**：CTF 的 `solver-rev` **不挂任何逆向 MCP**。
-> 解题用沙箱内 CLI（`rizin`/`radare2`、`binwalk`、`gdb`，与 P2-3 的镜像一起准备），
-> 或直接复用逆向域的配方（`disasm`/`xrefs`/`decompile`）。`ctf.go` 里原来那条 `rea` MCP 声明已删除。
+> **逆向题的工具面（2026-10-27 随 P3 重新设计同步）**：CTF 的 `solver-rev` **不挂任何逆向 MCP**
+> （`ctf.go` 里原来那条 `rea` MCP 声明已删除）。解题用沙箱内 CLI（`rizin`/`radare2`、`binwalk`、`gdb`，
+> 与 P2-3 的镜像一起准备），逆向域落地后可复用其配方（`disasm`/`xrefs`/`decompile`）。
+> 注意 `solver-rev` 现在仍声明着 `ghidra_decompile` / `rizin_analyze` / `gdb_run` 三个 key ——
+> 它们属于 **P2-3 待接入**，`UnresolvedDomainTools` 会如实报缺；**不要为了消掉告警去接 MCP**。
 
 ### P3 逆向（2026-10-27 重新设计：配方化，零 MCP）
 
@@ -558,6 +573,8 @@ go test ./... -count=1
 
 > 选择标准只有一条：**单命令、可 JSON 化、确定性输出**。需要长交互会话、需要 GUI、或自带几百个工具的一律不进表。
 > 缺依赖时**明确报「缺 X」**，不静默降级（与沙箱 `required` 同一条纪律）。
+> 代码里 `agent/domain/reverse.go` 的 `ReverseRecipes()` 就是这张表；`TestReverseRecipeCatalogIsLean` 守着
+> 「≤10 条」和「有上游必须写许可」两条，改表会被测试拦住。
 
 **角色 5 → 2**：`re-lead`（定路线 + 证据链，20 turns）、`re-analyst`（执行单条意图，30 turns）。
 砍掉的 `malware-analyst` / `mobile-analyst` 是**场景差异不是能力差异**（同一个分析者换目标而已），
@@ -684,3 +701,12 @@ go test ./... -count=1
      `llmrec` 包缺 advisory lock，已补 `TestMain` 与其它包同锁；DB 套件统一 `-p 1` 串行。
    结果：真库 `go test -p 1 ./...` 连跑两次全绿；无库时 18 包全绿（DB 用例按设计 skip）。
 5. 上游 `.gitignore` 原本忽略整个 `/docs/`，导致本文件与选型报告不进版本库。已改为 `/docs/*` + 两份文档白名单例外（`.gitignore` 有注释说明原因）；`docs/漏洞流量证据.md` 仍保持忽略。
+6. **声明了但没人消费的字段（2026-10-27 查实，别当成已生效的护栏）**：
+   - `domain.Budget` 的 `MaxTokens` / `MaxWall` / `MaxToolCalls` / `MaxParallel` —— 全仓只有 `MaxDepth`
+     透传给了 `subagent`，其余四个**没有任何执行层读**。所以初版逆向域的「6M tokens / 3000 次工具调用」
+     从来没生效过。真正的成本闸门在 **P3-1 `evidenceScheduler`**；在那之前，调这些数字只是调注释。
+   - `DomainPack.Skills()` —— **没有任何消费点**（`grep '\.Skills()'` 为空）。所以逆向域声明的
+     `binary-triage`、CTF 声明的技能名都只是文档性质，不会因为技能不存在而报错，也不会被加载。
+   - `DomainPack.MCP()` —— 同样没有消费点（`grep '\.MCP()'` 为空）。这也是为什么 `ctf.go` 里删掉
+     `rea` MCP 声明是零风险的：它本来就只是声明。
+   > 结论：**别用这三个字段的存在感判断功能是否生效**。要判断，就看有没有调用点。
