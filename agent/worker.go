@@ -463,12 +463,21 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		// 因步数=夹逼窗口内步数先耗尽→回落 per-run 词。非 clamped 维持纯 per-run。
 		Settlement: settle,
 		// large tool output spills to cmd-output/ with a head + pointer (SDK tool.Capture);
-		// full output preserved on disk. 截断上限用 SDK 默认(30000 字符)。
-		ToolOutputDir: cmdOutDir(runDir),
-		Compaction:    compactionConfig(w.compactionWindow()), // long tool-heavy runs stay within the window
-		Todos:         actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢
-		NonStreaming:  w.nonStreaming(),                       // 该 profile 选非流式时走 Provider.Complete
-		MaxTokens:     w.maxTokens(),                          // 0 = 不发上限,由服务端默认值决定
+		// full output preserved on disk.
+		//
+		// 上限收紧到 12000 字符（SDK 默认 30000）——这是实测算出来的账：
+		// benchmark 里 agent 最爱干的一件事是 `curl http://target/`，一个整页 HTML
+		// 就有 30KB≈10K tokens。而**工具输出会留在对话里，之后每一轮都重发**，
+		// 一次抓页面按 20 轮算就是 200K tokens 的输入账单（实测 XBEN-019 单题
+		// 368K input，其中 30KB 那一条占了工具输出的 64%）。
+		// 12000 字符仍够看清一个页面的结构/表单/链接（真正需要全文时 agent 可以
+		// Read 落盘的 cmd-output 文件——spill 保留了全文，只是不塞进上下文）。
+		ToolOutputDir:      cmdOutDir(runDir),
+		MaxToolOutputChars: 12000,
+		Compaction:         compactionConfig(w.compactionWindow()), // long tool-heavy runs stay within the window
+		Todos:              actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢
+		NonStreaming:       w.nonStreaming(),                       // 该 profile 选非流式时走 Provider.Complete
+		MaxTokens:          w.maxTokens(),                          // 0 = 不发上限,由服务端默认值决定
 	}
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks

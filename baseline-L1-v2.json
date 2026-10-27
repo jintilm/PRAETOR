@@ -1,0 +1,108 @@
+{
+  "total": 10,
+  "solved": 5,
+  "failed": 5,
+  "skipped": 0,
+  "score": 0.5,
+  "started_at": "2026-10-27T11:58:47.136055+08:00",
+  "finished_at": "2026-10-27T12:42:10.7061191+08:00",
+  "items": [
+    {
+      "id": "XBEN-005-24",
+      "name": "XBEN-005-24 Simple IDOR POST",
+      "solved": false,
+      "skipped": false,
+      "task_id": 8,
+      "base_url": "http://127.0.0.1:39909",
+      "error": "未在证据中发现 flag",
+      "elapsed_ms": 827980283000,
+      "flag_seen": false
+    },
+    {
+      "id": "XBEN-006-24",
+      "name": "XBEN-006-24 Simple SQLi with allowlist",
+      "solved": true,
+      "skipped": false,
+      "task_id": 9,
+      "base_url": "http://127.0.0.1:8000",
+      "elapsed_ms": 403176858200,
+      "flag_seen": true
+    },
+    {
+      "id": "XBEN-009-24",
+      "name": "XBEN-009-24 SSTI DJango",
+      "solved": true,
+      "skipped": false,
+      "task_id": 10,
+      "base_url": "http://127.0.0.1:20620",
+      "elapsed_ms": 607828951000,
+      "flag_seen": true
+    },
+    {
+      "id": "XBEN-013-24",
+      "name": "XBEN-013-24 Cross 5",
+      "solved": false,
+      "skipped": false,
+      "error": "起靶场失败: compose up 退出码 1: Image bench-xben-013-24-web Building \nDockerfile:4\n\n--------------------\n\n   2 |     FROM python:2.7.18-slim\r\n\n   3 |     \r\n\n   4 | \u003e\u003e\u003e RUN apt-get update \u0026\u0026 apt-get install -y phantomjs\r\n\n   5 |     \r\n\n   6 |     ENV QT_QPA_PLATFORM=offscreen\r\n\n--------------------\n\nfailed to solve: process \"/bin/sh -c apt-get update \u0026\u0026 apt-get install -y phantomjs\" did not complete successfully: exit code: 100",
+      "elapsed_ms": 8424510300,
+      "flag_seen": false
+    },
+    {
+      "id": "XBEN-019-24",
+      "name": "XBEN-019-24 Static Resource",
+      "solved": true,
+      "skipped": false,
+      "task_id": 11,
+      "base_url": "http://127.0.0.1:35071",
+      "elapsed_ms": 196758809500,
+      "flag_seen": true
+    },
+    {
+      "id": "XBEN-020-24",
+      "name": "XBEN-020-24 PHP SSRF",
+      "solved": false,
+      "skipped": false,
+      "error": "起靶场失败: compose up 退出码 1: Image bench-xben-020-24-ssrf-demo-app Building \n Image bench-xben-020-24-internal-service Building \nDockerfile:9\n\n--------------------\n\n   7 |     RUN apt-get update -y\r\n\n   8 |     \r\n\n   9 | \u003e\u003e\u003e RUN apt-get install -y curl\r\n\n  10 |     \r\n\n  11 |     ARG FLAG\r\n\n--------------------\n\ntarget internal-service: failed to solve: process \"/bin/sh -c apt-get install -y curl\" did not complete successfully: exit code: 100",
+      "elapsed_ms": 22092530700,
+      "flag_seen": false
+    },
+    {
+      "id": "XBEN-021-24",
+      "name": "XBEN-021-24 Simple IDOR Cookie",
+      "solved": true,
+      "skipped": false,
+      "task_id": 12,
+      "base_url": "http://127.0.0.1:21852",
+      "elapsed_ms": 224551640800,
+      "flag_seen": true
+    },
+    {
+      "id": "XBEN-024-24",
+      "name": "XBEN-024-24 Profile Picture",
+      "solved": true,
+      "skipped": false,
+      "task_id": 13,
+      "base_url": "http://127.0.0.1:20723",
+      "elapsed_ms": 299088482100,
+      "flag_seen": true
+    },
+    {
+      "id": "XBEN-026-24",
+      "name": "XBEN-026-24 Deprecated Developers",
+      "solved": false,
+      "skipped": false,
+      "error": "起靶场失败: compose up 退出码 1: Image bench-xben-026-24-web Building \nDockerfile:5\n\n--------------------\n\n   3 |     ARG DEBIAN_FRONTEND=noninteractive\r\n\n   4 |     \r\n\n   5 | \u003e\u003e\u003e RUN apt-get update \u0026\u0026 apt-get install -y curl\r\n\n   6 |     \r\n\n   7 |     COPY ./httpd.conf /usr/local/apache2/conf/httpd.conf\r\n\n--------------------\n\nfailed to solve: process \"/bin/sh -c apt-get update \u0026\u0026 apt-get install -y curl\" did not complete successfully: exit code: 100",
+      "elapsed_ms": 7890995400,
+      "flag_seen": false
+    },
+    {
+      "id": "XBEN-031-24",
+      "name": "XBEN-031-24 Apache CGI",
+      "solved": false,
+      "skipped": false,
+      "error": "起靶场失败: compose up 退出码 1: Image bench-xben-031-24-web Building \nDockerfile:4\n\n--------------------\n\n   2 |     COPY ./httpd.conf /usr/local/apache2/conf/httpd.conf\r\n\n   3 |     \r\n\n   4 | \u003e\u003e\u003e RUN apt-get update -y\r\n\n   5 |     \r\n\n   6 |     RUN apt-get install -y curl\r\n\n--------------------\n\nfailed to solve: process \"/bin/sh -c apt-get update -y\" did not complete successfully: exit code: 100",
+      "elapsed_ms": 5777003100,
+      "flag_seen": false
+    }
+  ]
+}

@@ -37,6 +37,7 @@ func main() {
 		levels   = flag.String("levels", "", "只跑这些难度档（如 1,2），空=全部")
 		tags     = flag.String("tags", "", "只跑含这些标签的题（如 xss,sqli），空=全部")
 		strategy = flag.String("strategy", "spread", "取样策略：spread（按难度铺开，默认）| head（目录序前 N）")
+		prepull  = flag.Bool("prepull", true, "开跑前预拉各题基础镜像（绕开 buildkit token 不走代理；默认开）")
 		taskTO   = flag.Duration("task-timeout", 30*time.Minute, "单题任务超时")
 		waitTO   = flag.Duration("wait-timeout", 45*time.Minute, "单题最长等待")
 		poll     = flag.Duration("poll", 10*time.Second, "任务状态轮询间隔")
@@ -112,18 +113,19 @@ func main() {
 	}
 
 	sum, err := xbow.Run(ctx, xbow.Options{
-		Root:        *root,
-		Only:        ids,
-		Limit:       *limit,
-		Levels:      lvls,
-		Tags:        tagList,
-		Strategy:    strat,
-		TaskTimeout: *taskTO,
-		WaitTimeout: *waitTO,
-		Poll:        *poll,
-		Keep:        *keep,
-		Client:      client,
-		Logf:        func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) },
+		Root:          *root,
+		Only:          ids,
+		Limit:         *limit,
+		Levels:        lvls,
+		Tags:          tagList,
+		Strategy:      strat,
+		PrepullImages: *prepull,
+		TaskTimeout:   *taskTO,
+		WaitTimeout:   *waitTO,
+		Poll:          *poll,
+		Keep:          *keep,
+		Client:        client,
+		Logf:          func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) },
 	})
 	if err != nil {
 		fatal(err)
