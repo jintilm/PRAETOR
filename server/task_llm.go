@@ -567,6 +567,9 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	if sub := s.ctfSubmitterFor(t); sub != nil {
 		wk.SetCTFSubmitter(sub)
 	}
+	if src := s.ctfChallengeSourceFor(t); src != nil {
+		wk.SetCTFChallengeSource(src)
+	}
 	wk.SetFindingRecorder(s.evidenceStore())
 	wk.SetFindingVerifier(NewEvidenceVerifier(s.evidenceStore(), nil))
 	wk.SetCompactionWindowResolver(workerRuntime.CompactionWindow)

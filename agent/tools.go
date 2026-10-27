@@ -52,10 +52,11 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
 	findingRecorder FindingRecorder
-	findingVerifier FindingVerifier  // nil = 未启用确定性验证
-	ctfSubmitter    CTFSubmitter     // nil = 未配置判题后端（ctf_submit 会明确报不可用）
-	as              *db.AssetStore   // asset store (optional; nil = asset tools not available)
-	cs              *db.CompanyStore // company store (optional)
+	findingVerifier FindingVerifier    // nil = 未启用确定性验证
+	ctfSubmitter    CTFSubmitter       // nil = 未配置判题后端（ctf_submit 会明确报不可用）
+	ctfChallenge    CTFChallengeSource // nil = 未配置题面来源（ctf_challenge 会明确报不可用）
+	as              *db.AssetStore     // asset store (optional; nil = asset tools not available)
+	cs              *db.CompanyStore   // company store (optional)
 	ts              *db.ExplorationStore
 	worker          string
 	// domain 是任务所属领域（pentest/reverse/ctf/...）。用于**按领域裁剪工具面**：

@@ -124,6 +124,31 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 
 **不许做的事**：绝不把 DB 容器当沙箱（同权限级、凭据在环境变量、升级即炸）。
 
+### 1.18 题面拉取（P2-2b）：附件落盘，只回路径
+
+`ctf_challenge` 只做一件事：把题面和附件整理成"模型能直接用"的形态，**附件正文绝不进上下文**。
+理由与工具输出上限同源——附件塞进工具结果会一次性撑爆，且之后每轮重发。
+
+**离线目录约定**（基准与本地刷题用，不需要网络）：
+
+```
+<dir>/name.txt          可选，题目名（缺省用目录名）
+<dir>/README.md         可选，题面正文（也接受 description.md / description.txt）
+<dir>/connection.txt    可选，实例地址/连接方式
+<dir>/*                 其余文件都当附件（递归，含子目录）
+```
+
+配置：`settings ctf.challenge_dir.<taskID>`，回落 `PRAETOR_CTF_CHALLENGE_DIR`。
+多题时可用子目录：`<root>/<challenge_id>/`（给了 id 且该子目录存在就优先用它）。
+
+**CTFd 模式**：复用判题那边的 `ctf.ctfd_url` / `ctf.ctfd_token`；拉 `/api/v1/challenges/{id}`，
+附件下载到 `<data>/chal/<taskID>/<id>/`。题面是 HTML，工具侧剥标签后再给模型。
+
+**三个安全/体验细节**：
+1. **附件名先取 basename 再过滤字符**（`../evil` → `evil`），防止写穿目录；
+2. **单个附件下载失败只跳过该附件**，不让一个 404 毁掉整道题；
+3. **重置次数不编**：CTFd 标准 API 不暴露它，就返回 `-1` + 说明，而不是假装有。
+
 ### 1.17 CTF 提交出口（P2-2）：去重、判题、收敛三层分开
 
 | 层 | 职责 | 为什么单独一层 |
@@ -607,6 +632,7 @@ go test ./... -count=1
 | 2026-10-27 | **P3-1 evidence 调度 + 预算闸门；任务领域列**：`internal/budget`（纯判定：tokens→tool_calls→wall，0=不限）；`server/budget_gate.go` 每 20s 读账本（`llm_usage` 累计 token、`tool_usage` 调用数）判定，到顶调 `settleTaskCause` 走**与墙钟超时同一套**收尾（drain→终局 planner→带守卫落终态）并写明原因；`SchedulerPlanFor` 支持 evidence → 固定 1 planner/1 worker（忽略配置并发）；新增 `tasks.domain`（默认 pentest）+ API `domain` 字段 + `DomainPackFor` 读任务领域，未知值回落并记日志 | budget 7 用例（边界/优先级/剩余量）；db 2 个真库用例（用量取数、领域落库）；server 3 个用例（evidence 串行/领域分流/domainKeys）；真机：非法领域→400，`domain=reverse` 任务日志 `调度=evidence 拓扑=1/1`；真库 `go test -p 1 ./...` **22 包全绿** |
 | 2026-10-27 | **P2-1 延迟竞速调度**：`SchedulerPlan` 新增 `Lanes`（注册数 vs 启动放行数）；race → 2 worker/1 lane；`startRaceGate` 按「有产出不放行 / 轮数达标 / 时长兜底 / eager」放行，日志带原因；`Engine.ConvergeTask` 收敛原语（steer 而非硬 cancel）；race 一并接入预算闸门 | server 7 用例（放行规则 7 分支/环境变量解析/race 拓扑/lane 上限/explore 行为不变/收敛空值安全/steer 管道）；真机 `domain=ctf` 日志 1 planner/2 worker 且无放行；真库 `go test -p 1 ./...` **22 包全绿** |
 | 2026-10-27 | **P2-2 `ctf_submit` + 去重表 + 双判分 + 收敛**：`agent/ctf_tools.go`（工具 + `CTFSubmitter` 接口）、`db/ctf_submit.go`（`ctf_submissions`，主键=flag sha256，`ON CONFLICT DO NOTHING` 仲裁并发）、`server/ctf_submit.go`（offline/ctfd 两个 judge；判对调 `ConvergeTask`；判题失败不落库）；**工具面按领域裁剪**：`ToolSet.SetDomain` + `domainTools()`，`re_evidence` 从无条件改为 reverse 专属，索引补 `domainScopedTools()` | agent 5 用例（后端缺失/形状校验/verdict 透传/后端错误/未接入清单）+ 领域裁剪 3 态断言；server 4 用例（离线精确比对/去重与不复投/判题失败不落库/配置解析）；golden 仅 `re_evidence→worker` 一行移除；真库 `go test -p 1 ./...` **22 包全绿** |
+| 2026-10-27 | **P2-2b `ctf_challenge`**：`agent/ctf_challenge.go`（接口 + 工具，只回路径；长题面截断 + `truncated`）；`server/ctf_challenge.go`（离线目录来源 + CTFd 来源，附件落盘、HTML 去标签、文件名 sanitize）；接线到 worker（仅 ctf 域） | agent 3 用例（未配置不可用/只回路径不回正文/截断与 resets=-1）；server 4 用例（离线目录元信息与附件过滤/CTFd 下载与鉴权头/路径穿越/配置解析）；`TestCTFResolvesAllTools` 断言 CTF 未接入清单**为空**且工具面仍是 2 个；真库 `go test -p 1 ./...` **22 包全绿** |
 
 ---
 
@@ -620,7 +646,7 @@ go test ./... -count=1
 | --- | --- | --- |
 | P0 骨架 | 领域包 / 测试门禁 / 装配层 / 调度接缝 / 沙箱（常驻 + 一任务一容器） | ✅ 6/6 |
 | P1 渗透对齐 | hexstrike 配置层 / 确定性验证闭环（`verify_finding` + 落库）/ XBOW 基线 runner | ✅ 3/3（基线可信 **40%**，见 `docs/基线-XBOW-L1-可信版.md`） |
-| P2 CTF | race 延迟竞速 + 预算闸门 + `ctf_submit`（去重/双判分/收敛）已通；`ctf_challenge` 待做 | 实现进行中 2/6 |
+| P2 CTF | race 延迟竞速 + 预算闸门 + `ctf_submit` + `ctf_challenge` 都已通 | 实现进行中 3/7 |
 | P3 逆向 | 3 工具 + 配方 + 零 MCP；`re_triage`/`re_evidence` 已落地，**evidence 调度 + 预算闸门已通** | 实现进行中 3/5 |
 | P4 红队 | campaign 调度器 / Caldera / Sliver / GOAD | 未开始 0/4 |
 
@@ -765,6 +791,7 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 | --- | --- | --- | --- | --- |
 | P2-1 | `raceScheduler`：**延迟竞速**（例程注册 2 条、启动只放行 1 条）+ 停滞判定 + 预算闸门 + `ConvergeTask` 收敛原语 | 自研（`server/engine_race.go`）；收敛复用**既有 steer 机制**（不做硬 cancel） | ✅ 拓扑 `1 planner/2 worker`、`Lanes=1`；放行规则单测覆盖（eager/有产出不放行/轮数达标/时长兜底/阈值 0 关闭）；`ConvergeTask` 只对 running 意图注入停止指令；真机日志 `领域=ctf 调度=race 拓扑=1/2` 且无放行日志（惰性生效） | ✅ 已完成（**首解收敛的触发方是 P2-2 的 `ctf_submit`**） |
 | P2-2 | `ctf_submit`（唯一提交出口）+ `ctf_submissions` 去重表 + 双判分（offline 精确比对 / ctfd API）+ 判对后 **ConvergeTask** 收敛 | CTFd API（Apache-2.0，外部服务调用）；离线模式用于基准 | ✅ 同一 flag 只打一次平台（主键 sha256 仲裁并发）；rejected 不复投；判题失败**不落库**（否则重试会被永久判 duplicate）；判对才收敛；未配置判题后端时工具**明确报不可用** | ✅ 已完成（`ctf_challenge` 见 P2-2b） |
+| P2-2b | `ctf_challenge`：题面/附件/实例地址拉取，**附件落盘只回路径** | 离线目录约定（`name.txt`/`README.md`/`connection.txt` + 其余文件当附件）或 CTFd API | ✅ 两种来源都实现；离线支持子目录（`<root>/<id>/`）；HTML 题面去标签；附件名先 basename 再过滤（防 `../` 写穿）；长题面截断并标 `truncated`；平台不提供重置次数时返回 -1 并说明 | ✅ 已完成 |
 | P2-3 | CTF 沙箱镜像：基础层 + crypto 可选层 | 按 `CTFToolchain()` 构建；重依赖不进基础层 | 基础镜像 ≤12 项且能跑通 1 道 pwn + 1 道 forensics；`angr/sage` 按需装 | 待做 |
 | P2-4 | Cybench 40 题 + NYU 子集出分（复用 `bench/xbow` 结构） | 接入 benchmark，离线判分 | 出基线分并记录到本文件；含 time-to-flag 与每题 token | 待做 |
 | P2-5 | **per-intent 模型路由**（换模型竞速） | 自研：模型现在是任务级 profile 链（`task_llm.go` 的 `ActiveLLMProfileID`），要做 per-intent 需改解析层 | 同一题两路可用不同 profile；失败路回退换模型 | 待做 |

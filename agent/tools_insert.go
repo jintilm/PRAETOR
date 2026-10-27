@@ -675,8 +675,10 @@ func (t *ToolSet) domainTools() []actool.CoreTool {
 		// re_evidence：逆向域唯一结论出口（证据节点 + 领域判定器）
 		return []actool.CoreTool{t.reEvidence()}
 	case t.isCTF():
-		// ctf_submit：CTF 唯一提交出口（去重 + 判题 + 首解收敛）
-		return []actool.CoreTool{t.ctfSubmit()}
+		// CTF 域的工具面就是这两个（设计约束：≤2）：
+		//   ctf_challenge 拉题面/附件（落盘，只回路径）
+		//   ctf_submit    唯一提交出口（去重 + 判题 + 首解收敛）
+		return []actool.CoreTool{t.ctfChallengeTool(), t.ctfSubmit()}
 	}
 	return nil
 }
