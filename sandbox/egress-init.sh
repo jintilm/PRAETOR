@@ -27,6 +27,14 @@ if [ -z "$TYPE" ] || [ -z "$HOST" ] || [ -z "$PORT" ]; then
     exit 0
 fi
 
+# redsocks 的 ip 字段要**纯 IP**：传主机名时它自己解析的结果与 iptables 规则里
+# 固化的 IP 可能不一致（实测 host.docker.internal 被它解析到另一个接口 → 连接被拒）。
+# 这里在容器内解析一次，写进配置与 iptables 规则的必然是同一个地址。
+RESOLVED=$(getent ahostsv4 "$HOST" 2>/dev/null | awk '{print $1; exit}')
+if [ -n "$RESOLVED" ]; then
+    HOST="$RESOLVED"
+fi
+
 LOGIC_PORT=12345
 
 # ---- redsocks 配置 ----
