@@ -1326,7 +1326,20 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 
 **为什么 Caldera 只接 REST 不接 MCP**：红队域在 `MCP()` 里声明过 caldera（`http://127.0.0.1:8888`），但 Caldera 的 MCP 会把 abilities/agents/operations/planners/objectives 几十个端点铺进上下文。模型真正要的只有三件：看有哪些 ability、下发一条、回收结果 —— 三个 REST 端点、一个 schema 就够。Atomic Red Team 的接入路径由此打通：Caldera 的 atomic 插件把 ART 的 atomics 变成 ability，我们只需「按名字下发」，不必再引一套 YAML 解析。
 
-| P4-2 | Caldera / Atomic Red Team 编排接入 | 直接接入 REST（Apache-2.0 / MIT），**不接 MCP** | ✅ `internal/caldera`（abilities/operations 三个端点）+ 工具 `caldera_operation(action=list/start/status)`：下发 ad-hoc operation 并把 links 折成「哪条链、什么状态、命令与输出片段」；`status=0`（未回收）不被说成完成；未配 `PRAETOR_CALDERA_URL` 时点名配置项而不是「请求失败」 | ✅ 已完成 |
+**真机起 Caldera 的两个坑**（都修在客户端与部署说明里）：
+
+- **websocket 自连崩溃**：`app.contact.websocket: 0.0.0.0:7012` 在 Windows 上让启动收尾时
+  `ws://0.0.0.0:7012` 自连直接失败（`WinError 1214 指定的网络名格式无效`）—— `0.0.0.0` 是监听地址，
+  不是连接目标。conf 里改成 `127.0.0.1:7012` 即可。
+- **sources 为空 → 下发必 500**：operation 创建需要 fact source，而 stockpile 没加载时
+  `/api/v2/sources` 返回空数组，Caldera 不给任何提示直接 500。服务端要带 stockpile 启动
+  （`-P access,atomic,stockpile`）；客户端在 sources 为空时报「带 stockpile 重启」而不是「请求失败」。
+
+真服验证跑法：`go test -tags caldera_e2e ./agent/ -run TestCalderaRealServerAgainstLive -v`
+（需 `PRAETOR_CALDERA_URL` / `PRAETOR_CALDERA_KEY`。无 agent 上线时下发与回收链路照常验证；
+执行结果要另起 sandcat agent —— 不要在开发机上做，那会真的执行 TTP）。
+
+| P4-2 | Caldera / Atomic Red Team 编排接入 | 直接接入 REST（Apache-2.0 / MIT），**不接 MCP** | ✅ 真服验证通过：本机起 Caldera（access+atomic+stockpile），E2E 列出 211 条 abilities → 下发 ad-hoc operation → `state=finished` 回收成功。**planner/source 的 UUID 每个安装各自生成，必须运行时解析**（atomic 按名字、source 取第一条）；没加载 stockpile 时 sources 为空，报错点名部署问题 | ✅ 已完成 |
 | P4-3 | Sliver / NetExec / BloodHound 接入（独立服务 + MCP） | 直接接入（Sliver GPL 只做外部服务，不复制） | 会话列表可读、路径可查 | 待做 |
 | P4-4 | GOAD 靶场跑通一条端到端战役 | 靶场 `Orange-Cyberdefense/GOAD` | 有证据链 + 有 cleanup 记录 | 待做 |
 

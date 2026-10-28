@@ -118,6 +118,12 @@ func (c *Client) AbilityByName(ctx context.Context, name string) (*Ability, erro
 // StartOperation 下发一次 operation：把 ability 派给 group 里的 agent。
 //
 // 返回的 operation 里 links 才是"结果"，需要轮询 Status 回收（见 Status）。
+//
+// planner/source **不能硬编码 id**：这两个 UUID 是每个安装各自生成的（同一个
+// "atomic" planner 在 A 装机是 …e31a、B 装机就是别的），写死任何一份都会在别的
+// 实例上 500。所以下发前先按名字解析：planner 取 "atomic"（名字跨版本稳定），
+// source 取第一条可用的（stockpile 没加载时 sources 是空的 —— 那是部署问题，
+// 报错要说清，而不是让模型以为 ability 不存在）。
 func (c *Client) StartOperation(ctx context.Context, abilityID, group, name string) (*Operation, error) {
 	if strings.TrimSpace(abilityID) == "" {
 		return nil, errors.New("ability_id 为空")
@@ -125,12 +131,42 @@ func (c *Client) StartOperation(ctx context.Context, abilityID, group, name stri
 	if strings.TrimSpace(group) == "" {
 		group = "red"
 	}
+	var planners []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/api/v2/planners", nil, &planners); err != nil {
+		return nil, err
+	}
+	var plannerID string
+	for _, p := range planners {
+		if p.Name == "atomic" {
+			plannerID = p.ID
+			break
+		}
+	}
+	if plannerID == "" {
+		return nil, errors.New("没找到 atomic planner（Caldera 装机不完整？先看 /api/v2/planners）")
+	}
+
+	var sources []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/api/v2/sources", nil, &sources); err != nil {
+		return nil, err
+	}
+	if len(sources) == 0 {
+		return nil, errors.New("Caldera 没有 fact source：operation 创建必需它。" +
+			"通常因为 stockpile 插件没加载 —— 用 -P access,atomic,stockpile 之类把 stockpile 带上")
+	}
+
 	body := map[string]any{
 		"name":      defaultName(name, abilityID),
 		"adversary": map[string]any{"adversary_id": "ad-hoc", "name": "praetor-adhoc", "atomic_ordering": []string{abilityID}},
 		"group":     group,
-		"planner":   map[string]any{"id": "aaa7c857-37a0-4c4a-85f7-4e9f7f30e40d", "name": "atomic"},
-		"source":    map[string]any{"id": "ed32b9c3-0fa9-4a3a-8e6f-0f0f5b0d5d30", "name": "basic"},
+		"planner":   map[string]any{"id": plannerID, "name": "atomic"},
+		"source":    map[string]any{"id": sources[0].ID, "name": sources[0].Name},
 	}
 	var op Operation
 	if err := c.do(ctx, http.MethodPost, "/api/v2/operations", body, &op); err != nil {
