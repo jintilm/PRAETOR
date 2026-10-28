@@ -236,6 +236,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		WireSandboxWithRouting(s.ctx, m.DataDir(), settingOr(m.pg, settingSandboxImage, ""), SandboxRouting{
 			ImageFor: s.domainImageFor,
 			MountFor: s.taskMountsFor,
+			Egress:   s.sandboxEgress, // 全量出口隐身：容器全部出站 TCP 重定向到全局出口代理（未配置=直连）
 		})
 		s.logDomainImages(s.ctx)
 		seedMCPPresets(m.pg)            // 已配置的外部 MCP 预设（如 hexstrike）：只在缺失时插入

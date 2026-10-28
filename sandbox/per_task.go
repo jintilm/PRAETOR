@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -50,6 +51,14 @@ type PerTaskConfig struct {
 	// 而渗透域不需要 —— 让所有人都背上它，等于每次冷启动都多等一倍。镜像选择是**领域**
 	// 的属性，领域又只有任务知道，所以决策由上层注入，这里只负责用。
 	ImageFor func(taskID string) string
+	// Egress 返回当前的全量出口上游；nil 或返回 nil = 不启用（容器直连，行为与从前一致）。
+	//
+	// 为什么是函数而不是值：全局出口代理支持运行时热改，创建容器时才求值；
+	// 快照会让"改了代理"对已存在的箱子永远不生效（「先建任务、后配题」同款坑）。
+	// 启用时容器追加 NET_ADMIN（打 iptables 规则）与 host-gateway 映射，
+	// 并在创建后 exec 一次 praetor-egress 完成配置；失败只降级为直连并记日志
+	// —— 隐身是增强，不该让任务起不来。
+	Egress func() *EgressUpstream
 	// MountFor 返回该任务额外的只读挂载（题面附件、题库目录等）；nil = 不挂。
 	//
 	// 为什么必须由上层注入：附件放在哪里是**题面来源**的知识（离线题库目录 vs CTFd
@@ -387,6 +396,21 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 		"-v", filepath.ToSlash(box.hostDir) + ":" + p.cfg.ContainerRoot,
 		"--security-opt", "no-new-privileges:true",
 	}
+	// 全量出口隐身：egress 启用时容器需要 NET_ADMIN（iptables）与宿主网关映射
+	//（上游是回环地址时 host.docker.internal 才能解析到宿主）。
+	var egress *EgressUpstream
+	if p.cfg.Egress != nil {
+		egress = p.cfg.Egress()
+	}
+	if egress != nil {
+		args = append(args,
+			"--cap-add", "NET_ADMIN",
+			"--add-host", "host.docker.internal:host-gateway",
+		)
+		for _, e := range egress.env() {
+			args = append(args, "-e", e)
+		}
+	}
 	// 额外挂载放在工作目录之后：工作目录是"模型的草稿纸"，附件是"只读输入"，
 	// 顺序本身没有语义，但把只读的放后面读起来更清楚。
 	for _, m := range mounts {
@@ -408,6 +432,17 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 		return nil, fmt.Errorf("sandbox: 创建任务容器失败: %s", strings.TrimSpace(stderr))
 	}
 	box.mountKey = mk
+
+	// 出口隐身初始化：环境变量已在 run 时注入，这里只触发脚本。
+	// exec -d 异步执行，失败降级为直连并记日志 —— 隐身失败不该让任务失败，
+	// 但必须说清楚（安静地"以为在隐身"比明说没隐身危险得多）。
+	if egress != nil {
+		if _, stderr, code, ierr := p.exec(ctx, []string{
+			"exec", "-d", box.container, "sh", "-lc", "praetor-egress",
+		}, ""); ierr != nil || code != 0 {
+			log.Printf("[sandbox] 出口隐身初始化失败，容器保持直连：%v %s", ierr, strings.TrimSpace(stderr))
+		}
+	}
 	return box, nil
 }
 
