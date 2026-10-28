@@ -247,6 +247,8 @@ type Manager struct {
 	// capture is on it becomes the MITM's upstream; when capture is off it is
 	// injected into agent bash env / WebFetch directly. See ProxyAddr.
 	globalProxy string
+	// egressUpstreams 是任务级出口池（见 settingEgressUpstreams）；空 = 全局出口。
+	egressUpstreams []string
 }
 
 // Settings keys the UI toggles at runtime.
@@ -262,8 +264,12 @@ const (
 	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
 	// only routes the search backend) and the per-profile LLM proxy.
 	settingGlobalProxy = "global_proxy"
-	settingWorkers     = "workers"
-	settingLLMRecord   = "llm_record"
+	// settingEgressUpstreams 是任务级出口的上游列表（换行分隔）：
+	// 配置后沙箱容器按任务稳定分配出口（hash(taskID)%N），实现任务间 IP 隔离；
+	// 空列表 = 回落全局出口代理。每个上游必须是合法的 http/https/socks5 URL。
+	settingEgressUpstreams = "egress_upstreams"
+	settingWorkers         = "workers"
+	settingLLMRecord       = "llm_record"
 	// LLM 轮询(故障转移)。默认关闭——开启后走「全局激活配置」的 agent 在当前配置
 	// 不可用(余额不足/key 失效/限流/服务异常)时自动切到下一个配置。
 	// settingLLMPoolBindFallback 仅在轮询开启时有意义:默认关闭,即 agent/任务显式
@@ -438,6 +444,13 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	// off, ProxyAddr hands it to agents directly (bash env / WebFetch).
 	if v, ok, _ := pg.GetSetting(settingGlobalProxy); ok {
 		m.globalProxy = strings.TrimSpace(v)
+	}
+	if v, ok, _ := pg.GetSetting(settingEgressUpstreams); ok && strings.TrimSpace(v) != "" {
+		for _, line := range strings.Split(v, "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				m.egressUpstreams = append(m.egressUpstreams, line)
+			}
+		}
 	}
 	if m.traffic != nil {
 		if err := m.traffic.SetUpstreamProxy(m.globalProxy); err != nil {
@@ -1864,4 +1877,42 @@ func (t *Task) drainTriggers() []agent.TriggerEvent {
 	ev := t.pendingTriggers
 	t.pendingTriggers = nil
 	return ev
+}
+
+// EgressUpstreams 返回任务级出口池的副本（nil/空 = 未配置，回落全局出口代理）。
+func (m *Manager) EgressUpstreams() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(m.egressUpstreams) == 0 {
+		return nil
+	}
+	out := make([]string, len(m.egressUpstreams))
+	copy(out, m.egressUpstreams)
+	return out
+}
+
+// SetEgressUpstreams 校验、持久化并应用任务级出口池。
+//
+// 整表校验（任何一个 URL 非法就整体拒绝）而不是悄悄丢弃坏行 —— 分配是按索引的，
+// 静默丢弃会让 hash 落到与运营预期不同的出口上，且没人知道。
+// 应用=只更新内存；透明层在每次创建容器时才取值（热改对之后的容器生效）。
+func (m *Manager) SetEgressUpstreams(list []string) error {
+	clean := make([]string, 0, len(list))
+	for _, raw := range list {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if _, err := traffic.ValidateProxyURL(raw); err != nil {
+			return fmt.Errorf("出口 %q: %w", raw, err)
+		}
+		clean = append(clean, raw)
+	}
+	if err := m.pg.SetSetting(settingEgressUpstreams, strings.Join(clean, "\n")); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.egressUpstreams = clean
+	m.mu.Unlock()
+	return nil
 }

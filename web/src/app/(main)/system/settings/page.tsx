@@ -32,6 +32,10 @@ export default function SystemSettingsPage() {
   const [proxyInput, setProxyInput] = React.useState("");
   const [savingProxy, setSavingProxy] = React.useState(false);
   const [globalProxyInput, setGlobalProxyInput] = React.useState("");
+  // 任务级出口池：每行一个上游 URL。沙箱容器按任务稳定分配（hash），实现任务间 IP 隔离；
+  // 留空 = 所有任务回落全局出口代理。
+  const [egressUpstreamsInput, setEgressUpstreamsInput] = React.useState("");
+  const [savingEgress, setSavingEgress] = React.useState(false);
   const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
@@ -57,6 +61,7 @@ export default function SystemSettingsPage() {
     setTavilyKeySet(!!s.tavily_key_set);
     setProxyInput(s.web_search_proxy ?? "");
     setGlobalProxyInput(s.global_proxy ?? "");
+    setEgressUpstreamsInput((s.egress_upstreams ?? []).join("\n"));
     setPyInterp(s.python_interpreter ?? "");
     setWorkers(String(s.workers ?? 3));
     setInjectPlanner(s.constraints_inject_planner !== false);
@@ -234,6 +239,22 @@ export default function SystemSettingsPage() {
       .finally(() => setSavingGlobalProxy(false));
   };
 
+  const saveEgressUpstreams = () => {
+    const list = egressUpstreamsInput
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    setSavingEgress(true);
+    api
+      .setSettings({ egress_upstreams: list })
+      .then((s) => {
+        apply(s);
+        toast.success(list.length ? `已保存出口池（${list.length} 个上游，按任务分配）` : "已清空出口池（回落全局出口代理）");
+      })
+      .catch((e) => toast.error("保存失败：" + (e as Error).message))
+      .finally(() => setSavingEgress(false));
+  };
+
   // Run a real "test" search ("test") against the CURRENT form values (backend +
   // proxy + entered key), falling back to saved values server-side. Toasts result.
   const runTest = () => {
@@ -370,6 +391,48 @@ export default function SystemSettingsPage() {
             <p className="text-muted-foreground text-xs">
               {globalProxyInput.trim() ? "已配置 · 所有目标流量经此代理出网" : "未配置 · 目标流量直连出网"}
             </p>
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <ShieldAlertIcon className="size-4" />
+              沙箱出口池（任务级 IP 隔离，可选）
+            </CardTitle>
+            <CardDescription>
+              每行一个上游代理（http/https/socks5，可带认证）。配置后，沙箱容器的<b>全部出站 TCP</b>{" "}
+              会在 IP 层重定向到按任务分配的出口——同一任务的容器重建后仍用同一出口（会话不漂移），
+              不同任务的出口互相隔离。留空 = 所有任务回落上面的全局出口代理。
+              <br />
+              例：mihomo 可为每个节点开一个 listener（配置里 <code>proxy: 节点名</code>），
+              逐行填 <code>http://127.0.0.1:7891</code> 等；gost / 商业隧道 / 自建 VPS 同理。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            <Label htmlFor="egress-upstreams" className="text-sm font-normal text-muted-foreground">
+              上游列表（每行一个，非法 URL 会被整体拒绝）
+            </Label>
+            <textarea
+              id="egress-upstreams"
+              rows={4}
+              spellCheck={false}
+              placeholder={"socks5://user:pass@10.0.0.9:1080\nhttp://127.0.0.1:7891\nhttp://127.0.0.1:7892"}
+              value={egressUpstreamsInput}
+              disabled={!loaded || savingEgress}
+              onChange={(e) => setEgressUpstreamsInput(e.target.value)}
+              className="w-full rounded-md border bg-transparent px-3 py-2 font-mono text-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            />
+            <div className="flex items-center gap-2">
+              <Button type="button" onClick={saveEgressUpstreams} disabled={!loaded || savingEgress}>
+                保存出口池
+              </Button>
+              <span className="text-muted-foreground text-xs">
+                {egressUpstreamsInput.trim()
+                  ? `已配置 ${egressUpstreamsInput.split("\n").filter((l) => l.trim()).length} 个上游`
+                  : "未配置 · 所有任务使用全局出口"}
+              </span>
+            </div>
           </CardContent>
         </Card>
 

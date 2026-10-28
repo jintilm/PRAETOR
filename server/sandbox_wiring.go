@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"hash/fnv"
 	"log"
 	"path/filepath"
 	"strings"
@@ -40,9 +41,9 @@ func WireSandboxWithImage(ctx context.Context, dataDir, image string) {
 type SandboxRouting struct {
 	ImageFor func(taskID string) string
 	MountFor func(taskID string) []sandbox.Mount
-	// Egress 返回沙箱容器的全量出口上游；nil = 不启用（直连）。
-	// 由 server 闭包提供：每次创建容器时求值，全局代理热改即生效。
-	Egress func() *sandbox.EgressUpstream
+	// Egress 返回该任务的全量出口上游；nil = 不启用（直连）。
+	// 由 server 闭包提供：每次创建容器时求值，全局代理/出口池热改即生效。
+	Egress func(taskID string) *sandbox.EgressUpstream
 }
 
 // WireSandboxWithImages 额外带上「按任务选镜像」的解析器（领域专用工具链，见 sandbox_image.go）。
@@ -191,20 +192,38 @@ func sandboxContainerEnv() []string {
 // "改了代理"对之后的容器永远不生效。回环地址翻译成 host.docker.internal
 // （容器创建时带 --add-host=host-gateway）；SANDBOX_PROXY 指向的 MITM 录制代理
 // 加入直连绕过 —— 它的上游就是同一份全局代理，链路里不需要二跳。
-func (s *Server) sandboxEgress() *sandbox.EgressUpstream {
+func (s *Server) sandboxEgressFor(taskID string) *sandbox.EgressUpstream {
 	if s == nil || s.m == nil {
 		return nil
 	}
 	s.m.mu.RLock()
 	raw := s.m.globalProxy
+	pool := append([]string(nil), s.m.egressUpstreams...)
 	s.m.mu.RUnlock()
+
+	// 任务级出口池优先：按任务稳定分配（同一任务重建容器后仍同一出口，
+	// 会话/登录态绑 IP 不能漂移）；池为空回落全局出口代理。
+	if len(pool) > 0 {
+		raw = pool[PickUpstreamIndex(taskID, len(pool))]
+	}
 	up, err := sandbox.ParseEgressUpstream(raw, "host.docker.internal")
 	if err != nil {
-		log.Printf("[sandbox] 全局出口代理无法用于容器透明层（容器保持直连）：%v", err)
+		log.Printf("[sandbox] 任务 %s 的出口代理无法用于容器透明层（容器保持直连）：%v", taskID, err)
 		return nil
 	}
 	if proxy := strings.TrimSpace(config.Env("SANDBOX_PROXY")); proxy != "" {
 		up.Exclude = sandbox.ParseEgressExclude(proxy)
 	}
 	return up
+}
+
+// PickUpstreamIndex 是纯函数：hash(taskID) 对 N 取模。
+// fnv32a 够用 —— 只需要"稳定 + 分布均匀"，不需要密码学强度。
+func PickUpstreamIndex(taskID string, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(taskID))
+	return int(h.Sum32() % uint32(n))
 }

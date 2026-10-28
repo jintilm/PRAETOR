@@ -51,14 +51,16 @@ type PerTaskConfig struct {
 	// 而渗透域不需要 —— 让所有人都背上它，等于每次冷启动都多等一倍。镜像选择是**领域**
 	// 的属性，领域又只有任务知道，所以决策由上层注入，这里只负责用。
 	ImageFor func(taskID string) string
-	// Egress 返回当前的全量出口上游；nil 或返回 nil = 不启用（容器直连，行为与从前一致）。
+	// Egress 返回该任务的全量出口上游；nil 或返回 nil = 不启用（容器直连，行为与从前一致）。
 	//
 	// 为什么是函数而不是值：全局出口代理支持运行时热改，创建容器时才求值；
 	// 快照会让"改了代理"对已存在的箱子永远不生效（「先建任务、后配题」同款坑）。
+	// 带 taskID：任务级出口池（多上游）按任务稳定分配，同一任务的容器换镜像重建
+	// 后仍落在同一出口 —— 会话与登录态绑 IP，漂移比不隐身更糟。
 	// 启用时容器追加 NET_ADMIN（打 iptables 规则）与 host-gateway 映射，
 	// 并在创建后 exec 一次 praetor-egress 完成配置；失败只降级为直连并记日志
 	// —— 隐身是增强，不该让任务起不来。
-	Egress func() *EgressUpstream
+	Egress func(taskID string) *EgressUpstream
 	// MountFor 返回该任务额外的只读挂载（题面附件、题库目录等）；nil = 不挂。
 	//
 	// 为什么必须由上层注入：附件放在哪里是**题面来源**的知识（离线题库目录 vs CTFd
@@ -400,7 +402,7 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 	//（上游是回环地址时 host.docker.internal 才能解析到宿主）。
 	var egress *EgressUpstream
 	if p.cfg.Egress != nil {
-		egress = p.cfg.Egress()
+		egress = p.cfg.Egress(key)
 	}
 	if egress != nil {
 		args = append(args,

@@ -236,7 +236,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		WireSandboxWithRouting(s.ctx, m.DataDir(), settingOr(m.pg, settingSandboxImage, ""), SandboxRouting{
 			ImageFor: s.domainImageFor,
 			MountFor: s.taskMountsFor,
-			Egress:   s.sandboxEgress, // 全量出口隐身：容器全部出站 TCP 重定向到全局出口代理（未配置=直连）
+			Egress:   s.sandboxEgressFor, // 全量出口隐身：容器全部出站 TCP 重定向到全局出口代理（未配置=直连）
 		})
 		s.logDomainImages(s.ctx)
 		seedMCPPresets(m.pg)            // 已配置的外部 MCP 预设（如 hexstrike）：只在缺失时插入
@@ -3338,6 +3338,7 @@ func (s *Server) settingsPayload() map[string]any {
 		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
 		"web_search_proxy":         proxy,                       // 独立出口代理(http/https/socks5)，空=直连
 		"global_proxy":             s.m.GlobalProxy(),           // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		"egress_upstreams":         s.m.EgressUpstreams(),       // 任务级出口池(沙箱透明层按任务稳定分配)；空=回落全局出口
 		"python_interpreter":       strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
 		"workers":                  s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
 		"task_concurrency_enabled": concOn,                      // 任务并发上限开关(默认关)
@@ -3404,14 +3405,15 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		LLMRecord           *bool `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
 		// Web search. WebSearchEnabled/Backend toggle the tool + backend; BraveKey/TavilyKey
 		// are optional — omit (null) to leave a stored key untouched, send "" to clear.
-		WebSearchEnabled *bool   `json:"web_search_enabled"`
-		WebSearchBackend *string `json:"web_search_backend"`
-		BraveKey         *string `json:"brave_search_api_key"`
-		TavilyKey        *string `json:"tavily_search_api_key"`
-		WebSearchProxy   *string `json:"web_search_proxy"`   // 独立出口代理(http/https/socks5)；null=不改，""=清空
-		GlobalProxy      *string `json:"global_proxy"`       // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
-		PythonInterp     *string `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
-		Workers          *int    `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
+		WebSearchEnabled *bool    `json:"web_search_enabled"`
+		WebSearchBackend *string  `json:"web_search_backend"`
+		BraveKey         *string  `json:"brave_search_api_key"`
+		TavilyKey        *string  `json:"tavily_search_api_key"`
+		WebSearchProxy   *string  `json:"web_search_proxy"`   // 独立出口代理(http/https/socks5)；null=不改，""=清空
+		GlobalProxy      *string  `json:"global_proxy"`       // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
+		EgressUpstreams  []string `json:"egress_upstreams"`   // 任务级出口池(URL 列表)；null=不改，空数组=清空(回落全局出口)
+		PythonInterp     *string  `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
+		Workers          *int     `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
 		// 任务并发上限:同时「运行中」的任务数上限。关闭=不限;开启后新建任务超限则排队,有空位自动启动。
 		ConcurrencyEnabled *bool `json:"task_concurrency_enabled"`
 		ConcurrencyLimit   *int  `json:"task_concurrency_limit"`
@@ -3563,6 +3565,14 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		changed = true // capture-off egress is baked into agents at build time → rebuild
+	}
+	if req.EgressUpstreams != nil {
+		// 非法 URL 同样是 400：整表校验整表拒绝，静默丢坏行会让 hash 分配漂移。
+		if err := s.m.SetEgressUpstreams(req.EgressUpstreams); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		changed = true
 	}
 	if req.WebSearchEnabled != nil || req.WebSearchBackend != nil || req.BraveKey != nil || req.TavilyKey != nil || req.WebSearchProxy != nil {
 		// Fill unspecified fields from current state so a partial PUT doesn't reset them.
