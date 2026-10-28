@@ -62,6 +62,41 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 ---
 
+## 核心能力
+
+### 任务领域：同一引擎，四套自主性形态
+
+创建任务时选择**领域**（`domain`），调度拓扑、预算与硬约束随领域切换：
+
+| 领域 | 调度拓扑 | 领域专属约束 |
+| --- | --- | --- |
+| **渗透测试**（默认） | 1 planner + N worker（探索并发） | 双图推进 + 资产覆盖度 |
+| **CTF 靶场** | 延迟竞速（默认单路，停滞才起第二路） | `ctf_challenge` 拉题 / `ctf_board` 竞速看板与放弃决策 / `ctf_submit` 唯一提交出口（去重 + 平台判分）；任务详情有 **CTF 面板**（题面配置、看板、判分记录） |
+| **逆向分析** | 1 planner + 1 worker（**证据串行**） | `re_triage` 定性 → `re_recipe` 8 条静态/动态配方（rizin / Ghidra headless / FLOSS / capa / DIE / gdb / apktool）→ `re_evidence` 证据链落图（claim/ref 硬校验，判据不通过也落库但标记 `inferred`） |
+| **红队战役** | 1 planner + 1 worker（串行） | 意图携带 ATT&CK 阶段（`phase`），**前置未完成不下发**；做过持久化/外传而 cleanup 未完成时**禁止收尾**（`prove_goal` / `goal_met` 均被拦） |
+
+### 子 agent 派生（灰度开关）
+
+CTF 与逆向域的 worker 即领域 lead，可通过 `Agent` 工具把「解一道题」「验证一条假设」派给**独立上下文**的子 agent（CTF：web/pwn/rev/crypto/forensics 五个 solver；逆向：re-analyst）。子 agent 继承父的沙箱视角（容器路径映射、写白名单）与输出目录，产物经共享工具集归口回本意图；中间过程镜像进 activity 流（UI 可见，带 `agentType:` 前缀）。默认关闭，`PRAETOR_SUBAGENTS=ctf,reverse` 按域灰度开启。
+
+### 每任务沙箱
+
+开启后每任务一个一次性 Docker 容器（`PRAETOR_SANDBOX=required` + 隔离档位）：
+
+- Bash 在容器内执行；文件工具（Read/Write/LS/Glob/Grep）跑在宿主进程，内置**容器路径 → 宿主路径**翻译与**写白名单**（只有工作挂载可写，题面挂载只读，未挂载路径一律拒绝）；
+- 边界校验在解析符号链接后用真实路径重比，越界按「路径不存在」处理（fail closed）；
+- 启动时扫描并清理本部署上次遗留的任务容器（按挂载源归属判断，不误删别的部署）。
+
+### 样本治理（逆向域）
+
+`internal/samplestore` 是唯一允许长期持有样本的地方：AES-256-GCM 分块加密（密钥 `PRAETOR_SAMPLE_KEY`，缺密钥直接报错，**没有明文降级**）、sha256 索引去重、入库走人工 CLI（`go run ./cmd/samplestore -put <样本>`）。工具只见路径不见字节：`target=sha256:<hex>` 解密到临时文件、用完即删，样本内容永远不会进 LLM 上下文。
+
+### 系统人设
+
+设置页可配置**系统级人设**（注入所有 agent、最高优先级）：声明平台身份与授权前提（典型场景：企业授权渗透 / CTF 靶场 / 自有样本分析 / SRC / 防御研究），带变更确认与审计留痕；per-agent 提示词在 Agent 管理页可编辑（DB 存储 + 代码内置默认兜底）。
+
+---
+
 ## 安装
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
@@ -218,6 +253,18 @@ CGO_ENABLED=0 go build -tags embedui -o praetor ./cmd/praetor
 **LLM**：`export ANTHROPIC_API_KEY=sk-...`（或 `OPENAI_API_KEY`），也可在 UI 的「LLM 配置」页填写。
 可选：`PRAETOR_LLM_PROVIDER` / `PRAETOR_LLM_MODEL` / `PRAETOR_LLM_BASE_URL` / `PRAETOR_LLM_PROXY`。
 
+
+
+**扩展能力**（均可选，缺省关闭；完整清单见 [.env.example](.env.example)）：
+
+| 变量 | 作用 |
+| --- | --- |
+| `PRAETOR_SUBAGENTS` | 子 agent 派生灰度（`ctf,reverse` 域列表 / `all` / 空=关） |
+| `PRAETOR_SANDBOX` / `PRAETOR_SANDBOX_NETWORK` 等 | 每任务容器沙箱与靶机网络 |
+| `PRAETOR_SAMPLE_DIR` / `PRAETOR_SAMPLE_KEY` | 逆向样本库目录与加密密钥（64 位 hex） |
+| `PRAETOR_CALDERA_URL` / `PRAETOR_CALDERA_KEY` | 红队 Caldera 编排（`caldera_operation`：列 ability / 下发 / 回收） |
+| `PRAETOR_RE_DYNAMIC` | 动态执行总闸：`trace` 配方会真的运行样本，默认拒绝 |
+
 **并发**：每个任务的 work agent 数在「系统设置」里配置（默认 3）。
 
 **常用参数**：`./start.sh -addr :8787 -proxy :8788`（`-addr` 前端+API，`-proxy` 流量录制代理）。启动脚本会把参数原样透传给 `praetor`。
@@ -336,7 +383,7 @@ flowchart TB
 | **前端** | Next.js 静态导出，`go:embed` 内嵌进单二进制；可视化任务/资产/探索链路/覆盖图，人在环路对话 |
 | **server** | `net/http` 路由 + JWT 鉴权 + SSE；`Manager` 托管任务、引擎、DB store 的生命周期 |
 | **engine** | 每任务一个 `plannerLoop` + N 个 worker goroutine；意图领取、超时/暂停/drain |
-| **agent** | goals / planner / worker / mainagent，`ToolSet` 把双图暴露成 LLM 工具 |
+| **agent** | goals / planner / worker / mainagent，`ToolSet` 把双图暴露成 LLM 工具；`agent/domain` 按任务领域（渗透/CTF/逆向/红队）注入专属工具、角色表与调度语义 |
 | **db** | 双图的 Postgres 落地（pgx）；schema 随 `go:embed` 每次启动幂等建表 |
 | **支撑** | 记录型 MITM 代理、审批门、异步补全、MCP/技能/记忆/报告 |
 
@@ -447,6 +494,29 @@ flowchart TB
 ```
 
 于是攻击链在“事件驱动 + 无状态会话”的环境下依然**稳定推进、不重复、不错序**——这是 PRAETOR 能自主走完多步利用链的关键。
+
+---
+
+### 任务领域与子 agent
+
+`agent/domain` 把「平台机制」与「领域语义」分开：平台提供双图、调度循环、审批门、预算闸门；领域包只声明自己的工具面（≤3 个自研工具为设计纪律）、角色表（RoleSpec：提示词 + 工具白名单 + 预算）与调度器拓扑。新增一个领域不改引擎。
+
+```mermaid
+flowchart LR
+  subgraph DOM["任务领域（tasks.domain）"]
+    PE["pentest 渗透 · explore 并发"]
+    CT["ctf 靶场 · race 延迟竞速"]
+    RE["reverse 逆向 · evidence 串行"]
+    RT["redteam 战役 · campaign 阶段闸门"]
+  end
+  ENG["engine 调度循环"] --> DOM
+  CT -.->|Agent 工具| SV["solver-web/pwn/rev/... 独立上下文"]
+  RE -.->|Agent 工具| AN["re-analyst 串行验证假设"]
+  SV -->|record_fact / ctf_submit| EG2[("探索图")]
+  AN -->|re_evidence| EG2
+```
+
+灰度开关 `PRAETOR_SUBAGENTS`（默认关）按域启用派生后，CTF 的 lead 可把题目派给按题型定制的 solver、逆向的 lead 把假设验证派给 analyst——每个子 agent 独立上下文，lead 不被单题/单假设的过程记录撑爆；产物经共享工具集归口回发起意图，过程镜像进 activity 流。渗透/红队刻意不接（planner/worker 与战役闸门已是既定秩序）。
 
 ---
 
