@@ -73,18 +73,19 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **渗透测试**（默认） | 1 planner + N worker（探索并发） | 双图推进 + 资产覆盖度 |
 | **CTF 靶场** | 延迟竞速（默认单路，停滞才起第二路） | `ctf_challenge` 拉题 / `ctf_board` 竞速看板与放弃决策 / `ctf_submit` 唯一提交出口（去重 + 平台判分）；任务详情有 **CTF 面板**（题面配置、看板、判分记录） |
 | **逆向分析** | 1 planner + 1 worker（**证据串行**） | `re_triage` 定性 → `re_recipe` 8 条静态/动态配方（rizin / Ghidra headless / FLOSS / capa / DIE / gdb / apktool）→ `re_evidence` 证据链落图（claim/ref 硬校验，判据不通过也落库但标记 `inferred`） |
-| **红队战役** | 1 planner + 1 worker（串行） | 意图携带 ATT&CK 阶段（`phase`），**前置未完成不下发**；做过持久化/外传而 cleanup 未完成时**禁止收尾**（`prove_goal` / `goal_met` 均被拦） |
+| **红队战役** | 1 planner + 1 worker（串行） | 意图携带 ATT&CK 阶段（`phase`），**前置未完成不下发**；做过持久化/外传而 cleanup 未完成时**禁止收尾**（`prove_goal` / `goal_met` 均被拦）；可接 Caldera（`caldera_operation` 列 ability / 下发 / 回收，未配置时明确报「未配置」） |
 
 ### 子 agent 派生（灰度开关）
 
-CTF 与逆向域的 worker 即领域 lead，可通过 `Agent` 工具把「解一道题」「验证一条假设」派给**独立上下文**的子 agent（CTF：web/pwn/rev/crypto/forensics 五个 solver；逆向：re-analyst）。子 agent 继承父的沙箱视角（容器路径映射、写白名单）与输出目录，产物经共享工具集归口回本意图；中间过程镜像进 activity 流（UI 可见，带 `agentType:` 前缀）。这些角色在 **Agent 管理**页可见为一等 agent（role=specialist）：提示词可编辑（DB 权威，代码默认兜底）、可单独绑定 LLM 配置（如逆向 analyst 走本地模型）。默认关闭，`PRAETOR_SUBAGENTS=ctf,reverse` 按域灰度开启。
+CTF 与逆向域的 worker 即领域 lead，可通过 `Agent` 工具把「解一道题」「验证一条假设」派给**独立上下文**的子 agent（CTF：web/pwn/rev/crypto/forensics 五个 solver；逆向：re-analyst）。子 agent 继承父的沙箱视角（容器路径映射、写白名单）与输出目录，产物经共享工具集归口回本意图；中间过程镜像进 activity 流（UI 可见，带 `agentType:` 前缀）。这些角色在 **Agent 管理**页可见为一等 agent（role=specialist）：提示词可编辑（DB 权威，代码默认兜底）、可单独绑定 LLM 配置（如逆向 analyst 走本地模型）。逆向域的结论经 `re_evidence` 以**证据节点**落探索图（claim/ref 硬校验），任务详情的探索链路图对 evidence 类型有专属渲染。默认关闭，`PRAETOR_SUBAGENTS=ctf,reverse` 按域灰度开启。
 
 ### 每任务沙箱
 
 开启后每任务一个一次性 Docker 容器（`PRAETOR_SANDBOX=required` + 隔离档位）：
 
 - **全量出口隐身**（配置全局出口代理后自动生效）：容器全部出站 TCP 在 IP 层重定向到出口代理（iptables + redsocks）——不依赖环境变量，Go 工具、nmap `-sT` 等不读代理变量的程序同样被覆盖；本地网段（RFC1918）直连以保证内网靶场可达；
-- **任务级出口池（IP 隔离）**：设置页可配多个上游（mihomo 多 listener / gost / 商业隧道均可），按任务稳定分配（hash，同一任务重建容器不换出口，会话不漂移），不同任务出口互相隔离；不配则回落全局出口代理。边界：SYN 扫描（`-sS`/masscan）承载不了（代理只能传 TCP），隐身语义下用 `-sT`；DNS 默认经宿主解析（上游用 mihomo/Clash 时可把容器 DNS 指向其 DNS 监听解决）；
+- **任务级出口池（IP 隔离，可选）**：设置页可配多个上游（mihomo 多 listener / gost / 商业隧道均可），按任务稳定分配（hash，同一任务重建容器不换出口，会话不漂移），不同任务出口互相隔离；不配则回落全局出口代理；
+- **隐身边界（如实说明）**：SYN 扫描（`-sS`/masscan）承载不了——代理只能传 TCP，隐身语义下用 `-sT`，需要真 SYN 扫描走自建 WireGuard 出口；DNS 默认经宿主解析（上游用 mihomo/Clash 时可把容器 DNS 指向其 DNS 监听解决）；
 - Bash 在容器内执行；文件工具（Read/Write/LS/Glob/Grep）跑在宿主进程，内置**容器路径 → 宿主路径**翻译与**写白名单**（只有工作挂载可写，题面挂载只读，未挂载路径一律拒绝）；
 - 边界校验在解析符号链接后用真实路径重比，越界按「路径不存在」处理（fail closed）；
 - 启动时扫描并清理本部署上次遗留的任务容器（按挂载源归属判断，不误删别的部署）。
@@ -150,7 +151,8 @@ cp config.example.json config.json   # 填好 database 连接
 ### 方式四：从源码编译单二进制
 
 ```bash
-# 1) 前端静态导出
+# 1) 前端静态导出（Windows 上 npm script 不认 NEXT_EXPORT=1 前缀语法，
+#    需直接执行：cd web && npm ci && NEXT_EXPORT=1 ./node_modules/.bin/next build）
 cd web && npm ci && npm run build:static && cd ..
 # 2) 拷进内嵌目录
 cp -r web/out server/webui/dist
@@ -324,7 +326,7 @@ server {
 
 - 后端：`go run ./cmd/praetor`（不带 `-tags embedui` 则不内嵌前端）
 - 前端：`cd web && npm run dev`（`/api` 反代到后端，带热更新）
-- 测试：`go test ./...`
+- 测试：`./scripts/gate.sh`（带 DB 全量口径，输出通过/失败/跳过三数；`--db` 要求 DB 用例真跑）。**注意别在 source 过 `.env` 的 shell 里跑 `go test ./server/`**——会真调模型并产生脏容器；`gate.sh` 用 grep 取值就是为了避开这个
 - Mock 预览（无后端）：`cd web && NEXT_PUBLIC_MOCK=1 npm run dev`
 
 ---
