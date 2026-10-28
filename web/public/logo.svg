@@ -1,21 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 230">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0f172a"/>
-      <stop offset="1" stop-color="#1e1b4b"/>
-    </linearGradient>
-    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#fbbf24"/>
-      <stop offset="1" stop-color="#f59e0b"/>
-    </linearGradient>
-    <linearGradient id="pgloss" x1="0" y1="0" x2="0" y2="1">
+    <linearGradient id="au" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#fde68a"/>
-      <stop offset="1" stop-color="#fbbf24"/>
+      <stop offset="0.55" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#d97706"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fbbf24" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#fbbf24" stop-opacity="0"/>
     </linearGradient>
   </defs>
-  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
-  <g fill="none" stroke="url(#shield)" stroke-width="22" stroke-linejoin="round">
-    <path d="M256 88 L392 140 V262 C392 348 336 400 256 428 C176 400 120 348 120 262 V140 Z"/>
-  </g>
-  <path d="M212 176 h74 c34 0 58 22 58 54 c0 32 -24 54 -58 54 h-38 v52 h-36 Z M248 210 v42 h36 c14 0 23 -8 23 -21 c0 -13 -9 -21 -23 -21 Z" fill="url(#pgloss)"/>
+  <!-- 斜体衬线 PRAETOR：轻微后掠 + 金色渐变 + 字距 -->
+  <text x="440" y="128" text-anchor="middle"
+        font-family="Georgia, 'Times New Roman', serif" font-style="italic" font-weight="bold"
+        font-size="118" letter-spacing="14" fill="url(#au)">PRAETOR</text>
+  <!-- 下划金线：中间实、两端渐隐，右端收一个小盾点 -->
+  <rect x="120" y="158" width="560" height="2.5" fill="url(#line)"/>
+  <path d="M694 148 l14 5.5 v10 c0 9 -6.5 13.5 -14 16 c-7.5 -2.5 -14 -7 -14 -16 v-10 Z"
+        fill="none" stroke="#fbbf24" stroke-width="2.6" stroke-linejoin="round"/>
+  <!-- 副标：拉丁箴言（可选说明行） -->
+  <text x="440" y="196" text-anchor="middle"
+        font-family="Georgia, serif" font-style="italic"
+        font-size="21" letter-spacing="5" fill="#94a3b8">Fortis · Fidelis · Vigilans</text>
 </svg>

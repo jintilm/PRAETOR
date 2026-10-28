@@ -95,7 +95,7 @@ export default function LoginPage() {
           <div className="absolute size-60 rounded-full border border-primary-foreground/15" />
           <div className="absolute size-40 rounded-full border border-primary-foreground/20" />
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/logo.svg" alt="PRAETOR" width={160} height={160} className="relative drop-shadow-[0_0_24px_rgba(251,191,36,0.25)]" />
+          <img src="/logo.png" alt="PRAETOR" width={340} height={89} className="relative drop-shadow-[0_0_28px_rgba(251,191,36,0.3)]" />
         </div>
       </div>
 
