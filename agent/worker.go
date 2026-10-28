@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -17,6 +18,8 @@ import (
 	"github.com/jintilm/praetor/internal/norma/harness"
 	"github.com/jintilm/praetor/internal/norma/llm"
 	"github.com/jintilm/praetor/internal/norma/permission"
+	"github.com/jintilm/praetor/internal/norma/subagent"
+	"github.com/jintilm/praetor/internal/norma/tool"
 	actool "github.com/jintilm/praetor/internal/norma/tool"
 	"github.com/jintilm/praetor/internal/norma/transcript"
 )
@@ -82,6 +85,10 @@ type Worker struct {
 	// 两者必须成对：只改提示词，模型会用 /chal/... 调 LS/Read，而文件工具跑在宿主进程里，
 	// 于是报 ENOENT（Windows 上还会把 /chal 当相对路径，错信息里混进宿主 data 目录）。
 	sandboxPath func(string) (string, bool)
+	// subagentRoles 惰性提供本域的子 agent 角色表（nil = 该域不启用派生）。
+	// 由 server 注入：CTF 域返回 lead 可派的 solver 定义；渗透/红队域不注入。
+	// 惰性是因为角色表与任务领域挂钩，而 worker 实例可能在领域判定前创建。
+	subagents func() (map[string]subagent.Definition, int, error)
 	// campaignGate 是红队战役的阶段闸门（nil = 不在战役域）。
 	// 判定在 internal/campaign，server 注入一个"读进度 + 判定"的闭包。
 	campaignGate func(string) error
@@ -161,6 +168,13 @@ func (w *Worker) SetSandboxWorkRoot(dir string) { w.sandboxWorkRoot = strings.Tr
 
 // SetSandboxPath 注入「容器内路径 → 宿主路径」的翻译器（nil = 不在沙箱）。
 func (w *Worker) SetSandboxPath(fn func(string) (string, bool)) { w.sandboxPath = fn }
+
+// SetSubagentRoles 注入本域的子 agent 角色表（nil = 不启用 Agent 派生工具）。
+// 返回 (角色定义表, 最大派生深度, 错误)；构造失败时 execute 降级为不注册 Agent 工具
+// 并打日志 —— 子 agent 是加速器，配置坏了不该让任务起不来。
+func (w *Worker) SetSubagentRoles(fn func() (map[string]subagent.Definition, int, error)) {
+	w.subagents = fn
+}
 
 // SetCampaignGate 注入红队战役的阶段闸门（nil = 不在战役域）。
 func (w *Worker) SetCampaignGate(fn func(string) error) { w.campaignGate = fn }
@@ -444,6 +458,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetFindingVerifier(w.findingVerifier)
 	tsx.SetTaskID(taskID)
+	tsx.SetDefaultIntent(intent.ID) // 图写回归口：子 agent（solver）没传 intent_id 时落到本意图
 	tsx.SetCampaignGate(w.campaignGate) // 红队战役：前置未满足的意图不下发（nil = 非战役域）
 	tsx.SetCleanupGuard(w.cleanupGuard) // 红队战役：欠清理不许收尾
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
@@ -466,6 +481,35 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID, Worker: name})
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
+
+	// CTF 域的子 agent：worker 就是 ctf-lead，可按题型把「解一道题」派给独立的
+	// solver（web/pwn/rev/crypto/forensics）。每个 solver 独立上下文 —— lead 的
+	// 上下文不会堆满所有题的尝试记录；solver 的产物经共享 ToolSet 归口回本意图。
+	// 刻意只在 CTF 接：渗透/红队有 planner/worker 与战役闸门的既有秩序；
+	// 逆向的串行证据链等第二批（见执行文档 P3 设计）。
+	// 权限继承父（ModeBypass）：solver 在沙箱里跑，逐调用审批会卡死无人的后台任务。
+	// 降级语义：角色表构造失败只记日志，任务照常 —— 子 agent 是加速器不是依赖。
+	if w.domain == "ctf" && w.subagents != nil {
+		if rawDefs, maxDepth, err := w.subagents(); err == nil && len(rawDefs) > 0 {
+			defs := make(map[string]subagent.Definition, len(rawDefs))
+			for k, d := range rawDefs {
+				// 权限继承父（ModeBypass）：solver 在沙箱里跑，逐调用审批会卡死无人的后台任务。
+				d.PermissionMode = permission.ModeBypass
+				defs[k] = d
+			}
+			// ParentTools 用组装后的完整工具集：solver 的白名单（Bash/Read/Write/ctf_submit）
+			// 从中过滤；Agent 自身也在 registry 里，但 solver 白名单不含它 —— 不会递归派生。
+			agentTool := subagent.NewTool(subagent.Config{
+				Provider:    w.prov,
+				ParentTools: tool.NewRegistry(tools...),
+				Agents:      defs,
+				MaxDepth:    maxDepth,
+			})
+			tools = append(tools, agentTool)
+		} else if err != nil {
+			log.Printf("[worker] 子 agent 角色表构造失败，本任务不启用派生：%v", err)
+		}
+	}
 
 	// 意图是 worker 的【唯一职责、贯穿整个 run 的不变量】→ 连同启动指令、意图锚定的目标资产
 	// 原始数据一起放进 system prompt：system 每次 run 都重新拼一遍、绝不会被 compaction 压掉，

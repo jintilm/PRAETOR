@@ -88,7 +88,7 @@ func NewTool(cfg Config) tool.CoreTool {
 			if !ok {
 				return tool.Errorf(fmt.Sprintf("Error: unknown agent_type %q", in.AgentType)), nil
 			}
-			text, err := run(ctx, cfg, def, in.AgentType, in.Prompt, tc.WorkingDir)
+			text, err := run(ctx, cfg, def, in.AgentType, in.Prompt, tc)
 			if err != nil {
 				return tool.Errorf("Error: subagent failed: " + err.Error()), nil
 			}
@@ -105,11 +105,17 @@ func Run(ctx context.Context, cfg Config, agentType, prompt, workDir string) (st
 	if !ok {
 		return "", fmt.Errorf("subagent: unknown agent_type %q", agentType)
 	}
-	return run(ctx, cfg, def, agentType, prompt, workDir)
+	return run(ctx, cfg, def, agentType, prompt, &tool.ToolContext{WorkingDir: workDir})
 }
 
 // run executes a subagent to completion and returns its final text.
-func run(ctx context.Context, cfg Config, def Definition, agentType, prompt, workDir string) (string, error) {
+//
+// tc 是父 agent 当次的工具上下文：子 agent 从它继承的不只是工作目录，还有
+// 沙箱视角（SandboxPath/SandboxWriteDeny —— 模型活在容器里，文件工具跑在宿主）、
+// 后台任务管理、大输出落盘目录与 bash 环境变量。不继承这些的子 agent 等于
+// 被扔进了另一个世界：读不到 /chal、写不进 /work、行为与父不一致。
+// 图写回归口（IntentID 归属）由 agent 层的 ToolSet 处理，不经过这里。
+func run(ctx context.Context, cfg Config, def Definition, agentType, prompt string, tc *tool.ToolContext) (string, error) {
 	if cfg.Hooks != nil {
 		if hs, ok := cfg.Hooks.(interface {
 			FireSubagentStart(context.Context, string)
@@ -121,17 +127,26 @@ func run(ctx context.Context, cfg Config, def Definition, agentType, prompt, wor
 	childCtx := context.WithValue(ctx, depthKey, depth(ctx)+1)
 
 	seed := llm.UserText(prompt)
+	if tc == nil {
+		tc = &tool.ToolContext{}
+	}
 	in := harness.QueryInput{
-		Provider:       cfg.Provider,
-		System:         def.Prompt,
-		Messages:       []llm.Message{seed},
-		Tools:          registry,
-		MaxTurns:       def.MaxTurns,
-		WorkingDir:     workDir,
-		AgentID:        agentType,
-		PermissionMode: def.PermissionMode,
-		CanUseTool:     cfg.CanUseTool,
-		Hooks:          cfg.Hooks,
+		Provider:           cfg.Provider,
+		System:             def.Prompt,
+		Messages:           []llm.Message{seed},
+		Tools:              registry,
+		MaxTurns:           def.MaxTurns,
+		WorkingDir:         tc.WorkingDir,
+		AgentID:            agentType,
+		PermissionMode:     def.PermissionMode,
+		CanUseTool:         cfg.CanUseTool,
+		Hooks:              cfg.Hooks,
+		Tasks:              tc.Tasks,
+		ToolOutputDir:      tc.OutputDir,
+		MaxToolOutputChars: tc.MaxOutputChars,
+		BashEnv:            tc.Env,
+		SandboxPath:        tc.SandboxPath,
+		SandboxWriteDeny:   tc.SandboxWriteDeny,
 	}
 	// Persist this run to its own sidechain under the parent session.
 	if cfg.Transcript != nil {

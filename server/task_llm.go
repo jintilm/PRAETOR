@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jintilm/praetor/agent/domain"
+	"github.com/jintilm/praetor/internal/norma/subagent"
 	"iter"
 	"log"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -610,6 +613,20 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 		wk.SetCTFChallengeSource(kit)
 		wk.SetCTFBoard(kit)
 	}
+	// CTF 域的子 agent 灰度开关（PRAETOR_SUBAGENTS，逗号分隔域列表，如 "ctf"；空=关）。
+	// 注入的是**惰性角色表构造器**：worker.execute 时才真正展开 solver 定义 —— 领域判定、
+	// 提示词组装都发生在 execute 期，构造期快照会踩「先建任务、后配题」同一类坑。
+	if s.subagentsEnabledFor(t) {
+		wk.SetSubagentRoles(func() (map[string]subagent.Definition, int, error) {
+			pack := DomainPackFor(t)
+			var host domain.Host
+			defs, err := host.Definitions(pack)
+			if err != nil {
+				return nil, 0, err
+			}
+			return defs, domain.BudgetFor(pack, domain.RoleSpec{}).MaxDepth, nil
+		})
+	}
 	wk.SetFindingRecorder(s.evidenceStore())
 	wk.SetFindingVerifier(NewEvidenceVerifier(s.evidenceStore(), nil))
 	wk.SetCompactionWindowResolver(workerRuntime.CompactionWindow)
@@ -745,4 +762,23 @@ func (s *Server) emitManualTaskLLMSwitch(t *Task, previousID, nextID *int64) db.
 		Mode: "manual", Reason: "用户手动切换任务 LLM", Previous: previous, Next: next,
 	}})
 	return s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "llm_switch", Summary: summary, Detail: summary, Metadata: metadata})
+}
+
+// subagentsEnabledFor 判断某任务是否启用子 agent 派生（PRAETOR_SUBAGENTS 灰度开关）。
+// 值为逗号分隔的域列表（"ctf"、"ctf,reverse"）；"all" 等于全部已注册域；空 = 全关。
+// 灰度理由：子 agent 让 token 成倍、图归口链路是新路径 —— 按域逐步放开，出问题能一把关掉。
+func (s *Server) subagentsEnabledFor(t *Task) bool {
+	raw := strings.TrimSpace(os.Getenv("PRAETOR_SUBAGENTS"))
+	if raw == "" || raw == "0" || strings.EqualFold(raw, "off") {
+		return false
+	}
+	if strings.EqualFold(raw, "all") {
+		return true
+	}
+	for _, k := range strings.Split(raw, ",") {
+		if strings.EqualFold(strings.TrimSpace(k), string(DomainPackFor(t).Key())) {
+			return true
+		}
+	}
+	return false
 }

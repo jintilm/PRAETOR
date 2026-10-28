@@ -77,6 +77,9 @@ type ToolSet struct {
 	// auto-scope hook (insertAssets) is skipped, and add_task_scope/list_untested_assets
 	// are filtered out of the agent's tool list. The scope field stays regardless.
 	coverageDisabled bool
+	// defaultIntent 是本 run 的意图 id：图写回（record_fact/report_finding）在
+	// 模型没传 intent_id 时的归口。见 SetDefaultIntent。
+	defaultIntent int64
 	// ownerNode is the exploration node that writes attach to: assets this run
 	// touches get anchored to it as lineage/provenance (NOT visibility — the asset
 	// graph is global and shared). Worker = its claimed intent; planner = begin root.
@@ -190,6 +193,14 @@ func (t *ToolSet) isCTF() bool     { return t.domain == "ctf" }
 // SetTaskID sets the PG task id on this ToolSet so that report_finding can
 // dual-write to the standalone findings table (which survives task deletion).
 func (t *ToolSet) SetTaskID(id int64) { t.taskID = id }
+
+// SetDefaultIntent 设置图写回（record_fact / report_finding）的默认意图。
+//
+// 为什么需要它：worker 的 ToolSet 是 per-execute 新建的（一次 run 一个实例），
+// 所以「本次 run 的意图」就是天然归口 —— 子 agent（solver 等）通过共享的父
+// ToolSet 闭包写图，模型没传 intent_id 时自动落到这个默认值，图上不会出现
+// 无归属节点，solver 也不需要知道 intent id 是多少。
+func (t *ToolSet) SetDefaultIntent(id int64) { t.defaultIntent = id }
 
 // SetCoverageEnabled records whether this task has the asset-coverage feature on
 // (default enabled). Passing false makes graphOverviewData omit the coverage block
@@ -1325,7 +1336,11 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if err != nil {
 			return actool.Errorf(err.Error()), nil
 		}
-		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs)}
+		intent := pid(a.IntentID)
+		if intent <= 0 {
+			intent = t.defaultIntent // 子 agent 没传 intent_id 时归口到本 run 的意图
+		}
+		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: intent, VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs)}
 		var recorded *db.RecordedFinding
 		if t.findingRecorder != nil {
 			recorded, err = t.findingRecorder.Record(ctx, input, refs)
@@ -1403,6 +1418,9 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 	intent := pid(it.IntentID)
 	if intent <= 0 {
 		intent = defaultIntent
+	}
+	if intent <= 0 {
+		intent = t.defaultIntent
 	}
 	if intent > 0 {
 		node, err := t.ts.GetNode(intent)
