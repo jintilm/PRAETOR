@@ -458,7 +458,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetFindingVerifier(w.findingVerifier)
 	tsx.SetTaskID(taskID)
-	tsx.SetDefaultIntent(intent.ID) // 图写回归口：子 agent（solver）没传 intent_id 时落到本意图
+	tsx.SetDefaultIntent(intent.ID)     // 图写回归口：子 agent（solver）没传 intent_id 时落到本意图
 	tsx.SetCampaignGate(w.campaignGate) // 红队战役：前置未满足的意图不下发（nil = 非战役域）
 	tsx.SetCleanupGuard(w.cleanupGuard) // 红队战役：欠清理不许收尾
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
@@ -479,17 +479,29 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// Worker 名一并带进去：竞速拓扑下两路要跑不同模型（server/llm_lane.go），
 	// 而 runinfo 是唯一能跨到 LLM 解析层的每-run 身份。
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID, Worker: name})
+	// emitWrap 先于 Agent 工具注册定义：子 agent 的 activity tap 也要走同一归口
+	// （NodeID = 本意图，Worker = 本 worker 名），不然子代理动作在图上无归属。
+	intentID := intent.ID
+	emitWrap := func(r db.Activity) {
+		if emit != nil {
+			r.NodeID, r.Worker = &intentID, name
+			emit(r)
+		}
+	}
 	tools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
 
-	// CTF 域的子 agent：worker 就是 ctf-lead，可按题型把「解一道题」派给独立的
-	// solver（web/pwn/rev/crypto/forensics）。每个 solver 独立上下文 —— lead 的
-	// 上下文不会堆满所有题的尝试记录；solver 的产物经共享 ToolSet 归口回本意图。
-	// 刻意只在 CTF 接：渗透/红队有 planner/worker 与战役闸门的既有秩序；
-	// 逆向的串行证据链等第二批（见执行文档 P3 设计）。
+	// 子 agent 派生（CTF 第一批、逆向第二批，渗透/红队刻意不接 —— planner/worker
+	// 与战役闸门是既有秩序，再叠一层是重复建设）。worker 就是域 lead：
+	//   - CTF：lead 按题型把「解一道题」派给 solver-*（web/pwn/rev/crypto/forensics）；
+	//   - 逆向：re-lead 把「验证一条假设」派给 re-analyst，串行（证据链纪律），见 reversePack.Budget。
+	// 每个 solver 独立上下文 —— lead 的上下文不会堆满所有尝试记录；产物经共享
+	// ToolSet 归口回本意图（SetDefaultIntent）。
+	// 域开关在 server 侧（subagentsEnabledFor / PRAETOR_SUBAGENTS 灰度），
+	// 这里只看角色表有没有注入 —— 判定权集中一处，避免两边各写一套域列表。
 	// 权限继承父（ModeBypass）：solver 在沙箱里跑，逐调用审批会卡死无人的后台任务。
 	// 降级语义：角色表构造失败只记日志，任务照常 —— 子 agent 是加速器不是依赖。
-	if w.domain == "ctf" && w.subagents != nil {
+	if w.subagents != nil {
 		if rawDefs, maxDepth, err := w.subagents(); err == nil && len(rawDefs) > 0 {
 			defs := make(map[string]subagent.Definition, len(rawDefs))
 			for k, d := range rawDefs {
@@ -497,13 +509,16 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 				d.PermissionMode = permission.ModeBypass
 				defs[k] = d
 			}
-			// ParentTools 用组装后的完整工具集：solver 的白名单（Bash/Read/Write/ctf_submit）
+			// ParentTools 用组装后的完整工具集：solver 的白名单（如 Bash/Read/Write/ctf_submit）
 			// 从中过滤；Agent 自身也在 registry 里，但 solver 白名单不含它 —— 不会递归派生。
 			agentTool := subagent.NewTool(subagent.Config{
 				Provider:    w.prov,
 				ParentTools: tool.NewRegistry(tools...),
 				Agents:      defs,
 				MaxDepth:    maxDepth,
+				// 子 agent 的中间过程镜像进 activity：不接的话 solver 在 UI 上是黑盒
+				//（task 35 真机验证确认的缺口）。见 subagentActivityTap。
+				OnEvent: subagentActivityTap(emitWrap),
 			})
 			tools = append(tools, agentTool)
 		} else if err != nil {
@@ -618,13 +633,6 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	if w.tx != nil { // persist raw LLM conversation; one file per worked intent
 		opts.Transcript = w.tx
 		opts.SessionID = WorkerSessionID(ts.ID(), intent.ID)
-	}
-	intentID := intent.ID
-	emitWrap := func(r db.Activity) {
-		if emit != nil {
-			r.NodeID, r.Worker = &intentID, name
-			emit(r)
-		}
 	}
 	// 意图 / 启动指令 / 意图锚定资产已随 system prompt 下发（见上方 sysBody 组装）。
 	// 这条启动 user 消息只承载【全局态势 overview】——可降级的了解大局信息，压掉无碍。

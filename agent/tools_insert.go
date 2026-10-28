@@ -672,8 +672,13 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 func (t *ToolSet) domainTools() []actool.CoreTool {
 	switch {
 	case t.isReverse():
+		// re_triage / re_recipe 不依赖 store（纯读文件系统 / 外部 CLI），
+		// 必须在这里给 worker：DB tools 表没有它们的行（领域工具刻意不播种），
+		// ToolResolve 的「按行注入」路径够不着 —— 只能靠 per-execute 的 base
+		// 携带。曾经只挂了 re_evidence，导致逆向 worker 运行时缺 triage/配方
+		// 两个工具（症状：模型只能用 Bash 硬扛，re_* 形同虚设）。
 		// re_evidence：逆向域唯一结论出口（证据节点 + 领域判定器）
-		return []actool.CoreTool{t.reEvidence()}
+		return []actool.CoreTool{t.reTriage(), t.reRecipe(), t.reEvidence()}
 	case t.isCTF():
 		// CTF 域的工具面是这三个（设计约束：≤3，加之前先问"能不能塞进沙箱"）：
 		//   ctf_challenge 拉题面/附件（落盘，只回路径）

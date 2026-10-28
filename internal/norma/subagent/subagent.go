@@ -38,6 +38,13 @@ type Config struct {
 	// file under the parent session (whose id is read from the context). Subagent
 	// tokens are recorded there, separate from the parent's totals.
 	Transcript *transcript.Store
+	// OnEvent, when non-nil, receives every harness event of each subagent run
+	// (same stream the parent loop consumes, minus errors), prefixed with the
+	// running agent type. The agent layer uses it to mirror the subagent's tool
+	// calls into the activity feed — without it a spawned solver is a black box:
+	// the UI shows the parent's Agent call hanging while the subagent does
+	// dozens of invisible tool calls inside.
+	OnEvent func(agentType string, ev harness.Event)
 }
 
 type ctxKey int
@@ -163,6 +170,9 @@ func run(ctx context.Context, cfg Config, def Definition, agentType, prompt stri
 	for ev, err := range harness.Query(childCtx, in, harness.QueryDeps{}) {
 		if err != nil {
 			return "", err
+		}
+		if cfg.OnEvent != nil {
+			cfg.OnEvent(agentType, ev)
 		}
 		if ev.Kind == harness.KindResult && ev.Terminal != nil {
 			final = ev.Terminal.Text
