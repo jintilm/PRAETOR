@@ -42,6 +42,7 @@ import type { LLMProfile, Task } from "@/lib/types";
 import { AssetsTab } from "./_tabs/assets-tab";
 import { BroadcastTab } from "./_tabs/broadcast-tab";
 import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
+import { CtfTab } from "./_tabs/ctf-tab";
 import { FindingsTab } from "./_tabs/findings-tab";
 import { GraphTab } from "./_tabs/graph-tab";
 import { InterceptTab } from "./_tabs/intercept-tab";
@@ -61,6 +62,8 @@ const TABS = [
   { value: "coverage", label: "资产覆盖图" },
   { value: "intercept", label: "拦截审批" },
   { value: "report", label: "报告" },
+  // CTF 面板只对 domain=ctf 的任务显示（渲染时按 task.domain 过滤）。
+  { value: "ctf", label: "CTF", domainOnly: "ctf" as string | undefined },
 ];
 
 function taskProfileIDs(task: Task): string[] {
@@ -401,7 +404,7 @@ function TaskDetailInner() {
         {/* Tabs */}
         <div className="no-scrollbar min-w-0 overflow-x-auto">
           <TabsList variant="default" className="min-w-max">
-            {TABS.map((t) => (
+            {TABS.filter((t) => !t.domainOnly || t.domainOnly === task?.domain).map((t) => (
               <TabsTrigger key={t.value} value={t.value}>
                 {t.label}
                 {t.value === "intercept" && interceptPendingCount > 0 && (
@@ -419,6 +422,9 @@ function TaskDetailInner() {
       <div className="flex-1 p-4 lg:p-6">
         <TabsContent value="sessions" className="mt-0">
           <SessionsTab taskId={id} />
+        </TabsContent>
+        <TabsContent value="ctf" className="mt-0">
+          <CtfTab taskId={id} />
         </TabsContent>
         <TabsContent value="overview" className="mt-0">
           <OverviewTab taskId={id} />

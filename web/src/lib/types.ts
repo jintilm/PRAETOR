@@ -2,11 +2,15 @@
 // Derived from the functional spec (section 7: 关键数据形状).
 
 export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | "failed" | "timeout";
+// 任务领域：决定调度器拓扑与预算（pentest=探索并发;ctf=竞速;reverse=证据串行;redteam=战役 DAG）。
+// 省略/缺省 = pentest（与后端 createTaskReq.Domain 的默认一致）。
+export type TaskDomain = "pentest" | "ctf" | "reverse" | "redteam";
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {
   id: string;
   name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述
+  domain?: TaskDomain; // 任务领域;缺省=pentest
   category_id?: number;
   category_name?: string;
   pinned?: boolean;
@@ -404,7 +408,7 @@ export interface Company {
 }
 
 // ---- Exploration graph (per task) ----
-export type ExploreKind = "task" | "begin" | "goal" | "intent" | "fact" | "finding" | "hint" | "digest";
+export type ExploreKind = "task" | "begin" | "goal" | "intent" | "fact" | "finding" | "evidence" | "hint" | "digest";
 export type GoalState = "open" | "met" | "abandoned";
 export type IntentState = "open" | "running" | "paused" | "done" | "blocked" | "exhausted" | "stopped";
 export type FindingState = "confirmed" | "dismissed";

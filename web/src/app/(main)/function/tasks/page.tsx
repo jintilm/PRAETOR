@@ -133,6 +133,7 @@ import type {
   TaskArchiveState,
   TaskCategory,
   TaskStatus,
+  TaskDomain,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -162,6 +163,13 @@ function appendUploads(desc: string, atts: ChatAttachment[]): string {
 // POLL_MS is the task-list refresh interval. Task state moves on the server (planner /
 // worker), so the list has to be pulled; 10s is plenty for status / 进度 / token 变化.
 const POLL_MS = 10_000;
+const TASK_DOMAIN_LABELS: Record<string, string> = {
+  pentest: "渗透",
+  ctf: "CTF",
+  reverse: "逆向",
+  redteam: "红队",
+};
+
 const MAX_SOURCE_TASKS = 8;
 
 // fmtTokens renders a compact token count (1234 → 1.2k, 2_000_000 → 2M).
@@ -1373,6 +1381,14 @@ function TaskNameEditor({ task, onRename }: { task: Task; onRename: (task: Task,
       >
         {task.name?.trim() ? task.name : <span className="text-muted-foreground">未命名</span>}
       </Link>
+      {task.domain && task.domain !== "pentest" && (
+        <span
+          className="shrink-0 rounded-sm border px-1 py-px text-[10px] leading-4 text-muted-foreground"
+          title={`领域 ${task.domain}（决定调度拓扑与预算）`}
+        >
+          {TASK_DOMAIN_LABELS[task.domain] ?? task.domain}
+        </span>
+      )}
       <Button
         type="button"
         variant="ghost"
@@ -3086,6 +3102,9 @@ function CreateTaskSheet({
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 创建时下发种子意图,worker 免等首轮 planner 直接开跑;默认关闭,走标准先规划再执行
+  // 任务领域：决定调度器拓扑与预算。ctf=竞速;reverse=证据串行(1/1);redteam=战役 DAG(阶段闸门+cleanup 强制)。
+  // 默认 pentest;选非 pentest 时建议同时勾「直接下发首个意图」(CTF 一 work 可解,省一轮 planner)。
+  const [taskDomain, setTaskDomain] = React.useState<TaskDomain>("pentest");
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
   const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
@@ -3145,6 +3164,7 @@ function CreateTaskSheet({
       await api.createTask({
         name: name.trim(),
         categoryId: categoryID,
+        domain: taskDomain,
         description: description.trim(),
         goal: goal.trim(),
         llmProfileIds: llmProfileIDs.map(Number),
@@ -3170,6 +3190,7 @@ function CreateTaskSheet({
       setTimeoutMin("");
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
+      setTaskDomain("pentest");
       setCoverageEnabled(true);
       setInterceptRules([]);
       setUploadCount(0);
@@ -3309,6 +3330,24 @@ function CreateTaskSheet({
               <FieldDescription>
                 创建任务时会将所选企业当前已有资产加入“测试资产”，并将域名、IP、CIDR、ICP 和企业关键词提供给 Agent
                 作为范围上下文；不会自动生成意图或强制改变执行目标。
+              </FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="task-domain">任务领域</FieldLabel>
+              <Select value={taskDomain} onValueChange={(v) => setTaskDomain(v as TaskDomain)}>
+                <SelectTrigger id="task-domain" className="w-64">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="pentest">渗透测试（探索并发）</SelectItem>
+                  <SelectItem value="ctf">CTF 靶场（多题竞速）</SelectItem>
+                  <SelectItem value="reverse">逆向分析（证据串行）</SelectItem>
+                  <SelectItem value="redteam">红队战役（ATT&amp;CK 阶段闸门）</SelectItem>
+                </SelectContent>
+              </Select>
+              <FieldDescription>
+                决定调度拓扑与预算：CTF 按分值/难度竞速分派；逆向按「一条假设验证完再下一条」串行推进并要求证据链；
+                红队按 ATT&amp;CK 阶段闸门下发、收尾强制 cleanup。红队战役意图需带阶段（phase），前置未完成不下发。
               </FieldDescription>
             </Field>
             <Field>

@@ -92,6 +92,7 @@ import type {
   TaskAssetScopeMutation,
   TaskCategory,
   TaskConstraint,
+  TaskDomain,
   TaskGoal,
   TaskLLMResolutions,
   TaskNode,
@@ -111,6 +112,7 @@ import type {
   WorkspaceFile,
   WorkspaceListing,
 } from "@/lib/types";
+export type { PersonaAudit } from "@/lib/types";
 
 function getToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -256,6 +258,7 @@ export const api = {
   createTask: (input: {
     name?: string;
     categoryId?: number;
+    domain?: TaskDomain; // 任务领域;省略=pentest
     description: string;
     goal: string;
     llmProfileIds?: number[];
@@ -270,6 +273,7 @@ export const api = {
     post<Task>("/tasks", {
       name: input.name ?? "",
       category_id: input.categoryId ?? null,
+      domain: input.domain ?? "pentest",
       description: input.description,
       goal: input.goal,
       llm_profile_ids: input.llmProfileIds ?? [],
@@ -281,6 +285,34 @@ export const api = {
       coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
     }),
+  // ---- CTF（域=ctf 的任务）：判分/题面配置、竞速看板、提交记录 ----
+  taskCTFConfig: (id: string) =>
+    get<{ task_id: string; domain: string; challenge_dir?: string; expected_flag?: string; challenge_ready: boolean; submitter_ready: boolean }>(
+      `/tasks/${id}/ctf`,
+    ),
+  saveTaskCTFConfig: (id: string, input: { challengeDir?: string; expectedFlag?: string }) =>
+    put<{ challenge_dir?: string; expected_flag?: string; challenge_ready: boolean; submitter_ready: boolean }>(`/tasks/${id}/ctf`, {
+      challenge_dir: input.challengeDir?.trim() || "",
+      expected_flag: input.expectedFlag?.trim() || "",
+    }),
+  ctfBoard: (id: string) =>
+    get<{
+      strategy: string;
+      recommend?: string;
+      note?: string;
+      slice_tokens?: number;
+      token_left?: number;
+      exhausted?: boolean;
+      todo?: { id: string; name?: string; category?: string; points: number; state: string; action: string; est_tokens: number; spent_tokens: number; reason?: string }[];
+      give_up?: { id: string; name?: string; points: number; reason?: string }[];
+      solved?: string[];
+    }>(`/tasks/${id}/ctf/board`),
+  ctfSubmissions: (taskId: string | number) =>
+    get<{
+      task_id: number;
+      solved: boolean;
+      submissions: { flag: string; verdict: string; challenge_id?: string; created_at?: string }[];
+    }>(`/ctf/submissions?task_id=${taskId}`),
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
   updateTask: (id: string, input: { name?: string; pinned?: boolean }) => patch<Task>(`/tasks/${id}`, input),
   renameTask: (id: string, name: string) => patch<Task>(`/tasks/${id}`, { name }),
