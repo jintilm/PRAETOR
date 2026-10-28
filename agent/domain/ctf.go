@@ -73,8 +73,9 @@ func (ctfPack) Prompt() []string {
 func (ctfPack) Roles() []RoleSpec {
 	return []RoleSpec{
 		{
-			Key:         "ctf-lead",
+			Key:         "ctf_lead",
 			Kind:        RoleLead,
+			Name:        "CTF 统筹",
 			Description: "读题面与附件，判类型、分配预算、竞速仲裁、决定放弃哪题",
 			PromptSection: "开局先调 ctf_board 拿排序（它按分值/难度/剩余预算算好了该先做哪道），" +
 				"再按 recommend 派活——不要凭题面印象随手挑一道。" +
@@ -90,8 +91,9 @@ func (ctfPack) Roles() []RoleSpec {
 			Budget:   Budget{MaxParallel: 2}, // 延迟竞速：单路先跑，停滞才起第二路
 		},
 		{
-			Key:         "solver-web",
+			Key:         "solver_web",
 			Kind:        RoleSpecialist,
+			Name:        "CTF · Web 解题",
 			Description: "Web 题：注入/SSRF/反序列化/模板/文件上传/JWT",
 			ToolKeys:    []string{"Bash", "Read", "Write", "ctf_submit"},
 			MaxTurns:    30,
@@ -100,8 +102,9 @@ func (ctfPack) Roles() []RoleSpec {
 				"拿到 flag 立刻提交（ctf_submit），不要等「完全确认后再报」——竞速里晚一步就白干。",
 		},
 		{
-			Key:         "solver-pwn",
+			Key:         "solver_pwn",
 			Kind:        RoleSpecialist,
+			Name:        "CTF · Pwn 解题",
 			Description: "Pwn 题：栈/堆利用、格式化字符串、ROP、沙箱逃逸",
 			ToolKeys:    []string{"Bash", "Read", "Write", "Edit", "ctf_submit"},
 			MaxTurns:    40,
@@ -110,8 +113,9 @@ func (ctfPack) Roles() []RoleSpec {
 				"exp 写到文件再跑，保留调试日志作为证据。偏移算错时先用本地实例验证，别直接打远端。",
 		},
 		{
-			Key:         "solver-rev",
+			Key:         "solver_rev",
 			Kind:        RoleSpecialist,
+			Name:        "CTF · 逆向解题",
 			Description: "逆向题：静态反编译 + 动态调试，还原校验逻辑",
 			ToolKeys:    []string{"Bash", "Read", "Write", "ctf_submit"},
 			MaxTurns:    40,
@@ -120,8 +124,9 @@ func (ctfPack) Roles() []RoleSpec {
 				"关键函数要留地址与伪代码片段。若逆向域已启用，可直接复用其配方（disasm/xrefs/decompile）。",
 		},
 		{
-			Key:         "solver-crypto",
+			Key:         "solver_crypto",
 			Kind:        RoleSpecialist,
+			Name:        "CTF · 密码解题",
 			Description: "密码学题：古典密码、RSA/ECC 误用、格、PRNG 预测",
 			ToolKeys:    []string{"Bash", "Write", "ctf_submit"},
 			MaxTurns:    30,
@@ -130,8 +135,9 @@ func (ctfPack) Roles() []RoleSpec {
 				"z3 在线性/位运算约束上比手推快；格问题再上 sage（镜像里按需装）。",
 		},
 		{
-			Key:         "solver-forensics",
+			Key:         "solver_forensics",
 			Kind:        RoleSpecialist,
+			Name:        "CTF · 取证解题",
 			Description: "取证/流量/隐写/misc：pcap、内存镜像、文件格式、编码",
 			ToolKeys:    []string{"Bash", "Read", "Write", "ctf_submit"},
 			MaxTurns:    30,

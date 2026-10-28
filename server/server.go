@@ -241,6 +241,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		seedMCPPresets(m.pg)            // 已配置的外部 MCP 预设（如 hexstrike）：只在缺失时插入
 		WarnEvidenceChainDisarmed(m.pg) // 证据链前置开关（捕获/自动绑定）关掉时告警：静默失效很难查
 		seedPrompts(m.pg)               // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
+		seedDomainAgents(m.pg)          // 领域角色（ctf_lead/solver_*/re_lead/re_analyst）播种成一等 agent：可见/可编辑/可绑模型
 		s.seedOrchestrationTools()      // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
 		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)

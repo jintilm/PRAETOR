@@ -77,7 +77,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 ### 子 agent 派生（灰度开关）
 
-CTF 与逆向域的 worker 即领域 lead，可通过 `Agent` 工具把「解一道题」「验证一条假设」派给**独立上下文**的子 agent（CTF：web/pwn/rev/crypto/forensics 五个 solver；逆向：re-analyst）。子 agent 继承父的沙箱视角（容器路径映射、写白名单）与输出目录，产物经共享工具集归口回本意图；中间过程镜像进 activity 流（UI 可见，带 `agentType:` 前缀）。默认关闭，`PRAETOR_SUBAGENTS=ctf,reverse` 按域灰度开启。
+CTF 与逆向域的 worker 即领域 lead，可通过 `Agent` 工具把「解一道题」「验证一条假设」派给**独立上下文**的子 agent（CTF：web/pwn/rev/crypto/forensics 五个 solver；逆向：re-analyst）。子 agent 继承父的沙箱视角（容器路径映射、写白名单）与输出目录，产物经共享工具集归口回本意图；中间过程镜像进 activity 流（UI 可见，带 `agentType:` 前缀）。这些角色在 **Agent 管理**页可见为一等 agent（role=specialist）：提示词可编辑（DB 权威，代码默认兜底）、可单独绑定 LLM 配置（如逆向 analyst 走本地模型）。默认关闭，`PRAETOR_SUBAGENTS=ctf,reverse` 按域灰度开启。
 
 ### 每任务沙箱
 

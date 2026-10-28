@@ -613,9 +613,11 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 		wk.SetCTFChallengeSource(kit)
 		wk.SetCTFBoard(kit)
 	}
-	// CTF 域的子 agent 灰度开关（PRAETOR_SUBAGENTS，逗号分隔域列表，如 "ctf"；空=关）。
+	// 子 agent 灰度开关（PRAETOR_SUBAGENTS，逗号分隔域列表，如 "ctf,reverse"；空=关）。
 	// 注入的是**惰性角色表构造器**：worker.execute 时才真正展开 solver 定义 —— 领域判定、
 	// 提示词组装都发生在 execute 期，构造期快照会踩「先建任务、后配题」同一类坑。
+	// 展开时叠加 Agent 管理页的运营配置：提示词以 DB 为权威（seedDomainAgents 播种、
+	// 页面可编辑），绑定 llm_profile 的角色用 per-role provider（如逆向 analyst 走本地模型）。
 	if s.subagentsEnabledFor(t) {
 		wk.SetSubagentRoles(func() (map[string]subagent.Definition, int, error) {
 			pack := DomainPackFor(t)
@@ -624,6 +626,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 			if err != nil {
 				return nil, 0, err
 			}
+			s.applyAgentOverrides(defs)
 			return defs, domain.BudgetFor(pack, domain.RoleSpec{}).MaxDepth, nil
 		})
 	}

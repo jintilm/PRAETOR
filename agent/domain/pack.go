@@ -100,8 +100,10 @@ const (
 // RoleSpec 声明一个角色。engine 装配时把它翻译成 subagent.Definition +
 // 工具白名单 + 预算，不需要为每个角色写一份 Go 代码。
 type RoleSpec struct {
-	Key           string       // 角色唯一 key，同时是 Agent 工具的 agent_type
+	Key string // 角色唯一 key，同时是 Agent 工具的 agent_type；
+	// 也是 agents 表的行 key（须满足 ^[a-z][a-z0-9_]*$，用下划线不用连字符）
 	Kind          RoleKind     // lead / specialist
+	Name          string       // 展示名（Agent 管理页）；空 = 不播种进 agents 表
 	Description   string       // 给父 agent 看的一句话（进 Agent 工具提示词）
 	PromptSection string       // 追加到系统提示词的片段
 	ToolKeys      []string     // 允许的工具 key（空 = 继承该域 Tools()）

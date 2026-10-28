@@ -24,6 +24,10 @@ type Definition struct {
 	Tools          []string        // tool names it may use (empty = inherit all)
 	PermissionMode permission.Mode // its permission mode (default: parent's)
 	MaxTurns       int
+	// Provider, when non-nil, overrides Config.Provider for THIS agent only —
+	// per-role model binding (e.g. a local model for reverse analysts while the
+	// lead rides the task's cloud provider). nil = inherit the shared one.
+	Provider llm.Provider
 }
 
 // Config wires the Agent tool.
@@ -133,12 +137,16 @@ func run(ctx context.Context, cfg Config, def Definition, agentType, prompt stri
 	registry := filterTools(cfg.ParentTools, def.Tools)
 	childCtx := context.WithValue(ctx, depthKey, depth(ctx)+1)
 
+	provider := cfg.Provider
+	if def.Provider != nil {
+		provider = def.Provider // 角色级绑定优先（Agent 管理页给该角色单独配的模型）
+	}
 	seed := llm.UserText(prompt)
 	if tc == nil {
 		tc = &tool.ToolContext{}
 	}
 	in := harness.QueryInput{
-		Provider:           cfg.Provider,
+		Provider:           provider,
 		System:             def.Prompt,
 		Messages:           []llm.Message{seed},
 		Tools:              registry,

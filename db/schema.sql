@@ -861,8 +861,22 @@ CREATE TABLE IF NOT EXISTS agents (
     trigger_max_parallel INTEGER NOT NULL DEFAULT 5,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT agents_role_ck CHECK (role IN ('goals','main','planner','worker','assistant'))
+    CONSTRAINT agents_role_ck CHECK (role IN ('goals','main','planner','worker','assistant','specialist'))
 );
+-- agents_role_ck: 旧库没有 'specialist'（领域子 agent 角色：ctf_lead/solver_*/re_lead/re_analyst）—— 重建放开。
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='agents'::regclass
+          AND conname='agents_role_ck'
+          AND pg_get_constraintdef(oid) NOT LIKE '%specialist%'
+    ) THEN
+        ALTER TABLE agents DROP CONSTRAINT agents_role_ck;
+        ALTER TABLE agents ADD CONSTRAINT agents_role_ck
+            CHECK (role IN ('goals','main','planner','worker','assistant','specialist'));
+    END IF;
+END $$;
 -- 加列迁移(已发版,旧库升级补列;新库 CREATE 已含。迁移不带 CHECK:旧库存量安全 + 后端写入白名单兜底)。
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_run_mode     TEXT    NOT NULL DEFAULT 'serial';
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS trigger_merge_mode   TEXT    NOT NULL DEFAULT 'all';

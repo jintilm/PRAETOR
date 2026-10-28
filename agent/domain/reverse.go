@@ -85,8 +85,9 @@ func (reversePack) Prompt() []string {
 func (reversePack) Roles() []RoleSpec {
 	return []RoleSpec{
 		{
-			Key:         "re-lead",
+			Key:         "re_lead",
 			Kind:        RoleLead,
+			Name:        "逆向 · 统筹",
 			Description: "定路线、维护证据链、判定结论置信度",
 			PromptSection: "先 triage 一次拿到全貌，再按「入口 → 关键分支 → 数据流」定 2~3 条待验证假设。" +
 				"每条假设交给 analyst 验证后，必须用 re_evidence 落结论；证据不足就降级为「未确认」，不要含糊表述。" +
@@ -97,8 +98,9 @@ func (reversePack) Roles() []RoleSpec {
 			MaxTurns: 20,
 		},
 		{
-			Key:         "re-analyst",
+			Key:         "re_analyst",
 			Kind:        RoleSpecialist,
+			Name:        "逆向 · 分析",
 			Description: "执行单条分析意图：静态定位（反汇编/交叉引用/字符串）与动态验证（调试/trace）",
 			ToolKeys:    []string{"Read", "Write", "Bash", "re_recipe"},
 			MaxTurns:    30,
