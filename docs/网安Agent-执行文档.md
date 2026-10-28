@@ -1293,7 +1293,7 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
 | 指标 | 初版设计（REA/GhidraMCP 路线） | 新设计 |
 | --- | --- | --- |
 | 进 schema 的工具数 | 全家桶 + 3 个 MCP | **3** |
-| 每轮固定成本增量 | +12K tokens 量级 | **+约 400 tokens** |
+| 每轮固定成本增量 | +12K tokens 量级 | **实测 +约 0.9K tokens**（schema 1589B≈397 + description 2102B≈525；初版只算 schema 报了 400，少了一半） |
 | 角色数 / 常驻提示词份数 | 5 | **2** |
 | MaxTurns 合计 | 190（30+60+50+50+50） | **50** |
 | 并发 | 2 | **1（串行）** |
