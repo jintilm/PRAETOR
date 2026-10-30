@@ -350,7 +350,7 @@ server {
 
 - 后端：`go run ./cmd/praetor`（不带 `-tags embedui` 则不内嵌前端）
 - 前端：`cd web && npm run dev`（`/api` 反代到后端，带热更新）
-- 测试：`./scripts/gate.sh`（带 DB 全量口径，输出通过/失败/跳过三数；`--db` 要求 DB 用例真跑）。**注意别在 source 过 `.env` 的 shell 里跑 `go test ./server/`**——会真调模型并产生脏容器；`gate.sh` 用 grep 取值就是为了避开这个
+- 测试：`./scripts/gate.sh`（带 DB 全量口径，输出通过/失败/跳过三数；`--db` 要求 DB 用例真跑）。**测试源码不随本仓库发布**（`*_test.go` 与 `agent/testdata/` 在 `.gitignore` 里，仅保留在开发者本机），所以克隆后 `go test ./...` 不会有任何用例。**注意别在 source 过 `.env` 的 shell 里跑 `go test ./server/`**——会真调模型并产生脏容器；`gate.sh` 用 grep 取值就是为了避开这个
 - Mock 预览（无后端）：`cd web && NEXT_PUBLIC_MOCK=1 npm run dev`
 
 ---
