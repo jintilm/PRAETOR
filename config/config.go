@@ -148,6 +148,28 @@ func PostgresDSN() (dsn, source string, err error) {
 	return "", "", fmt.Errorf("未找到数据库配置：环境变量 PRAETOR_PG_DSN 未设置，且配置文件 %s 未提供 database（dsn 或 host/user/dbname）。请创建该配置文件或设置环境变量后重试", Path())
 }
 
+// DatabaseName 从 DSN 里取出库名。两种形态都认：postgres:// URL 与 host=… dbname=…
+//
+// 解析不出来时返回 ""（而不是猜一个），调用方的"_test 后缀"检查会因此失败 ——
+// fail closed：认不出就当不安全。这条被 server.NewManager 的联锁依赖，
+// 用来阻止测试二进制连上开发库并改数据。
+func DatabaseName(dsn string) string {
+	dsn = strings.TrimSpace(dsn)
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimPrefix(u.Path, "/")
+	}
+	for _, kv := range strings.Fields(dsn) {
+		if v, ok := strings.CutPrefix(kv, "dbname="); ok {
+			return strings.Trim(v, `'"`)
+		}
+	}
+	return ""
+}
+
 func (d Database) buildDSN() string {
 	host := d.Host
 	if host == "" {

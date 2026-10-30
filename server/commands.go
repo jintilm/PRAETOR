@@ -94,6 +94,40 @@ func (s *Server) pgTokenByModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"models": models})
 }
 
+// pgTokenByAgent returns a task's spend sliced by sub-agent role, plus the failure
+// breakdown by error kind — the two views P1-5 exists to make possible. Both come
+// from the always-on ledger, so no recording toggle is involved.
+//
+// billable_input (input_tokens - cache_read) is included because raw input_tokens
+// ranks roles by context chattiness, not by cost: 84% of the input in this project's
+// window was cache hits. Rows written before P1-5 show up as "(unattributed)".
+func (s *Server) pgTokenByAgent(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("task"))
+	if id == "" {
+		writeErr(w, 400, "missing task")
+		return
+	}
+	pg := s.m.PG()
+	if pg == nil {
+		writeJSON(w, 200, map[string]any{
+			"agents":   []db.AgentTokenStat{},
+			"failures": []db.ErrorKindStat{},
+		})
+		return
+	}
+	agents, err := pg.TokenByAgentType(id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	failures, err := pg.FailuresByKind(id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"agents": agents, "failures": failures})
+}
+
 // pgUsageStats returns global llm_usage aggregates for the dashboard's "new" token
 // view: per-profile totals (all-time) + per-(profile, day) buckets for the daily
 // chart. Sourced from the always-on metering ledger, so it is accurate across

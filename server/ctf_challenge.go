@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -331,4 +332,66 @@ func sanitizePath(s string) string {
 		return "file"
 	}
 	return out
+}
+
+// flagFromChallengeDir 读「题目给定的 flag」，供 offline 判题使用。
+//
+// 为什么要自动读：本地题库的 flag 就写在题面目录里（`flag.txt`）。不自动读的话，
+// 每建一道题都要手工把它录进 settings，而漏录的表现是「ctf_submit 不可用」——
+// 模型只会看到工具报错，任务最终永远无法 done（task 198 就是这样：0 次提交、
+// 0 个 flag，却被 planner 判成 done；判题后端接上之后它会变成 timeout，这才是实话）。
+//
+// 查找顺序（**只读一层**，不递归：附件目录里常有无辜的 "flag{" 文本）：
+//  1. <dir>/flag.txt            单题题库
+//  2. <dir>/<子目录>/flag.txt   多题题库（根目录下按题目 id 分子目录；按名字排序取第一个）
+//
+// 返回 (flag, 来源路径, 是否找到)。空文件、多行文件、超大文件一律按"没找到"处理：
+// 一个空的 flag.txt 会让 offlineJudge 把任何输入都判错，比没有判据更糟。
+func flagFromChallengeDir(dir string) (string, string, bool) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "", "", false
+	}
+	if f, ok := readFlagFile(filepath.Join(dir, "flag.txt")); ok {
+		return f, filepath.Join(dir, "flag.txt"), true
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", "", false
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	// 排序取第一个：目录遍历顺序不稳定，不排序会让"同一份题库每次跑认的 flag 可能不同"。
+	sort.Strings(names)
+	for _, name := range names {
+		p := filepath.Join(dir, name, "flag.txt")
+		if f, ok := readFlagFile(p); ok {
+			return f, p, true
+		}
+	}
+	return "", "", false
+}
+
+const maxFlagFileBytes = 4096
+
+// readFlagFile 读一个 flag 文件；空/多行/过大/读失败都算没有。
+func readFlagFile(p string) (string, bool) {
+	st, err := os.Stat(p)
+	if err != nil || st.IsDir() || st.Size() == 0 || st.Size() > maxFlagFileBytes {
+		return "", false
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "", false
+	}
+	f := strings.TrimSpace(string(b))
+	// 多行内容不是 flag（更可能是说明/附件清单），不猜。
+	if f == "" || strings.ContainsAny(f, "\r\n") {
+		return "", false
+	}
+	return f, true
 }

@@ -6,6 +6,7 @@ package llmrec
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"iter"
 	"log"
 	"strings"
@@ -51,13 +52,44 @@ func WithWorker(ctx context.Context, worker string) context.Context {
 	return context.WithValue(ctx, workerContextKey{}, worker)
 }
 
-// workerFrom returns the explicit lane override, or "" when none is set.
-func workerFrom(ctx context.Context) string {
+// WorkerFrom returns the explicit lane override attached by WithWorker ("" when
+// none). Exported for symmetry with TaskIDFrom/AgentTypeFrom: every writer of a
+// context dimension has a matching reader, which is what makes "did the label
+// actually reach the provider" testable without a database.
+func WorkerFrom(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
 	worker, _ := ctx.Value(workerContextKey{}).(string)
 	return strings.TrimSpace(worker)
+}
+
+type agentTypeContextKey struct{}
+
+// WithAgentType attaches the concrete sub-agent ROLE (solver_pwn / re_analyst / …)
+// to every LLM call made under ctx. The subagent package calls this through
+// Config.TagCtx, so a derived agent's calls carry both labels: worker='worker'
+// (the lane, unchanged) and agent_type='solver_pwn' (the role).
+//
+// Do NOT route this through WithWorker. The two answer different questions and the
+// lane is load-bearing: aggregation (TokenByModel, per-profile cards) and the race
+// topology key off worker, so overwriting it with a role name would silently split
+// the worker lane into a dozen pseudo-lanes and under-count both.
+func WithAgentType(ctx context.Context, agentType string) context.Context {
+	agentType = strings.TrimSpace(agentType)
+	if agentType == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, agentTypeContextKey{}, agentType)
+}
+
+// AgentTypeFrom returns the sub-agent role attached by WithAgentType ("" when none).
+func AgentTypeFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	agentType, _ := ctx.Value(agentTypeContextKey{}).(string)
+	return strings.TrimSpace(agentType)
 }
 
 // Recorder wraps an llm.Provider and records every completion call.
@@ -124,10 +156,12 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 	start := time.Now()
 	session := transcript.SessionIDFrom(ctx)
 	parsedID, worker := parseSession(session)
-	if ov := workerFrom(ctx); ov != "" {
+	if ov := WorkerFrom(ctx); ov != "" {
 		worker = ov
 	}
 	expID := db.ParseExpID(parsedID)
+	// Sub-agent role, orthogonal to the lane above. Empty for top-level runs.
+	agentType := AgentTypeFrom(ctx)
 	taskID := TaskIDFrom(ctx)
 	if taskID == "" {
 		// Backward compatibility for non-task callers. For task calls, the task
@@ -167,7 +201,7 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 				status = "error"
 			}
 			// Lightweight metering row — always written.
-			r.recordUsage(taskID, expID, worker, usage, int(time.Since(start).Milliseconds()), status)
+			r.recordUsage(taskID, expID, worker, agentType, usage, int(time.Since(start).Milliseconds()), status, err)
 			// Heavy trace row — only when body recording is on.
 			if recordBodies {
 				r.record(req, session, taskID, worker, reqBody, capt, start, textBuf.String(), thinkingBuf.String(), usage, stopReason, err)
@@ -224,10 +258,11 @@ func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	start := time.Now()
 	session := transcript.SessionIDFrom(ctx)
 	parsedID, worker := parseSession(session)
-	if ov := workerFrom(ctx); ov != "" {
+	if ov := WorkerFrom(ctx); ov != "" {
 		worker = ov
 	}
 	expID := db.ParseExpID(parsedID)
+	agentType := AgentTypeFrom(ctx)
 	taskID := TaskIDFrom(ctx)
 	if taskID == "" {
 		taskID = parsedID
@@ -245,7 +280,7 @@ func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	if err != nil {
 		status = "error"
 	}
-	r.recordUsage(taskID, expID, worker, usage, int(time.Since(start).Milliseconds()), status)
+	r.recordUsage(taskID, expID, worker, agentType, usage, int(time.Since(start).Milliseconds()), status, err)
 	if recordBodies {
 		r.record(req, session, taskID, worker, reqBody, capt, start, msg.Text(), thinkingText(msg), usage, stopReason, err)
 	}
@@ -264,7 +299,7 @@ func thinkingText(msg llm.Message) string {
 
 // recordUsage appends one lightweight metering row to llm_usage (no bodies). Skips
 // zero-token calls with no model, which carry nothing worth metering.
-func (r *Recorder) recordUsage(taskID string, expID int64, worker string, usage llm.Usage, latencyMs int, status string) {
+func (r *Recorder) recordUsage(taskID string, expID int64, worker, agentType string, usage llm.Usage, latencyMs int, status string, callErr error) {
 	if r.pg == nil {
 		return
 	}
@@ -272,10 +307,15 @@ func (r *Recorder) recordUsage(taskID string, expID int64, worker string, usage 
 		usage.CacheReadTokens == 0 && usage.CacheWriteTokens == 0 {
 		return
 	}
+	kind := ""
+	if status == "error" {
+		kind = ErrorKind(callErr)
+	}
 	err := r.pg.InsertLLMUsage(&db.LLMUsage{
 		TaskID:        taskID,
 		ExplorationID: expID,
 		Worker:        worker,
+		AgentType:     agentType,
 		Model:         r.model,
 		ProfileName:   r.prof,
 		LatencyMs:     latencyMs,
@@ -284,10 +324,91 @@ func (r *Recorder) recordUsage(taskID string, expID int64, worker string, usage 
 		CacheRead:     usage.CacheReadTokens,
 		CacheWrite:    usage.CacheWriteTokens,
 		Status:        status,
+		ErrorKind:     kind,
 	})
 	if err != nil {
 		log.Printf("[llmusage] insert: %v", err)
 	}
+}
+
+// ErrorKind buckets a failed call into a stable, low-cardinality label.
+//
+// Why text matching: the provider layer throws away structure. Every non-200 is
+// formatted by retry.go as "<prefix>: status 429: <body>", provider-level failures
+// as "openai: <message>", and stream aborts carry whatever the transport produced —
+// there is no typed error to switch on. The alternative (plumbing a typed error
+// through harness → agentcore → subagent) is a much bigger change for a metering
+// column, and this classifier is only ever consulted AFTER a call already failed,
+// so a misclassification costs a slightly wrong bucket, never behaviour.
+//
+// Order matters: a 429 body often contains the word "quota" and a 401 can mention
+// "permission", so the more specific signal has to win. Body keywords are checked
+// before the generic 4xx fallback for the same reason.
+func ErrorKind(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "cancelled"
+	}
+	msg := strings.ToLower(err.Error())
+
+	// HTTP status first — it is the most reliable signal when present.
+	switch {
+	case strings.Contains(msg, "status 429"):
+		return "rate_limit"
+	case strings.Contains(msg, "status 402"):
+		return "quota"
+	case strings.Contains(msg, "status 401"), strings.Contains(msg, "status 403"):
+		return "auth"
+	case strings.Contains(msg, "status 500"), strings.Contains(msg, "status 502"),
+		strings.Contains(msg, "status 503"), strings.Contains(msg, "status 504"),
+		strings.Contains(msg, "status 529"):
+		return "server"
+	case strings.Contains(msg, "status 400"), strings.Contains(msg, "status 404"),
+		strings.Contains(msg, "status 422"):
+		return "bad_request"
+	}
+
+	// Then provider messages that never carried a status.
+	switch {
+	case containsAny(msg, "insufficient", "quota", "balance", "billing", "credit"):
+		return "quota"
+	case containsAny(msg, "rate limit", "rate_limit", "ratelimit", "too many requests", "overloaded"):
+		// "overloaded" is 529-style but arrives without a status from some gateways;
+		// it is closer to throttling than to a server fault for our purposes.
+		return "rate_limit"
+	case containsAny(msg, "api key", "apikey", "api_key", "unauthorized", "unauthenticated",
+		"authentication", "invalid key", "key disabled", "permission denied", "forbidden"):
+		return "auth"
+	case containsAny(msg, "connection refused", "connection reset", "no such host",
+		"dial tcp", "i/o timeout", "broken pipe", "eof", "tls handshake", "network is unreachable"):
+		// Network before the generic timeout bucket on purpose: "TLS handshake
+		// timeout" and "dial tcp: i/o timeout" are transport failures (no request
+		// reached the model), and lumping them with "the model took too long"
+		// hides the fact that the endpoint is unreachable.
+		return "network"
+	case containsAny(msg, "deadline exceeded", "timeout", "timed out", "time out"):
+		return "timeout"
+	case containsAny(msg, "internal server error", "bad gateway", "service unavailable",
+		"server error", "upstream"):
+		return "server"
+	case containsAny(msg, "context canceled", "context cancelled", "canceled"):
+		return "cancelled"
+	}
+	return "other"
+}
+
+func containsAny(s string, needles ...string) bool {
+	for _, n := range needles {
+		if strings.Contains(s, n) {
+			return true
+		}
+	}
+	return false
 }
 
 // record persists one LLM call to PostgreSQL before the provider stream returns.

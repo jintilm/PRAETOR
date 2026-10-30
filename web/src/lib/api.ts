@@ -11,6 +11,7 @@ import type {
   Activity,
   Agent,
   AgentDetail,
+  AgentTokenStat,
   AgentTrigger,
   ArchiveBatchItem,
   Asset,
@@ -35,9 +36,12 @@ import type {
   CoverageAssetRefs,
   CoverageGraphData,
   DailyTokenBucket,
+  UsageSummary,
+  CtfBoard,
   DeleteTaskOptions,
   DeleteTaskResult,
   Edge,
+  ErrorKindStat,
   EvidenceBodyPreview,
   ExplorationNodePage,
   ExplorationNodeQuery,
@@ -241,6 +245,11 @@ function interceptPageQuery(page: number, size: number, filter: InterceptApprova
 }
 
 export const api = {
+  // ---- 用量成本（P1-5 前端缺口）：按"全价等价"口径聚合，口径由服务端统一 ----
+  usageSummary: (days = 7) => get<UsageSummary>(`/usage/summary?days=${days}`),
+  // CTF 逐题进度（ctf_progress 的只读出口；任务内的 ctf_board 工具读的是同一张表）
+  ctfProgressBoard: () => get<CtfBoard>("/ctf/board"),
+
   // 后端应用版本号（release 时由 ldflags 注入，默认 "dev"）。
   health: () => get<{ ok: boolean; service: string; version: string }>("/health"),
 
@@ -1123,6 +1132,9 @@ export const api = {
       llm_profile_id?: number | null; // number=绑定；null=解绑(跟随任务/全局)；缺省=不动
       max_turns?: number;
       run_seconds?: number;
+      // 角色级单次派发墙钟；缺省=不动，0=清除（回到域声明值），正数=覆盖
+      max_duration_seconds?: number;
+      upgrade_profile_id?: number;
       web_search?: boolean;
       interactive_shell?: boolean;
       trigger_run_mode?: "serial" | "parallel";
@@ -1359,6 +1371,13 @@ export const api = {
   // per-agent 绑定 / 轮询 / 中断消耗都覆盖）。
   tokensByModel: (task: string) =>
     get<{ models: ModelTokenStat[] }>(`/llm/records/by-model?task=${encodeURIComponent(task)}`),
+  // 按【子 agent 角色】聚合本任务的用量 + 失败原因分布。两个维度是分开的：worker 还是
+  // 泳道（worker/planner/goals），agent_type 才是具体角色（solver_pwn / re_analyst…）。
+  // 排序请看 billable_input（扣掉缓存命中），不要看 input_tokens。
+  tokensByAgent: (task: string) =>
+    get<{ agents: AgentTokenStat[]; failures: ErrorKindStat[] }>(
+      `/llm/records/by-agent?task=${encodeURIComponent(task)}`,
+    ),
 
   // ---- 一键更新 ----
   // 检查以后端为准：下载是后端做的，浏览器能连 GitHub 而服务器连不上的情况很常见

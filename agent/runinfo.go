@@ -24,6 +24,10 @@ type RunInfo struct {
 	// planner / mainagent / chat 为空。竞速拓扑靠它区分"这是第几路"——
 	// 两路用同一个模型时，它们会犯同一个错，换起点也救不回来（见 server/llm_lane.go）。
 	Worker string
+	// Domain 是这次 run 的领域（ctf / reverse / pentest / redteam）；空 = 未知
+	// （chat / mainagent，或测试里没设）。用来裁掉该域用不上的 MCP 工具，
+	// 见 AugmentTools 的 dropDomainNoise。
+	Domain string
 }
 
 // explorationID reads a store's exploration id, tolerating a nil store (planner and

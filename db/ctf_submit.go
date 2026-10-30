@@ -132,3 +132,15 @@ ON CONFLICT (flag_sha256, task_id) DO NOTHING`,
 	}
 	return n > 0, nil
 }
+
+// AcceptedFlagForTask 的 store 转发：agent 层只持有 ExplorationStore，
+// 不该为了查一次判题结果再持一个 *db.DB 句柄。
+//
+// taskID<=0（测试/跨任务读取）时返回 false，调用方按"没有 accepted"处理 ——
+// fail closed 是这里的正确方向：拿不到判题记录就不该让人标目标达成。
+func (s *ExplorationStore) AcceptedFlagForTask(taskID int64) (string, bool, error) {
+	if s == nil || s.db == nil || taskID <= 0 {
+		return "", false, nil
+	}
+	return s.db.AcceptedFlagForTask(taskID)
+}

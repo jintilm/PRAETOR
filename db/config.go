@@ -438,16 +438,27 @@ func (d *DB) SetActiveProfile(id int64) error {
 // ---------- Agents / prompts ----------
 
 type Agent struct {
-	ID               int64  `json:"id"`
-	Key              string `json:"key"`
-	Name             string `json:"name"`
-	Description      string `json:"description"`
-	Role             string `json:"role"`
-	Builtin          bool   `json:"builtin"`
-	Enabled          bool   `json:"enabled"`
-	LLMProfileID     *int64 `json:"llm_profile_id"`    // 绑定的 LLM 配置;nil=跟随任务/会话 pin,再回退全局激活
-	MaxTurns         int    `json:"max_turns"`         // 单次运行最大轮次;0=不限制
-	RunSecs          int    `json:"run_seconds"`       // worker 单次运行墙钟上限(秒);0=不限制
+	ID           int64  `json:"id"`
+	Key          string `json:"key"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	Role         string `json:"role"`
+	Builtin      bool   `json:"builtin"`
+	Enabled      bool   `json:"enabled"`
+	LLMProfileID *int64 `json:"llm_profile_id"` // 绑定的 LLM 配置;nil=跟随任务/会话 pin,再回退全局激活
+	MaxTurns     int    `json:"max_turns"`      // 单次运行最大轮次;0=不限制
+	RunSecs      int    `json:"run_seconds"`    // worker 单次运行墙钟上限(秒);0=不限制
+	// MaxDurationSecs 是**角色级单次派发**的墙钟（秒），nil = 继承 domain.RoleSpec.MaxDuration。
+	//
+	// 为什么不复用 RunSecs：run_seconds 是 NOT NULL DEFAULT 1200，表达不了"未设置"；
+	// 按"大于 0 就覆盖"接上去，每个角色的 MaxDuration 都会被改成 1200 —— 而 worker 自己的
+	// run_seconds 也是 1200，subagent 的派发前检查要求父 run 还剩 1200+120s，于是**所有派发
+	// 一律被拒**，子 agent 静默全废。可空的新列才能表达"这个角色没配过，用域声明值"。
+	MaxDurationSecs *int `json:"max_duration_seconds"`
+	// UpgradeProfileID 是「停滞升级」时要换成的 LLM 配置（P2-7）。
+	// nil = 不升级，沿用平时的绑定/全局。与 LLMProfileID 语义不同：
+	// 一个是"平时用哪个"，一个是"判定停滞之后换哪个更强的"。
+	UpgradeProfileID *int   `json:"upgrade_profile_id"`
 	WebSearch        bool   `json:"web_search"`        // 是否启用网络搜索(受系统全局开关门控)
 	InteractiveShell bool   `json:"interactive_shell"` // 是否启用交互式 shell(持久 PTY 会话工具族)
 	WrapupPrompt     string `json:"wrapup_prompt"`     // 收尾提示词(超时/步数耗尽时的 settlement 提示);空=用代码内置默认
@@ -464,15 +475,25 @@ type Agent struct {
 	TriggerMaxParallel int    `json:"trigger_max_parallel"`
 }
 
-const agentCols = `id,key,name,COALESCE(description,''),role,builtin,enabled,COALESCE(max_turns,0),COALESCE(run_seconds,600),COALESCE(web_search,false),COALESCE(interactive_shell,false),COALESCE(wrapup_prompt,''),COALESCE(wrapup_max_turns,0),COALESCE(task_timeout_wrapup_prompt,''),COALESCE(task_timeout_wrapup_max_turns,0),COALESCE(trigger_run_mode,'serial'),COALESCE(trigger_merge_mode,'all'),COALESCE(trigger_max_parallel,5),llm_profile_id`
+const agentCols = `id,key,name,COALESCE(description,''),role,builtin,enabled,COALESCE(max_turns,0),COALESCE(run_seconds,600),COALESCE(web_search,false),COALESCE(interactive_shell,false),COALESCE(wrapup_prompt,''),COALESCE(wrapup_max_turns,0),COALESCE(task_timeout_wrapup_prompt,''),COALESCE(task_timeout_wrapup_max_turns,0),COALESCE(trigger_run_mode,'serial'),COALESCE(trigger_merge_mode,'all'),COALESCE(trigger_max_parallel,5),max_duration_seconds,upgrade_profile_id,llm_profile_id`
 
 func scanAgent(sc interface{ Scan(...any) error }) (*Agent, error) {
 	var a Agent
-	var prof sql.NullInt64 // llm_profile_id 可空:未绑定时为 NULL
-	err := sc.Scan(&a.ID, &a.Key, &a.Name, &a.Description, &a.Role, &a.Builtin, &a.Enabled, &a.MaxTurns, &a.RunSecs, &a.WebSearch, &a.InteractiveShell, &a.WrapupPrompt, &a.WrapupMaxTurns, &a.TaskTimeoutWrapupPrompt, &a.TaskTimeoutWrapupMaxTurns, &a.TriggerRunMode, &a.TriggerMergeMode, &a.TriggerMaxParallel, &prof)
+	var prof sql.NullInt64   // llm_profile_id 可空:未绑定时为 NULL
+	var maxDur sql.NullInt64 // max_duration_seconds 可空:NULL = 继承 pack 声明
+	var upProf sql.NullInt64 // upgrade_profile_id 可空:NULL = 不做角色级升级
+	err := sc.Scan(&a.ID, &a.Key, &a.Name, &a.Description, &a.Role, &a.Builtin, &a.Enabled, &a.MaxTurns, &a.RunSecs, &a.WebSearch, &a.InteractiveShell, &a.WrapupPrompt, &a.WrapupMaxTurns, &a.TaskTimeoutWrapupPrompt, &a.TaskTimeoutWrapupMaxTurns, &a.TriggerRunMode, &a.TriggerMergeMode, &a.TriggerMaxParallel, &maxDur, &upProf, &prof)
 	if err == nil && prof.Valid {
 		v := prof.Int64
 		a.LLMProfileID = &v
+	}
+	if err == nil && maxDur.Valid {
+		v := int(maxDur.Int64)
+		a.MaxDurationSecs = &v
+	}
+	if err == nil && upProf.Valid {
+		v := int(upProf.Int64)
+		a.UpgradeProfileID = &v
 	}
 	return &a, err
 }
@@ -668,6 +689,29 @@ func (d *DB) SetAgentWrapupMaxTurns(key string, n int) error {
 // (0 = default). Resolved at runtime by resolveTaskTimeoutWrapup / …Turns.
 func (d *DB) SetAgentTaskTimeoutWrapup(key, prompt string, maxTurns int) error {
 	_, err := d.Exec(`UPDATE agents SET task_timeout_wrapup_prompt=$1, task_timeout_wrapup_max_turns=$2 WHERE key=$3`, prompt, maxTurns, key)
+	return err
+}
+
+// SetAgentMaxDuration 设置角色级单次派发墙钟；secs<=0 表示清除（写 NULL = 继承 pack 声明）。
+//
+// 与 SetAgentRunSeconds 的区别：那个管"worker 自己一次 run 跑多久"，这个管"这个角色被
+// 派出去时最多跑多久"。两者语义不同，刻意分成两列。
+// SetAgentUpgradeProfile 设置「停滞升级」目标 profile；id<=0 表示清除（写 NULL）。
+func (d *DB) SetAgentUpgradeProfile(key string, id int) error {
+	var v any
+	if id > 0 {
+		v = id
+	}
+	_, err := d.Exec(`UPDATE agents SET upgrade_profile_id=$1 WHERE key=$2`, v, key)
+	return err
+}
+
+func (d *DB) SetAgentMaxDuration(key string, secs int) error {
+	var v any
+	if secs > 0 {
+		v = secs
+	} // else 保持 nil → SQL NULL
+	_, err := d.Exec(`UPDATE agents SET max_duration_seconds=$1 WHERE key=$2`, v, key)
 	return err
 }
 

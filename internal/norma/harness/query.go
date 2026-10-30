@@ -66,6 +66,22 @@ type QueryInput struct {
 	TodoReminderTurnsSinceWrite      int
 	TodoReminderTurnsBetweenReminder int
 
+	// BudgetNotice, when non-nil, is called at the top of every model call with
+	// the current turn number (1-based; only tool-turns advance it, so it matches
+	// exactly what MaxTurns counts) and the wall-clock elapsed since the loop
+	// started. Both numbers come from the same counters MaxTurns/MaxDuration are
+	// enforced against — a reminder computed from a host-side clock would drift
+	// from the deadline that actually cuts the run. A non-empty return is appended
+	// to the conversation as a plain user message just before the request is built.
+	//
+	// Why a per-turn callback instead of a line in the launch prompt: the number
+	// the model needs ("how much room do I have left") changes every turn, and a
+	// static line is wrong by the second turn. Why not PreToolUse: that channel
+	// *blocks* the call it fires on, which would turn every reminder into a
+	// wasted turn plus a fake tool error. This one costs one short user message.
+	// Not called while settling — the wrap-up prompt owns that phase.
+	BudgetNotice func(turn int, elapsed time.Duration) string
+
 	// BashEnv holds extra "KEY=VALUE" entries injected into Bash subprocess
 	// environments (foreground + background). Empty = inherit unchanged.
 	BashEnv []string
@@ -736,6 +752,30 @@ func (l *loop) maybeInjectTodoReminder() {
 	l.record(msg, llm.Usage{})
 }
 
+// maybeInjectBudgetNotice asks the host whether this turn deserves a budget
+// line and appends it as a plain user message.
+//
+// Deliberately not wrapped in the <system-reminder> envelope: this is an
+// instruction the model is expected to act on ("stop opening new threads, write
+// back what you have"), not ambient context. The wording lives with the host
+// (agent.BudgetNotice) because only the host knows what counts as "done" for
+// this run.
+//
+// Skipped during settlement: at that point the budget is already spent by
+// definition, and the settlement prompt says what to do instead.
+func (l *loop) maybeInjectBudgetNotice() {
+	if l.in.BudgetNotice == nil || l.settling {
+		return
+	}
+	body := l.in.BudgetNotice(l.turnCount, time.Since(l.startTime))
+	if body == "" {
+		return
+	}
+	msg := llm.UserText(body)
+	l.messages = append(l.messages, msg)
+	l.record(msg, llm.Usage{})
+}
+
 // todoReminderTurnCounts scans messages (most-recent first) and returns the
 // number of assistant turns since the last TodoWrite tool_use and since the last
 // todo reminder. The turn that contains the TodoWrite is not itself counted (so
@@ -792,6 +832,7 @@ func (l *loop) requestMessages() []llm.Message {
 
 func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exec *streamExec, stopReason string, err error, consumerStopped, aborted bool) {
 	l.maybeInjectTodoReminder()
+	l.maybeInjectBudgetNotice()
 	msgs := l.requestMessages()
 	if l.in.SystemReminder != "" {
 		msgs = append([]llm.Message{llm.UserText(l.in.SystemReminder)}, msgs...)

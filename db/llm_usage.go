@@ -15,15 +15,26 @@ import (
 type LLMUsage struct {
 	TaskID        string `json:"task_id"`        // task registry id (matches llm_records.task_id)
 	ExplorationID int64  `json:"exploration_id"` // exploration id parsed from the session (0 = unknown/non-task)
-	Worker        string `json:"worker"`         // agent lane: worker / planner / mainagent / goals
-	Model         string `json:"model"`
-	ProfileName   string `json:"profile_name"`
-	LatencyMs     int    `json:"latency_ms"`
-	InputTokens   int    `json:"input_tokens"`
-	OutputTokens  int    `json:"output_tokens"`
-	CacheRead     int    `json:"cache_read"`
-	CacheWrite    int    `json:"cache_write"`
-	Status        string `json:"status"` // ok | error
+	Worker        string `json:"worker"`         // agent lane: worker / planner / mainagent / goals / chat / btw / judge
+	// AgentType is the SUB-AGENT ROLE inside a lane (solver_pwn / re_analyst / …); empty
+	// for a top-level planner/worker run. It is deliberately a separate column from
+	// Worker: Worker is the lane that TokenByModel-style aggregation and the race
+	// topology depend on, so writing "solver_pwn" into it would break both. Every call
+	// carries both — lane says WHERE the spend went, agent_type says WHICH ROLE spent it.
+	AgentType    string `json:"agent_type"`
+	Model        string `json:"model"`
+	ProfileName  string `json:"profile_name"`
+	LatencyMs    int    `json:"latency_ms"`
+	InputTokens  int    `json:"input_tokens"`
+	OutputTokens int    `json:"output_tokens"`
+	CacheRead    int    `json:"cache_read"`
+	CacheWrite   int    `json:"cache_write"`
+	Status       string `json:"status"` // ok | error
+	// ErrorKind buckets a failed call (rate_limit / timeout / auth / quota / server /
+	// bad_request / network / cancelled / other); empty when Status is ok. It exists
+	// because status=error alone cannot answer "was that a retry storm against a dead
+	// key or a throttled provider" — the earlier investigations had to guess from logs.
+	ErrorKind string `json:"error_kind"`
 }
 
 const llmUsageSchema = `
@@ -45,6 +56,12 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 CREATE INDEX IF NOT EXISTS idx_llm_usage_task  ON llm_usage(task_id);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_model ON llm_usage(task_id, model);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_exp   ON llm_usage(exploration_id);
+-- P1-5 columns (idempotent: this whole const re-runs on every boot, and CREATE TABLE
+-- IF NOT EXISTS above is a no-op on an existing table, so the ALTERs are the only
+-- thing that migrates old databases).
+ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS agent_type TEXT;
+ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS error_kind TEXT;
+CREATE INDEX IF NOT EXISTS idx_llm_usage_agent ON llm_usage(task_id, agent_type);
 `
 
 // EnsureLLMUsageTable creates the llm_usage metering table if it does not exist.
@@ -71,10 +88,10 @@ func (d *DB) InsertLLMUsage(u *LLMUsage) error {
 		expID = u.ExplorationID
 	}
 	_, err := d.Exec(`
-INSERT INTO llm_usage(task_id, exploration_id, worker, model, profile_name, latency_ms, input_tokens, output_tokens, cache_read, cache_write, status)
-VALUES (NULLIF($1,''),$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),$6,$7,$8,$9,$10,$11)`,
-		u.TaskID, expID, u.Worker, u.Model, u.ProfileName,
-		u.LatencyMs, u.InputTokens, u.OutputTokens, u.CacheRead, u.CacheWrite, u.Status)
+INSERT INTO llm_usage(task_id, exploration_id, worker, agent_type, model, profile_name, latency_ms, input_tokens, output_tokens, cache_read, cache_write, status, error_kind)
+VALUES (NULLIF($1,''),$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),$7,$8,$9,$10,$11,$12,NULLIF($13,''))`,
+		u.TaskID, expID, u.Worker, u.AgentType, u.Model, u.ProfileName,
+		u.LatencyMs, u.InputTokens, u.OutputTokens, u.CacheRead, u.CacheWrite, u.Status, u.ErrorKind)
 	return err
 }
 
@@ -103,6 +120,99 @@ ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC, model`, taskID)
 			return nil, err
 		}
 		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// AgentTokenStat is one row of the per-role cost view: how much one sub-agent
+// role (agent_type) spent inside a lane (worker).
+//
+// BillableInput is input_tokens minus cache_read. It is the number that actually
+// matters for cost: over this project's window 84% of input_tokens were cache
+// hits, so ranking roles by raw input_tokens overstates the chattiest heavy-context
+// roles by ~4x. Both are reported — raw for continuity with TokenByModel, billable
+// for decisions.
+type AgentTokenStat struct {
+	Worker          string `json:"worker"`
+	AgentType       string `json:"agent_type"`
+	Calls           int    `json:"calls"`
+	Errors          int    `json:"errors"`
+	InputTokens     int    `json:"input_tokens"`
+	BillableInput   int    `json:"billable_input"`
+	OutputTokens    int    `json:"output_tokens"`
+	CacheReadTokens int    `json:"cache_read_tokens"`
+}
+
+// TokenByAgentType aggregates a task's usage by (lane, sub-agent role).
+//
+// An empty agent_type is reported as "(top-level)": the planner and goals lanes can
+// never spawn a sub-agent, and the worker lane's own run is the top-level agent, so
+// "no role" is a fact about those rows rather than a gap. (Rows written before P1-5
+// also land here — subagent derivation is gated off by default, so they are top-level
+// too. A deployment that had it enabled before upgrading would mislabel its old rows
+// until they age out; that is the one case this label cannot distinguish.)
+func (d *DB) TokenByAgentType(taskID string) ([]AgentTokenStat, error) {
+	rows, err := d.Query(`
+SELECT COALESCE(NULLIF(worker,''),'(none)') AS lane,
+       COALESCE(NULLIF(agent_type,''),'(top-level)') AS agent_type,
+       COUNT(*) AS calls,
+       COUNT(*) FILTER (WHERE COALESCE(status,'') = 'error') AS errors,
+       COALESCE(SUM(input_tokens),0),
+       COALESCE(SUM(input_tokens - cache_read),0),
+       COALESCE(SUM(output_tokens),0),
+       COALESCE(SUM(cache_read),0)
+FROM llm_usage
+WHERE COALESCE(task_id,'') = $1
+GROUP BY 1, 2
+ORDER BY COALESCE(SUM(input_tokens - cache_read),0) DESC, 1, 2`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AgentTokenStat{}
+	for rows.Next() {
+		var s AgentTokenStat
+		if err := rows.Scan(&s.Worker, &s.AgentType, &s.Calls, &s.Errors,
+			&s.InputTokens, &s.BillableInput, &s.OutputTokens, &s.CacheReadTokens); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// ErrorKindStat is one row of the failure breakdown: how many calls failed in one
+// bucket, for one lane/role. Answers "is the retry storm a dead key or a throttle".
+type ErrorKindStat struct {
+	Worker    string `json:"worker"`
+	AgentType string `json:"agent_type"`
+	ErrorKind string `json:"error_kind"`
+	Calls     int    `json:"calls"`
+}
+
+// FailuresByKind aggregates failed calls by (lane, role, error_kind) for one task.
+// Rows written before P1-5 have error_kind NULL and land in "(unclassified)".
+func (d *DB) FailuresByKind(taskID string) ([]ErrorKindStat, error) {
+	rows, err := d.Query(`
+SELECT COALESCE(NULLIF(worker,''),'(none)') AS lane,
+       COALESCE(NULLIF(agent_type,''),'(top-level)') AS agent_type,
+       COALESCE(NULLIF(error_kind,''),'(unclassified)') AS error_kind,
+       COUNT(*)
+FROM llm_usage
+WHERE COALESCE(task_id,'') = $1 AND COALESCE(status,'') = 'error'
+GROUP BY 1, 2, 3
+ORDER BY COUNT(*) DESC, 1, 2, 3`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ErrorKindStat{}
+	for rows.Next() {
+		var s ErrorKindStat
+		if err := rows.Scan(&s.Worker, &s.AgentType, &s.ErrorKind, &s.Calls); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
 	}
 	return out, rows.Err()
 }

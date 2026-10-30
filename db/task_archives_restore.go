@@ -324,6 +324,10 @@ func restoreTaskStub(tx *sql.Tx, row map[string]any, taskID, remaining int64) er
  coverage_enabled=archived.coverage_enabled,pinned_at=archived.pinned_at,first_run_at=archived.first_run_at,
  deadline_at=CASE WHEN archived.paused AND $3>0 THEN now()+make_interval(secs=>$3::double precision)
                   ELSE archived.deadline_at END,
+ -- paused_at 必须**重算**而不是照抄归档值:$3>0 时上面的 deadline_at 已经是"恢复时刻+
+ -- 剩余预算",此刻的暂停起点就是恢复时刻本身。照抄 archived.paused_at(可能是几个月前)
+ -- 会让下一次恢复把 deadline 顺延几个月 —— 一个只在恢复后才炸的错,查起来极贵。
+ paused_at=CASE WHEN archived.paused THEN now() ELSE NULL END,
  deleted_at=NULL,archived_at=NULL,completed_at=archived.completed_at,
  created_at=archived.created_at,updated_at=archived.updated_at
 FROM json_populate_record(NULL::tasks,$2::json) archived

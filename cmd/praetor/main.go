@@ -18,6 +18,7 @@ import (
 
 	"github.com/jintilm/praetor/agent"
 	"github.com/jintilm/praetor/config"
+	actool "github.com/jintilm/praetor/internal/norma/tool"
 	"github.com/jintilm/praetor/selfupdate"
 	"github.com/jintilm/praetor/server"
 )
@@ -112,6 +113,9 @@ func run() int {
 		skillDir = abs
 	}
 	log.Printf("[config] skill 目录: %s", skillDir)
+	// 宿主 shell 解析结果：Bash 的每一条命令都走它，而"为什么是 PowerShell"这类
+	// 问题在别人的机器上没法靠猜。启动即打，纯只读探测（一次 LookPath + 若干 stat）。
+	actool.LogHostShell()
 	srv := server.New(ctx, mgr, skillDir, *dataDir, config.BaseDir())
 	httpSrv := &http.Server{
 		Addr:              *addr,

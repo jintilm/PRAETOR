@@ -850,6 +850,31 @@ export interface ModelTokenStat {
   cache_write_tokens: number;
 }
 
+// Per-role token usage for one task (GET /api/llm/records/by-agent). The lane
+// (worker/planner/goals) and the sub-agent role are separate dims: agent_type is
+// "(top-level)" when the lane's own agent made the call (planner/goals always do;
+// so does the worker lane's own run). Prefer billable_input when ranking cost —
+// input_tokens is dominated by cache reads, which bill at ~1/10 the miss price.
+export interface AgentTokenStat {
+  worker: string;
+  agent_type: string;
+  calls: number;
+  errors: number;
+  input_tokens: number;
+  billable_input: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+}
+
+// One bucket of failed calls for a task (same endpoint, `failures`). error_kind is
+// "(unclassified)" for rows written before failure bucketing shipped.
+export interface ErrorKindStat {
+  worker: string;
+  agent_type: string;
+  error_kind: string;
+  calls: number;
+}
+
 export interface Session {
   id: string;
   role: SessionRole;
@@ -1126,6 +1151,12 @@ export interface Agent {
   llm_profile_id?: number | null; // 绑定的 LLM 配置；null/absent = 跟随任务/会话/全局
   max_turns?: number; // 0 = 无限制
   run_seconds?: number; // worker 单次运行墙钟上限(秒)；0 = 无限制
+  // 角色级单次派发墙钟(秒)；null/absent = 继承域声明（domain.RoleSpec.MaxDuration）。
+  // 与 run_seconds 是两件事：run_seconds 管"这个 worker 自己跑多久"，
+  // max_duration_seconds 管"这个角色被派出去时最多跑多久"。
+  max_duration_seconds?: number | null;
+  // 停滞升级（P2-7）目标 profile；null/absent = 不做角色级升级，沿用平时绑定。
+  upgrade_profile_id?: number | null;
   web_search?: boolean; // 是否启用网络搜索(受系统全局开关门控)
   interactive_shell?: boolean; // 是否启用交互式 shell(持久 PTY 会话工具族)
   // P3 触发后处理策略(仅自定义 agent 有意义)
@@ -1667,4 +1698,53 @@ export interface ComponentProbe {
   image: string;
   probed: number;
   results: Record<string, { ok: boolean; detail?: string }>;
+}
+
+// ---- 用量成本汇总（GET /api/usage/summary）----
+// 口径由服务端统一：full_price_equiv = (input - cache_read) + cache_read/10。
+// 为什么不能只看 input_tokens：同一模型在不同供应商上 cache 命中率从 0% 到 98.8% 不等，
+// 按名义 token 比较会把成本算反（见 docs/toolface-trim-2026-10-30.md §5）。
+export interface UsageBucket {
+  key: string;
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read: number;
+  cache_pct: number;
+  full_price_equiv: number;
+}
+
+export interface UsageSummary {
+  days: number;
+  total: UsageBucket;
+  by_agent_type: UsageBucket[];
+  by_worker: UsageBucket[];
+  by_task: UsageBucket[];
+}
+
+// ---- CTF 逐题进度看板（GET /api/ctf/board）----
+// spent_tokens 是"判题通过那一刻"的快照（TaskTokenTotal − base_tokens），不是实时值。
+export interface CtfBoardRow {
+  task_id: string;
+  challenge_id: string;
+  state: string; // solved / active / new
+  reason?: string;
+  spent_tokens: number;
+  updated_at?: string;
+  task_status?: string;
+  task_domain?: string;
+  task_goal?: string;
+  started_at?: string;
+  finished_at?: string;
+}
+
+export interface CtfBoardSummary {
+  challenges: number;
+  solved: number;
+  tokens: number;
+}
+
+export interface CtfBoard {
+  summary: CtfBoardSummary;
+  items: CtfBoardRow[];
 }

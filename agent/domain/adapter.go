@@ -52,6 +52,9 @@ func (h Host) Definitions(p DomainPack) (map[string]subagent.Definition, error) 
 			Tools:          EffectiveTools(p, r),
 			PermissionMode: approvalMode(r.Approval),
 			MaxTurns:       r.MaxTurns,
+			// 单次派发自己的墙钟。0 = 继承父 run 期限（改造前行为）。
+			// 注意别把 Budget.MaxWall 塞这里 —— 那是域级总预算，见 RoleSpec.MaxDuration 注释。
+			MaxDuration: r.MaxDuration,
 		}
 	}
 	return defs, nil

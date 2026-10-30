@@ -641,6 +641,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetWebSearch(s.webSearchFor("worker"))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
 	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
+	pl.SetDomain(t.Domain) // planner 的工具面也按领域裁剪（Linux 域不给 Bash，见 agent/planner.go）
 	pl.SetCampaignGate(s.campaignGate(t))
 	pl.SetCleanupGuard(s.campaignCleanupGuard(t))
 	pl.SetFindingRecorder(s.evidenceStore())
@@ -772,16 +773,24 @@ func (s *Server) emitManualTaskLLMSwitch(t *Task, previousID, nextID *int64) db.
 // 灰度理由：子 agent 让 token 成倍、图归口链路是新路径 —— 按域逐步放开，出问题能一把关掉。
 func (s *Server) subagentsEnabledFor(t *Task) bool {
 	raw := strings.TrimSpace(os.Getenv("PRAETOR_SUBAGENTS"))
+	// 开关的判定结果要能看见：它是"子 agent 到底有没有被接上"的唯一分界，
+	// 而失败表现是**工具面上少一个工具**，从 UI 和日志里都看不出来。
+	// 这条日志只在 WARN 语义下有意义，所以只在启用/未启用时各打一次由调用方决定——
+	// 这里打成 info 级别的一行，量级是每任务一次装配，不吵。
 	if raw == "" || raw == "0" || strings.EqualFold(raw, "off") {
+		log.Printf("[subagent] task %s 未启用派生（PRAETOR_SUBAGENTS=%q）：这是默认值，Agent 工具不会出现在 worker 工具面", t.ID, raw)
 		return false
 	}
 	if strings.EqualFold(raw, "all") {
+		log.Printf("[subagent] task %s 启用派生（PRAETOR_SUBAGENTS=all，域=%s）", t.ID, DomainPackFor(t).Key())
 		return true
 	}
 	for _, k := range strings.Split(raw, ",") {
 		if strings.EqualFold(strings.TrimSpace(k), string(DomainPackFor(t).Key())) {
+			log.Printf("[subagent] task %s 启用派生（PRAETOR_SUBAGENTS=%q 命中域 %s）", t.ID, raw, DomainPackFor(t).Key())
 			return true
 		}
 	}
+	log.Printf("[subagent] task %s 未启用派生（PRAETOR_SUBAGENTS=%q 不含域 %s）", t.ID, raw, DomainPackFor(t).Key())
 	return false
 }

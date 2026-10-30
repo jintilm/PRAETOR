@@ -76,6 +76,14 @@ func (reversePack) Prompt() []string {
 	}
 }
 
+// 子 agent 的单次派发墙钟。约束与取值理由同 ctf.go（必须小于 worker run_seconds
+// 减 30s 收尾余量，否则派发前检查一律拒绝）。逆向域多给 analyst 一点：一条假设的
+// 动态验证（起调试器、跑 trace、读输出）比一道 CTF 题的一个步骤更长。
+const (
+	reLeadWall    = 10 * time.Minute
+	reAnalystWall = 15 * time.Minute
+)
+
 // Roles 从 5 个收敛到 2 个。
 //
 // 砍掉的 malware-analyst / mobile-analyst 不是能力差异，而是**场景差异**（同一个分析者换个目标而已）：
@@ -94,8 +102,9 @@ func (reversePack) Roles() []RoleSpec {
 				"同一假设最多验证两轮，第二轮仍无进展就换假设或收束——不要在同一个点上反复试。",
 			// re_triage 只给 lead：它是「定路线」的一次性动作，analyst 直接读落盘报告即可，
 			// 两边都给会导致同一目标被 triage 两次（一次多余的 LLM 调用 + 一次重复输出）。
-			ToolKeys: []string{"Read", "Bash", "re_triage", "re_evidence"},
-			MaxTurns: 20,
+			ToolKeys:    []string{"Read", "Bash", "re_triage", "re_evidence"},
+			MaxTurns:    20,
+			MaxDuration: reLeadWall,
 		},
 		{
 			Key:         "re_analyst",
@@ -104,6 +113,7 @@ func (reversePack) Roles() []RoleSpec {
 			Description: "执行单条分析意图：静态定位（反汇编/交叉引用/字符串）与动态验证（调试/trace）",
 			ToolKeys:    []string{"Read", "Write", "Bash", "re_recipe"},
 			MaxTurns:    30,
+			MaxDuration: reAnalystWall,
 			PromptSection: "每次只回答一个具体问题（某个函数做什么 / 某个字符串被谁引用 / 某处校验能否绕过）。" +
 				"re_recipe 一次只取一页，需要更多就带 page 续取，不要用超大 limit 一次灌满。" +
 				"配方缺可执行文件时会明确报缺哪个，按提示记录「环境不具备」并换路线，不要自己拼命令绕过去。" +
@@ -243,3 +253,8 @@ func (reversePack) Budget() Budget {
 
 func (reversePack) Scheduler() SchedulerKind { return ScheduleEvidence }
 func (reversePack) Verifier() Verifier       { return reverseVerifier{} }
+
+// WorkerIsLead：逆向的 lead 是 worker。任务是「长时程串行 + 分支递归」，worker 领到的
+// 是「验证一条假设」这类意图，它同时负责定路线、派 analyst、维护证据链 —— 与 CTF 同构，
+// 而不是渗透那种 planner 派意图 / worker 只执行的分工。
+func (reversePack) WorkerIsLead() bool { return true }

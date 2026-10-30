@@ -191,6 +191,12 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 		}
 		return false, err
 	}
+	if wasPaused || engineWasPaused {
+		// 数据库刚在 admission 里把 deadline 按「暂停了多久」顺延了，而进程内的
+		// e.deadline 还是暂停前的旧值（taskDeadline 优先读它）。不清掉的话 coordinator
+		// 会按旧值提前收尾 —— 那正是 task 33 暂停 2h 被判 timeout 的机制。
+		s.engine.deadline.Delete(t.ID)
+	}
 	if lifecycle.Status == "timeout" && status == "running" {
 		// ApplyTaskAdmission reset this timed-out run's persisted clock. Clear the
 		// matching Engine gates before either parking it in FIFO or starting work;

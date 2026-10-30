@@ -23,6 +23,24 @@ const (
 	deadlineMaxSleep     = 30 * time.Second // 单次最长睡眠(便于周期复查终态)
 )
 
+// FinalRoundBudget 是「终局判定」这一轮 planner 的硬上限。
+//
+// 实测依据见 runFinalPlannerRound 的注释：task 198 在预算硬闸触发后，这一轮没有上限，
+// 33 分钟里每分钟 15~19 次 planner 调用，把 3M 的任务烧到 18.4M。
+//
+// 刻意是 var 而不是 const：这条链路曾经"接了但没生效"，唯一的确定性验证方式是
+// 把它压到几百毫秒、用一个会卡住的调用跑一遍（见 engine_final_round_test.go）。
+// 压到 3 分钟的常量没法在测试里等。
+var FinalRoundBudget = 3 * time.Minute
+
+// finalPlannerCall 是终局判定调用 planner 的入口，抽成变量只为可测：
+// 测试能在不构造完整 Planner + provider 的前提下，验证「交给 planner 的 ctx 真的带预算」。
+// 生产路径永远走 p.Plan，行为不变。
+var finalPlannerCall = func(ctx context.Context, p *agent.Planner, taskID int64, as *db.AssetStore,
+	ts *db.ExplorationStore, goal string, triggers []agent.TriggerEvent, emit func(db.Activity)) (bool, string, error) {
+	return p.Plan(ctx, taskID, as, ts, goal, triggers, emit)
+}
+
 // ---------- settling 状态 ----------
 
 func (e *Engine) isSettling(taskID string) bool {
@@ -147,7 +165,10 @@ func (e *Engine) startDeadlineCoordinator(ctx context.Context, t *Task) {
 }
 
 // deadlineCoordinator waits until the task's absolute deadline, then runs the settle
-// sequence. Absolute wall-clock: it keeps counting through pauses.
+// sequence. The deadline is absolute wall-clock, but the clock stops while the task
+// is paused: pauses are refunded at resume time (manager.ApplyTaskAdmission shifts
+// deadline_at by now()-paused_at), so judging here during a pause would settle a
+// task that still has budget left.
 func (e *Engine) deadlineCoordinator(ctx context.Context, t *Task) {
 	for {
 		select {
@@ -157,6 +178,14 @@ func (e *Engine) deadlineCoordinator(ctx context.Context, t *Task) {
 		}
 		if isTerminalStatus(e.m.TaskStatus(t.ID)) {
 			return // already finished (goals met / failed) — nothing to time out
+		}
+		if e.IsPaused(t.ID) {
+			// 暂停期间不判超时:deadline 还没顺延(顺延发生在恢复那一刻),此刻 remaining
+			// 已经到点也不能收尾。每次醒来重新看一遍,恢复后自然回到正常计时。
+			if sleepCtx(ctx, deadlineMaxSleep) {
+				return
+			}
+			continue
 		}
 		dl := e.taskDeadline(t)
 		if dl <= 0 {
@@ -232,6 +261,9 @@ func (e *Engine) settleTaskCause(ctx context.Context, t *Task, cause, defaultSta
 		log.Printf("[settle] task %s 落终态失败: %v", t.ID, err)
 	case won:
 		log.Printf("[settle] task %s 收尾完成,终态=%s（原因：%s）", t.ID, status, cause)
+		// P2-7 dry-run：判「是否该在下一派升级模型」，只记日志不切换。
+		// 放在终态落库之后：判据读的是本任务已经收敛的意图终态与计数。
+		e.reportStallEscalation(t)
 	default:
 		log.Printf("[settle] task %s 收尾时已是终态,保留原状态", t.ID)
 	}
@@ -257,8 +289,17 @@ func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
 		}
 		planner, _ = e.snapshotFor(t)
 	}
-	// 独立 ctx(不挂 execCancel,避免 pause/硬 cancel 打断这最后一轮),带 Final 注入任务超时词。
-	fctx := e.clockCtx(ctx, t, true)
+	// 独立 ctx(不挂 execCancel,避免 pause/硬 cancel 打断这最后一轮),带 Final 注入任务超时词，
+	// 外加**自己的硬上限**。
+	//
+	// 为什么必须限时（2026-10-30 task 198 实测）：预算硬闸在 13:10:56 触发（3.0M），进入收尾后
+	// 这一轮「终局判定」跑了 33 分钟、每分钟 15~19 次 planner 调用、最终总量 18.4M ——
+	// 是阈值的 6 倍。根因有两个：planner 的 max_turns 默认 0（不限），而这一轮的 prompt
+	// 把它当成了又一轮探索（反复 list_facts / node_detail / get_worker_trace）。
+	// 终局判定的语义是「读已有状态、回答是否达成」，3 分钟足够读几十条事实；
+	// 超过它说明模型在继续挖，而不是在判定 —— 那正是收尾最不该发生的事。
+	fctx, cancelFinal := e.finalRoundContext(ctx, t)
+	defer cancelFinal()
 	if !e.beginTaskOperation(t.ID) {
 		return false
 	}
@@ -268,7 +309,7 @@ func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
 		Summary: fmt.Sprintf("任务超时收尾·终局判定(第 %d 轮)", e.nextPlannerRound(t.ID))})
 	tTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	e.BeginLLMCall(t.ID)
-	met, reason, err := planner.Plan(fctx, tTaskID, e.m.assets, t.Store, t.Goal, t.drainTriggers(), emit)
+	met, reason, err := finalPlannerCall(fctx, planner, tTaskID, e.m.assets, t.Store, t.Goal, t.drainTriggers(), emit)
 	e.EndLLMCall(t.ID)
 	if err != nil {
 		log.Printf("[deadline] task %s 终局规划出错: %v", t.ID, err)
@@ -276,4 +317,12 @@ func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
 		log.Printf("[deadline] task %s 终局判定目标达成: %s", t.ID, reason)
 	}
 	return met
+}
+
+// finalRoundContext 给「终局判定」这一轮加硬上限（理由见 FinalRoundBudget / runFinalPlannerRound）。
+//
+// 抽成函数是为了能测：这条链上"忘了加超时"不会报任何错，只会让成本失控 ——
+// task 198 就是这么把 3M 烧成 18.4M 的。测试断言 ctx 必须带 deadline、且保留 Final 标记。
+func (e *Engine) finalRoundContext(ctx context.Context, t *Task) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(e.clockCtx(ctx, t, true), FinalRoundBudget)
 }

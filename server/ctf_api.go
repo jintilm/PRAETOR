@@ -1,6 +1,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/jintilm/praetor/agent/domain"
+	"github.com/jintilm/praetor/db"
 )
 
 // CTF 任务配置与判分查询（P2-4 基准跑分要用）。
@@ -26,6 +29,7 @@ func (s *Server) registerCTFRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/tasks/{id}/ctf", s.getTaskCTFConfig)
 	mux.HandleFunc("GET /api/tasks/{id}/ctf/board", s.getTaskCTFBoard)
 	mux.HandleFunc("GET /api/ctf/submissions", s.listCTFSubmissions)
+	mux.HandleFunc("POST /api/tasks/{id}/ctf/confirm", s.confirmTaskCTFFlag)
 }
 
 // getTaskCTFBoard 返回「先做哪题、什么时候放弃」的当前结论（P2-6）。
@@ -145,5 +149,80 @@ func (s *Server) listCTFSubmissions(w http.ResponseWriter, r *http.Request) {
 		"task_id":     taskID,
 		"solved":      solved,
 		"submissions": subs,
+	})
+}
+
+// confirmTaskCTFFlag 人工确认一个 flag —— 真实比赛的判题通道。
+//
+// 为什么需要：多数比赛只让选手在网页上提交，**不开放 CTFd API token**。没有这条通道时：
+//   - ctf_submit 建不起来 → 永远没有 accepted 记录；
+//   - 按 prove_goal 的确定性验收（docs/batch-198-199 §缺陷二），没有 accepted 就不许标 met；
+//   - 任务只能跑到 timeout，即使人已经眼看着它解出来了。
+//
+// 人工确认写一条 verdict=accepted 的记录，raw_response 里注明来源。这样 done 仍然可信：
+// **有人签字**，不是模型自述。
+//
+// 幂等：同一任务同一 flag 重复确认只留一行（InsertCTFSubmission 的主键裁决），
+// 重复调用返回 inserted=false 而不是报错。
+func (s *Server) confirmTaskCTFFlag(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "任务不存在")
+		return
+	}
+	if t.Domain != string(domain.CTF) {
+		writeErr(w, 400, fmt.Sprintf("任务 %s 的领域是 %q，只有 ctf 任务需要 flag 判题", t.ID, t.Domain))
+		return
+	}
+	var req struct {
+		Flag        string `json:"flag"`
+		ChallengeID string `json:"challenge_id"`
+		Note        string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "bad json: "+err.Error())
+		return
+	}
+	flag := strings.TrimSpace(req.Flag)
+	if flag == "" {
+		writeErr(w, 400, "flag 必填")
+		return
+	}
+	// 上限只为挡住"整段输出粘进来"这种误操作，不做格式校验：不同比赛的 flag 形状差别很大
+	// （flag{...} / CTF{...} / 纯 hex），在入口硬套一个正则会把合法 flag 挡在外面。
+	if len(flag) > 4096 {
+		writeErr(w, 400, "flag 过长（>4096 字节），确认粘错了内容")
+		return
+	}
+	taskID, err := strconv.ParseInt(t.ID, 10, 64)
+	if err != nil || taskID <= 0 {
+		writeErr(w, 500, "任务 id 非法")
+		return
+	}
+	sha := sha256.Sum256([]byte(flag))
+	note := strings.TrimSpace(req.Note)
+	raw := "manual confirm via API"
+	if note != "" {
+		raw += ": " + note
+	}
+	inserted, err := s.m.pg.InsertCTFSubmission(&db.CTFSubmission{
+		FlagSHA:     hex.EncodeToString(sha[:]),
+		TaskID:      taskID,
+		ChallengeID: strings.TrimSpace(req.ChallengeID),
+		Flag:        flag,
+		Verdict:     db.CTFVerdictAccepted,
+		Raw:         raw,
+	})
+	if err != nil {
+		writeErr(w, 500, "写入判题记录失败："+err.Error())
+		return
+	}
+	// 叫醒 planner：它下一轮就能看到 accepted，prove_goal 会通过并正常收官。
+	// 不叫醒的话，确认之后要等到下一次心跳（默认 5 分钟）才生效。
+	if t != nil {
+		t.Notify()
+	}
+	writeJSON(w, 200, map[string]any{
+		"ok": true, "task_id": t.ID, "inserted": inserted, "verdict": db.CTFVerdictAccepted,
 	})
 }

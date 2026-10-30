@@ -102,15 +102,24 @@ const (
 type RoleSpec struct {
 	Key string // 角色唯一 key，同时是 Agent 工具的 agent_type；
 	// 也是 agents 表的行 key（须满足 ^[a-z][a-z0-9_]*$，用下划线不用连字符）
-	Kind          RoleKind     // lead / specialist
-	Name          string       // 展示名（Agent 管理页）；空 = 不播种进 agents 表
-	Description   string       // 给父 agent 看的一句话（进 Agent 工具提示词）
-	PromptSection string       // 追加到系统提示词的片段
-	ToolKeys      []string     // 允许的工具 key（空 = 继承该域 Tools()）
-	Skills        []string     // 允许加载的 SKILL.md 目录
-	MaxTurns      int          // 单次运行最大轮次
-	Approval      ApprovalMode // 审批档位；空 = ApprovalDefault
-	Budget        Budget       // 该角色预算；零值 = 继承域预算
+	Kind          RoleKind // lead / specialist
+	Name          string   // 展示名（Agent 管理页）；空 = 不播种进 agents 表
+	Description   string   // 给父 agent 看的一句话（进 Agent 工具提示词）
+	PromptSection string   // 追加到系统提示词的片段
+	ToolKeys      []string // 允许的工具 key（空 = 继承该域 Tools()）
+	Skills        []string // 允许加载的 SKILL.md 目录
+	MaxTurns      int      // 单次运行最大轮次
+	// MaxDuration 是【单次派发】的墙钟上限（0 = 继承父级的 run 期限）。
+	//
+	// 刻意不复用 Budget.MaxWall：MaxWall 是**整个域/任务的**总预算（ctf 2h、reverse 3h），
+	// 拿它当单个子 agent 的上限，等于每次派发都要求父 agent 还剩 2 小时 —— 派发前检查
+	// 会一律拒绝，子 agent 直接废掉。两个数说的不是一件事。
+	//
+	// 取值纪律：必须小于 worker 的 run_seconds 减 30s 收尾余量，否则同样一律被拒。
+	// 随默认 worker 预算（1200s）一起给的取值见 ctf.go / reverse.go，启动期有告警兜底。
+	MaxDuration time.Duration
+	Approval    ApprovalMode // 审批档位；空 = ApprovalDefault
+	Budget      Budget       // 该角色预算；零值 = 继承域预算
 }
 
 // PolicyAction 对齐 norma/permission 的三态语义。
@@ -216,6 +225,20 @@ type DomainPack interface {
 
 	Scheduler() SchedulerKind
 	Verifier() Verifier
+}
+
+// LeadRunner 是 DomainPack 的【可选】扩展：声明本域的 lead 角色由 worker 承担，
+// 而不是 planner。
+//
+// 为什么需要它：四个域的 lead 落点不同。渗透的 lead 是 planner（它派意图、worker 领取
+// 执行），而 CTF / 逆向的 lead 就是 worker 自己（一题一个 worker，它负责选题、派
+// solver、仲裁）。RolePrompt(pack, leadRole) 只喂给子 agent 的话，真正当 lead 的那个
+// worker 反而读不到「识别题型后分派给对应 solver」这类本域指令 —— task 182 实测
+// 69 次 Bash / 0 次 Agent 就是这么来的。
+//
+// 不实现 = false（渗透/红队按既有秩序，worker 不注入 lead 提示词）。
+type LeadRunner interface {
+	WorkerIsLead() bool
 }
 
 // MCPRef 声明一个 MCP server 的接入方式。engine 装配期据此建 mcp client，

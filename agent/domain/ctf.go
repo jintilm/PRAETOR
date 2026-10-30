@@ -60,6 +60,21 @@ func (ctfPack) Prompt() []string {
 	}
 }
 
+// 子 agent 的单次派发墙钟。**必须小于 worker 的 run_seconds 减 30s 收尾余量**
+// （subagent.dispatchSettleMargin），否则 run() 的派发前检查会一律拒绝 —— 子 agent 不是
+// "跑得慢"，而是永远派不出去。默认 worker run_seconds = 1200s（agents 表列默认），于是：
+//
+//	lead   600s：25 轮规划/派发，够它读榜、派活、仲裁一次
+//	solver 900s：1200 - 900 - 30 = 270s 留给 lead 派活与消费结果
+//
+// 为什么不是计划里写的 20/30/45 分钟：那三个数在 1200s 的父预算下**永远过不了检查**
+// （父 agent 总共只有 20 分钟），上线即等于关掉子 agent。要更长的子任务，先把 worker 的
+// run_seconds 调大（Agent 管理页），再改这两个常量；启动期有告警兜底这对值不匹配。
+const (
+	ctfLeadWall   = 10 * time.Minute
+	ctfSolverWall = 15 * time.Minute
+)
+
 // Roles 保留 6 个（1 lead + 5 类 solver），但**工具全部收敛为 Bash/Read/Write(+Edit)**。
 //
 // 为什么这里不像逆向域那样砍角色：CTF 的 5 类是**能力差异**而不是场景差异 ——
@@ -85,18 +100,30 @@ func (ctfPack) Roles() []RoleSpec {
 				"看板说 exhausted 时就收工，不要挤预算。",
 			// add_intent/add_hint 是真实存在的平台工具：lead 的"分派"就是靠它建意图；
 			// 没有它 lead 只能空谈策略（race 调度器建初始意图，后续换起点仍由 lead 决定）。
-			ToolKeys: []string{"Read", "Bash", "ctf_challenge", "ctf_board", "ctf_submit", "add_intent", "add_hint"},
-			MaxTurns: 25,
-			Approval: ApprovalAuto,
-			Budget:   Budget{MaxParallel: 2}, // 延迟竞速：单路先跑，停滞才起第二路
+			ToolKeys:    []string{"Read", "Bash", "ctf_challenge", "ctf_board", "ctf_submit", "add_intent", "add_hint"},
+			MaxTurns:    25,
+			MaxDuration: ctfLeadWall,
+			Approval:    ApprovalAuto,
+			Budget:      Budget{MaxParallel: 2}, // 延迟竞速：单路先跑，停滞才起第二路
 		},
 		{
 			Key:         "solver_web",
 			Kind:        RoleSpecialist,
 			Name:        "CTF · Web 解题",
 			Description: "Web 题：注入/SSRF/反序列化/模板/文件上传/JWT",
-			ToolKeys:    []string{"Bash", "Read", "Write", "ctf_submit"},
+			ToolKeys: []string{"Bash", "Read", "Write", "ctf_submit",
+				// Web 题的**客户端侧**只能靠浏览器：XSS 要执行 JS 看是否触发、
+				// CSRF 要看表单与 cookie、DOM clobbering 要看渲染后的 DOM。
+				// 只给 Bash 时这类题做不了（curl 拿到的是源码，不是执行后的页面）。
+				//
+				// 只给 6 个，不是全部 25 个：navigate（打开）、evaluate（执行 JS，XSS 验证的核心）、
+				// snapshot（读渲染后的 DOM）、click / fill_form（交互）、network_requests（看请求）。
+				// resize / emulate_media / tabs / file_upload 对 CTF 没有用，白白占 schema。
+				"mcp__browser__browser_navigate", "mcp__browser__browser_evaluate",
+				"mcp__browser__browser_snapshot", "mcp__browser__browser_click",
+				"mcp__browser__browser_fill_form", "mcp__browser__browser_network_requests"},
 			MaxTurns:    30,
+			MaxDuration: ctfSolverWall,
 			Approval:    ApprovalAuto,
 			PromptSection: "先在容器内本地复现，再打远端实例；注意实例有重置次数限制。" +
 				"拿到 flag 立刻提交（ctf_submit），不要等「完全确认后再报」——竞速里晚一步就白干。",
@@ -108,9 +135,20 @@ func (ctfPack) Roles() []RoleSpec {
 			Description: "Pwn 题：栈/堆利用、格式化字符串、ROP、沙箱逃逸",
 			ToolKeys:    []string{"Bash", "Read", "Write", "Edit", "ctf_submit"},
 			MaxTurns:    40,
+			MaxDuration: ctfSolverWall,
 			Approval:    ApprovalAuto,
 			PromptSection: "先 checksec 定性（镜像内有 pwntools/checksec），再用 pwndbg 定位；" +
-				"exp 写到文件再跑，保留调试日志作为证据。偏移算错时先用本地实例验证，别直接打远端。",
+				"exp 写到文件再跑，保留调试日志作为证据。偏移算错时先用本地实例验证，别直接打远端。" +
+				// 下面这段来自 10-30 基准跑：task 194 的 solver 用 12 分钟发了 12 条
+				// `printf ... | nc`，平均 60 秒/条，而其中大半是"同一轮泄漏换个格式再试"，
+				// 完全可以在一个脚本里一次跑完。逐条手打 payload = 每条都付一次模型往返，
+				// 这是盲打题最贵的浪费（也是 Bash 失败率里剩下那 9% 的主要来源：
+				// 手写转义错、管道被截断、输出被 head 截掉）。
+				"**不要逐条手打 payload**：每发一条命令都是一次完整往返（实测 30~90 秒），" +
+				"盲打题（没有二进制附件）尤其吃亏。把「连一次 → 发一批 → 收输出 → 落文件」" +
+				"写进一个 pwntools / socket 脚本，一次跑完一整轮：批量泄漏 `%p`、批量试偏移、" +
+				"批量试写，结果写进文件再用 Read 读，不要在命令行里用 head/awk 截输出。" +
+				"拿到栈布局或崩溃信息后，先写清「还缺什么」，再决定下一轮脚本，而不是边打边改。",
 		},
 		{
 			Key:         "solver_rev",
@@ -119,6 +157,7 @@ func (ctfPack) Roles() []RoleSpec {
 			Description: "逆向题：静态反编译 + 动态调试，还原校验逻辑",
 			ToolKeys:    []string{"Bash", "Read", "Write", "ctf_submit"},
 			MaxTurns:    40,
+			MaxDuration: ctfSolverWall,
 			Approval:    ApprovalAuto,
 			PromptSection: "优先动态验证假设（gdb/rizin），别在反编译结果里空想；" +
 				"关键函数要留地址与伪代码片段。若逆向域已启用，可直接复用其配方（disasm/xrefs/decompile）。",
@@ -130,6 +169,7 @@ func (ctfPack) Roles() []RoleSpec {
 			Description: "密码学题：古典密码、RSA/ECC 误用、格、PRNG 预测",
 			ToolKeys:    []string{"Bash", "Write", "ctf_submit"},
 			MaxTurns:    30,
+			MaxDuration: ctfSolverWall,
 			Approval:    ApprovalAuto,
 			PromptSection: "先判断是「实现错误」还是「数学困难」：前者写脚本，后者先降维试小参数。" +
 				"z3 在线性/位运算约束上比手推快；格问题再上 sage（镜像里按需装）。",
@@ -141,6 +181,7 @@ func (ctfPack) Roles() []RoleSpec {
 			Description: "取证/流量/隐写/misc：pcap、内存镜像、文件格式、编码",
 			ToolKeys:    []string{"Bash", "Read", "Write", "ctf_submit"},
 			MaxTurns:    30,
+			MaxDuration: ctfSolverWall,
 			Approval:    ApprovalAuto,
 			PromptSection: "先 file/binwalk 摸清格式，再决定深挖方向；保留每一步的命令与输出。" +
 				"隐写先试常见顺序（exiftool → binwalk → zsteg → 字符串），别一上来就上重武器。",
@@ -273,3 +314,7 @@ func (ctfPack) Budget() Budget {
 
 func (ctfPack) Scheduler() SchedulerKind { return ScheduleRace }
 func (ctfPack) Verifier() Verifier       { return ctfVerifier{} }
+
+// WorkerIsLead：CTF 的 lead 就是 worker。race 调度器按题建意图，领到意图的 worker
+// 同时负责选题判断、派 solver、仲裁结果 —— planner 在 CTF 域只做初始题目拆分。
+func (ctfPack) WorkerIsLead() bool { return true }

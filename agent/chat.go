@@ -14,7 +14,25 @@ import (
 	"github.com/jintilm/praetor/internal/norma/permission"
 	actool "github.com/jintilm/praetor/internal/norma/tool"
 	"github.com/jintilm/praetor/internal/norma/transcript"
+	"github.com/jintilm/praetor/llmrec"
 )
+
+// chatWorkerLane is the usage-ledger lane for chat-page runs.
+//
+// The lane is normally parsed out of the transcript session id ("exp<N>-<role>"),
+// but chat sessions are named "conv-<id>" — no "exp" prefix — so parseSession
+// returns ("", "") and, without this label, EVERY chat call lands in llm_usage with
+// an empty worker. That is not cosmetic: chat was the single biggest unattributed
+// bucket in the window that motivated P1-5 (141 calls / 17.5% of billable input),
+// and it is the only lane whose spend the config page could not see at all — its
+// rows were indistinguishable from pre-migration ones.
+//
+// Deliberately NOT "mainagent": that lane is already taken by the task-scoped main
+// agent (session "exp<N>-mainagent"), whose calls DO carry a task_id and belong to a
+// task's cost sheet. Chat is the task-independent conversational surface, so folding
+// it in would make "how much did this task's main agent cost" silently include
+// unrelated chat. One lane per surface.
+const chatWorkerLane = "chat"
 
 // ChatAgent is the generic, task-independent conversational runner behind the chat
 // page. It generalizes MainAgent.Chat: any agent (built-in OR a custom one, by
@@ -120,7 +138,12 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	// have no tools-table rows, so they always pass through.
 	base := actool.DefaultTools()
 	ctx = WithRunInfo(ctx, RunInfo{SessionID: sessionID})
-	tools, def, cleanup := AugmentTools(ctx, agentKey, base)
+	// Tag the lane BEFORE any turn runs, so all of this run's calls carry it. Set
+	// here rather than at the call site because the lane is a property of this
+	// runner (task-independent conversation), not of who invoked it: every caller
+	// gets correct attribution for free, including ones added later.
+	ctx = llmrec.WithWorker(ctx, chatWorkerLane)
+	tools, _, def, cleanup := AugmentTools(ctx, agentKey, base)
 	defer cleanup()
 
 	system, boundary := deferredSystem(chatSystem(agentKey, c.workDir, sessionWorkDir), def)

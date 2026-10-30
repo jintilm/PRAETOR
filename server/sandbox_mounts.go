@@ -107,7 +107,20 @@ func guestChallengePath(root, hostPath string) string {
 // taskWorkHost 返回该任务工作目录的宿主路径，与 NewPerTask 同一套解析规则
 // （相对路径要展开，否则 docker 会把它当卷名）。
 func (s *Server) taskWorkHost(t *Task) string {
-	root := envOr("SANDBOX_WORK_ROOT", filepath.Join(s.m.DataDir(), "work"))
+	if s == nil || s.m == nil {
+		return ""
+	}
+	return taskWorkHostFor(t, s.m.DataDir())
+}
+
+// taskWorkHostFor 是 taskWorkHost 的纯函数版：Engine 手上只有 *Manager，没有
+// *Server，但它同样需要这条路径（预建 /work/i<id>）。两处各写一套规则的话，
+// 一旦 SANDBOX_WORK_ROOT 的语义变了，只有真跑容器才会发现对不上。
+func taskWorkHostFor(t *Task, dataDir string) string {
+	if t == nil || t.ID == "" {
+		return ""
+	}
+	root := envOr("SANDBOX_WORK_ROOT", filepath.Join(dataDir, "work"))
 	if abs, err := filepath.Abs(root); err == nil {
 		root = abs
 	}

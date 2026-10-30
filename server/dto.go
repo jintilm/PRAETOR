@@ -533,15 +533,19 @@ func activityDTOs(in []db.Activity) []ActivityDTO {
 // ---- Agent (frontend "Agent") — string id ----
 
 type AgentDTO struct {
-	ID               string `json:"id"`
-	Key              string `json:"key"`
-	Name             string `json:"name"`
-	Description      string `json:"description"`
-	Role             string `json:"role"`
-	Builtin          bool   `json:"builtin"`
-	Enabled          bool   `json:"enabled"`
-	MaxTurns         int    `json:"max_turns"`
-	RunSecs          int    `json:"run_seconds"`
+	ID          string `json:"id"`
+	Key         string `json:"key"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Role        string `json:"role"`
+	Builtin     bool   `json:"builtin"`
+	Enabled     bool   `json:"enabled"`
+	MaxTurns    int    `json:"max_turns"`
+	RunSecs     int    `json:"run_seconds"`
+	// MaxDurationSecs 角色级单次派发墙钟（秒）；nil = 继承 pack 声明。
+	MaxDurationSecs *int `json:"max_duration_seconds"`
+	// UpgradeProfileID 停滞升级目标 profile；nil = 不做角色级升级。
+	UpgradeProfileID *int   `json:"upgrade_profile_id"`
 	WebSearch        bool   `json:"web_search"`
 	InteractiveShell bool   `json:"interactive_shell"`
 	LLMProfileID     *int64 `json:"llm_profile_id"` // 绑定的 LLM 配置;null=跟随任务/全局
@@ -566,6 +570,8 @@ func agentDTO(a *db.Agent) AgentDTO {
 		Enabled:            a.Enabled,
 		MaxTurns:           a.MaxTurns,
 		RunSecs:            a.RunSecs,
+		MaxDurationSecs:    a.MaxDurationSecs,
+		UpgradeProfileID:   a.UpgradeProfileID,
 		WebSearch:          a.WebSearch,
 		InteractiveShell:   a.InteractiveShell,
 		LLMProfileID:       a.LLMProfileID,

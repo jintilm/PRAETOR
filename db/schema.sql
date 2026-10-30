@@ -599,6 +599,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     pinned_at      TIMESTAMPTZ,
     first_run_at   TIMESTAMPTZ,
     deadline_at    TIMESTAMPTZ,
+    -- 用户暂停的开始时刻。仅用于恢复时按「暂停了多久」顺延 deadline_at；
+    -- 恢复即置 NULL（一次暂停只顺延一次）。见 server/manager.go ApplyTaskAdmission。
+    paused_at      TIMESTAMPTZ,
     archived_at    TIMESTAMPTZ,
     deleted_at     TIMESTAMPTZ,
     completed_at   TIMESTAMPTZ,
@@ -633,6 +636,11 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 -- domain: 任务所属领域（pentest/redteam/ctf/reverse）。默认 pentest 保证存量任务语义不变，
 -- 调度器与预算都按它选（server/engine_scheduler.go 的 DomainPackFor）。必须在这里（建表之后）执行。
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS domain TEXT NOT NULL DEFAULT 'pentest';
+-- paused_at: 用户暂停的开始时刻，补旧库。
+-- 存在的唯一理由：暂停期间不该消耗任务的墙钟预算（task 33 暂停 2h 被判 timeout，
+-- 7227s 墙钟里 7006s 是暂停）。恢复时按 now()-paused_at 顺延 deadline_at，
+-- 顺延后立刻置 NULL，保证同一次暂停只顺延一次（见 ApplyTaskAdmission）。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS paused_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_tasks_category ON tasks(category_id, created_at DESC)
     WHERE deleted_at IS NULL AND category_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_pinned ON tasks(pinned_at DESC)
@@ -850,6 +858,13 @@ CREATE TABLE IF NOT EXISTS agents (
     current_prompt_id BIGINT,
     max_turns         INTEGER NOT NULL DEFAULT 0,
     run_seconds       INTEGER NOT NULL DEFAULT 1200,
+    -- 角色级单次派发墙钟（秒）。刻意可空：NULL = 继承 domain.RoleSpec.MaxDuration。
+    -- 不能用 run_seconds 那个 NOT NULL DEFAULT 1200：它表达不了"未设置"，
+    -- 一接上就每个角色都变 1200，反而让子 agent 全部派不出去（见 applyAgentOverrides 注释）。
+    max_duration_seconds INTEGER,
+    -- 停滞升级时要换成的 LLM profile（P2-7 转正的前置）。NULL = 不做角色级升级，
+    -- 沿用当前绑定/全局配置；不与 llm_profile_id 混用：那个是"平时用哪个"，这个是"卡住时换哪个"。
+    upgrade_profile_id INTEGER REFERENCES llm_profiles(id) ON DELETE SET NULL,
     web_search        BOOLEAN NOT NULL DEFAULT false,
     interactive_shell BOOLEAN NOT NULL DEFAULT false,
     wrapup_prompt     TEXT NOT NULL DEFAULT '',
@@ -939,6 +954,9 @@ ALTER TABLE mcp_servers ADD CONSTRAINT mcp_servers_transport_check
     CHECK (transport IN ('stdio','http','sse'));
 -- 旧库补列(schema.sql 每次启动都会 Exec)。
 ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS insecure BOOLEAN NOT NULL DEFAULT false;
+-- 角色级墙钟（可空 = 继承 pack 声明，见 agents 表定义处的注释）。
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS max_duration_seconds INTEGER;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS upgrade_profile_id INTEGER REFERENCES llm_profiles(id) ON DELETE SET NULL;
 DROP TRIGGER IF EXISTS trg_mcp_upd ON mcp_servers;
 CREATE TRIGGER trg_mcp_upd BEFORE UPDATE ON mcp_servers
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

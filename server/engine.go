@@ -291,6 +291,48 @@ func (e *Engine) StopTask(taskID string) {
 	e.deleteMu.Unlock()
 }
 
+// StopAll cancels and waits for every task's long-lived goroutines. It is the
+// process/suite teardown counterpart of StopTask: it does not delete per-task
+// state (a stopped engine is not expected to resume), but it JOINS every
+// goroutine that can still write to disk or the database.
+//
+// Why it must exist (2026-10-29): tests build a Server on context.Background()
+// and only close the Manager. The planner/worker loops kept running after the
+// test returned — still writing transcripts into t.TempDir() while Go removed
+// it, which surfaces on Windows as
+// "TempDir RemoveAll cleanup: ... The directory is not empty", and kept
+// querying the closed *sql.DB ("sql: database is closed" flood).
+func (e *Engine) StopAll(timeout time.Duration) {
+	e.runtimeMu.Lock()
+	rts := make([]*taskRuntime, 0, len(e.runtimes))
+	for _, rt := range e.runtimes {
+		rt.cancel()
+		rts = append(rts, rt)
+	}
+	e.runtimeMu.Unlock()
+
+	// exec contexts can outlive a runtime entry (detached intents), so cancel
+	// them independently of the runtime map.
+	e.execMu.Lock()
+	for _, cancel := range e.execCancel {
+		cancel(agent.AbortShutdown)
+	}
+	e.execMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		for _, rt := range rts {
+			rt.wg.Wait()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		log.Printf("[engine] StopAll 超时（%s）：仍有任务 goroutine 未退出", timeout)
+	}
+}
+
 // cancelExec cancels a task's current per-task exec context (any in-flight
 // planner.Plan / worker.Execute), if present. Shared by Pause and the settle
 // sequence's hard-drain backstop.
@@ -795,10 +837,11 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 		})
 	}
 	e.startDeadlineCoordinator(ctx, t) // 任务级超时定时器(仅 timeout>0;去重)
-	// 预算闸门：目前只对 evidence 调度器启用（见 budget_gate.go 头注里的取舍）。
-	if plan.Kind == domain.ScheduleEvidence || plan.Kind == domain.ScheduleRace {
-		e.startBudgetGate(ctx, t, DomainPackFor(t))
-	}
+	// 预算闸门：所有调度器都启，但只有 evidence/race 是硬闸（见 budget_gate.go 头注）。
+	// explore 先 dry-run 只告警 —— 它声明 3M，而实测单题跑过 3.63M，直接上硬闸
+	// 等于在产基线的路径上装一个可能误杀的闸；先记一周"若当时是硬闸会被杀多少"再决定。
+	hardGate := plan.Kind == domain.ScheduleEvidence || plan.Kind == domain.ScheduleRace
+	e.startBudgetGate(ctx, t, DomainPackFor(t), hardGate)
 	// 仅在「完全没有活动意图(open+running)」时才 kick 首轮规划。带种子意图的任务:种子已
 	// 是 open,或已被上面刚起的 worker 抢先 claim 成 running——两种都算「有活干」,一律跳过
 	// 首轮 planner,worker 直接领种子意图开跑,跑完由 NotifyDone/心跳唤醒 planner。
@@ -818,6 +861,14 @@ func plannerHeartbeatInterval(t *Task) time.Duration {
 	}
 	return time.Duration(sec) * time.Second
 }
+
+// ⚠️ P0-2(a)「观测轮抑制」曾在此处，已撤回 —— 它针对的唤醒源在本代码库不存在。
+// 详见 docs/agent-optimization-plan-2026-10-29.md §3.3。结论：planner 的唤醒源只有
+// 心跳、NotifyDone（=结论）、notifyFinding（=结论）与人类显式操作四类，没有「图变更
+// 顺手唤醒 planner」这条路径（writeTool 不触发 notify，worker 只接了 SetNotifyFinding，
+// planner 工具面干脆没接 notify）。因此一个"无结论触发才抑制"的门控永远不会命中，
+// 只会把 task_assets / resume / LLM 配置变更这些人类显式操作一并压掉 —— 纯风险零收益。
+// 若要重新评估，先跑 `grep -rn "\.Notify()" server/ agent/` 看唤醒源有没有变。
 
 // resetPlannerTimer 安全重臂一个可能已触发的 Timer(标准 Stop→drain→Reset 模式)。
 func resetPlannerTimer(timer *time.Timer, d time.Duration) {
@@ -1027,6 +1078,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// per-work child context so the planner's kill_work can stop just this work.
 	workCtx, workCancel := context.WithCancelCause(ectx)
 	e.registerWork(intent.ID, workCancel)
+	// 容器内工作目录（提示词里的 cwd）先在宿主上建好：/work 是宿主目录的 bind mount，
+	// 宿主建好容器立刻可见。不建的话模型开局每条命令都先撞一次 can't cd。
+	e.prepareIntentWorkDir(t, intent.ID)
 	// wrap the guard hooks so steer_work can inject a mid-run course-correction
 	// for THIS intent (drained before the worker's next tool call).
 	iid := intent.ID

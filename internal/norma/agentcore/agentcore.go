@@ -143,6 +143,14 @@ type Options struct {
 	// this is set. Return "" to include only the date.
 	SystemReminderFunc func() string
 
+	// BudgetNotice, when set, is called at the start of every turn with the
+	// current turn number (1-based, tool-turns only) and the wall-clock elapsed
+	// the loop itself measured. A non-empty return is
+	// appended as a plain user message so the model can see its remaining budget
+	// — see harness.QueryInput.BudgetNotice for why this is a per-turn message
+	// rather than a line in the launch prompt.
+	BudgetNotice func(turn int, elapsed time.Duration) string
+
 	MaxTurns int
 	// MaxDuration bounds wall-clock run time, checked at the turn boundary (never
 	// mid-stream), so a run ends cleanly rather than being aborted in flight (0 = off).
@@ -501,6 +509,7 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 		Temperature:        s.opts.Temperature,
 		MaxTurns:           s.opts.MaxTurns,
 		MaxDuration:        s.opts.MaxDuration,
+		BudgetNotice:       s.opts.BudgetNotice,
 		Settlement:         s.opts.Settlement,
 		MaxConcurrency:     s.opts.MaxConcurrency,
 		WorkingDir:         s.opts.WorkingDir,

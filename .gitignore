@@ -1,5 +1,6 @@
 # backend
 /data/
+/logs/
 *.db
 *.db-wal
 *.db-shm
@@ -76,3 +77,14 @@ Thumbs.db
 /Dockerfile.bench.v2
 # 本地一次性调研脚本/临时产物（不进版本库）
 .workbuddy/tmp/
+
+# 本地调试 JWT（由 jwt.key 现签，绝不能进仓库）
+.tok
+
+# 测试源码不进版本库（按用户 2026-10-30 要求：只推产品代码）
+_test.go
+*_test.go
+agent/testdata/
+
+# 本地工作记忆（含机器路径与工作日志），只留在本机
+.workbuddy/

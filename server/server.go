@@ -21,6 +21,7 @@ import (
 
 	"github.com/jintilm/praetor/agent"
 	"github.com/jintilm/praetor/agent/domain"
+	"github.com/jintilm/praetor/config"
 	"github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/intercept"
 	"github.com/jintilm/praetor/internal/norma/llm"
@@ -120,6 +121,12 @@ type Server struct {
 	archiveWake chan struct{}
 	archiveWG   sync.WaitGroup
 	side        *sideQuestionState
+
+	// cancel stops the server-owned root context. New derives it from the caller's
+	// ctx so Close can stop every background goroutine (side-question flusher,
+	// engine task runtimes, archive worker) without the caller having to own a
+	// cancel func. See Close.
+	cancel context.CancelFunc
 }
 
 // provEntry is a cached provider + its config for one LLM profile id.
@@ -146,7 +153,14 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	if err != nil {
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
-	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
+	// 派生一个 Server 自己拥有的可取消根 ctx。Close() 取消它以后：
+	//   - side-question 的 250ms 刷盘 goroutine 会 flush 最后一批并退出（监听 s.ctx.Done）；
+	//   - engine 的 taskRuntime 父 ctx 被取消（Run 传入的是 s.ctx）；
+	//   - 归档 worker 的循环跟着 s.ctx 退出。
+	// 以前直接用调用方的 ctx：测试传 context.Background()，永不取消，于是 Server
+	// 创建出来的所有后台 goroutine 活过测试函数、写 t.TempDir() 里的 transcripts。
+	rootCtx, cancel := context.WithCancel(ctx)
+	s := &Server{m: m, engine: NewEngine(m), ctx: rootCtx, cancel: cancel, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profChatAgents: map[int64]*agent.ChatAgent{},
@@ -237,13 +251,17 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			ImageFor: s.domainImageFor,
 			MountFor: s.taskMountsFor,
 			Egress:   s.sandboxEgressFor, // 全量出口隐身：容器全部出站 TCP 重定向到全局出口代理（未配置=直连）
+			// 题面主机名（delulu 之类）只在同一自定义网络内可解析；沙箱据此把任务容器
+			// 接进目标所在网络，省掉模型自己猜 IP 的 10+ 分钟（见 sandbox.TargetNetwork）。
+			TargetHosts: s.taskTargetHosts,
 		})
 		s.logDomainImages(s.ctx)
-		seedMCPPresets(m.pg)            // 已配置的外部 MCP 预设（如 hexstrike）：只在缺失时插入
-		WarnEvidenceChainDisarmed(m.pg) // 证据链前置开关（捕获/自动绑定）关掉时告警：静默失效很难查
-		seedPrompts(m.pg)               // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
-		seedDomainAgents(m.pg)          // 领域角色（ctf_lead/solver_*/re_lead/re_analyst）播种成一等 agent：可见/可编辑/可绑模型
-		s.seedOrchestrationTools()      // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
+		seedMCPPresets(m.pg)                             // 已配置的外部 MCP 预设（如 hexstrike）：只在缺失时插入
+		WarnEvidenceChainDisarmed(m.pg)                  // 证据链前置开关（捕获/自动绑定）关掉时告警：静默失效很难查
+		seedPrompts(m.pg)                                // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
+		seedDomainAgents(m.pg)                           // 领域角色（ctf_lead/solver_*/re_lead/re_analyst）播种成一等 agent：可见/可编辑/可绑模型
+		warnSubagentBudgets(s.agentRunSeconds("worker")) // 角色墙钟 vs worker 预算：不匹配会让子 agent 静默全废
+		s.seedOrchestrationTools()                       // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
 		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)
 		}
@@ -269,7 +287,10 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		if err := s.applyLLM(cfg); err != nil {
 			log.Printf("[engine] env provider init failed — engine idle: %v", err)
 		} else {
-			log.Printf("[engine] LLM configured from env: %s / %s", cfg.Provider(), cfg.Model)
+			// 把思考开关/强度也打出来：它们是"静默失效"最严重的一类配置——
+			// 配了但上游不支持时，请求照样成功，只是没有思考，从日志完全看不出来。
+			log.Printf("[engine] LLM configured from env: %s / %s（thinking=%q effort=%q）",
+				cfg.Provider(), cfg.Model, cfg.ThinkingType, cfg.ReasoningEffort)
 		}
 	} else {
 		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
@@ -281,10 +302,57 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	return s
 }
 
+// Close 停掉 Server 拥有的全部后台工作并等待其落定。
+//
+// 调用顺序必须是 **Server.Close 先于 Manager.Close**：Close 期间还会写最后几条活动、
+// flush side-question 快照，数据库必须还活着。测试里只关 Manager 的写法会让 planner/
+// worker 的 goroutine 继续跑在已关闭的连接池上，并且继续往 t.TempDir() 里写
+// transcripts —— Go 随后 RemoveAll 时目录又被写回，Windows 上报
+// "TempDir RemoveAll cleanup: ... The directory is not empty"（2026-10-29 全仓回归）。
+//
+// 每一步都有上限：Close 是退出路径，不能因为某个 goroutine 卡在 LLM 调用上而挂死整个进程。
+func (s *Server) Close() {
+	if s.engine != nil {
+		s.engine.StopAll(10 * time.Second)
+	}
+
+	s.chatMu.Lock()
+	for key, cancel := range s.chatCancel {
+		cancel(agent.AbortShutdown)
+		delete(s.chatCancel, key)
+	}
+	s.chatMu.Unlock()
+
+	if s.cancel != nil {
+		s.cancel()
+	}
+	if s.side != nil {
+		select {
+		case <-s.side.done:
+		case <-time.After(3 * time.Second):
+			log.Printf("[server] Close: side-question 刷盘 goroutine 未在 3s 内退出")
+		}
+	}
+	archived := make(chan struct{})
+	go func() { s.archiveWG.Wait(); close(archived) }()
+	select {
+	case <-archived:
+	case <-time.After(5 * time.Second):
+		log.Printf("[server] Close: 归档 worker 未在 5s 内结束")
+	}
+}
+
 // Restored deadline and worker loops must inherit the same context as new tasks,
 // including the side-question checkpoint publisher installed during startup.
 func (s *Server) restoreTaskRuntimes() {
 	m := s.m
+	// PRAETOR_SKIP_TASK_RESTORE=1：任务照常加载进内存（UI 可见、可手动启动），但不为
+	// 任何任务启动 planner/worker/deadline/budget 协程。
+	//
+	// 用途：运维想开服务看数据、或只想手动跑某一道题，而不愿历史非终态任务在后台自己
+	// 跑起来烧 token。paused 任务本来就不干活，但仍会占一个 idle loop；这个开关把
+	// "状态层面的不跑"变成"从来就没起过协程"。
+	skipRun := config.Env("SKIP_TASK_RESTORE") == "1"
 	// reload tasks persisted on disk so the task list survives a restart, and
 	// restore persisted paused state (so a task paused before restart stays paused).
 	for _, t := range m.LoadExisting() {
@@ -299,7 +367,7 @@ func (s *Server) restoreTaskRuntimes() {
 		}
 		// 任务级超时:为每个未终态、带 timeout 的任务起 deadline 协调器,独立于 planner/worker
 		// loop——非活跃任务重启后也能在到点后被收尾(deadline 已过则立即走收尾时序)。
-		if !isTerminalStatus(lifecycle.Status) {
+		if !skipRun && !isTerminalStatus(lifecycle.Status) {
 			s.engine.startDeadlineCoordinator(s.ctx, t)
 		}
 	}
@@ -307,6 +375,10 @@ func (s *Server) restoreTaskRuntimes() {
 	// only the active UI task left other non-queued tasks counted as concurrency
 	// occupants without live loops, which could permanently block the persistent
 	// FIFO. Paused loops remain idle; queued tasks are admitted below as slots allow.
+	if skipRun {
+		log.Printf("[engine] PRAETOR_SKIP_TASK_RESTORE=1：%d 个任务已加载但未启动（不恢复 planner/worker）", len(m.List()))
+		return
+	}
 	for _, t := range m.List() {
 		lifecycle := t.lifecycleSnapshot()
 		if !lifecycle.Queued && !isTerminalStatus(lifecycle.Status) {
@@ -681,6 +753,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/stats", s.stats)
+	mux.HandleFunc("GET /api/usage/summary", s.getUsageSummary)
+	mux.HandleFunc("GET /api/ctf/board", s.getCTFBoard)
 	mux.HandleFunc("GET /api/logs", s.getLogs)
 	mux.HandleFunc("GET /api/logs/history", s.getLogsHistory)
 	mux.HandleFunc("GET /api/logs/stream", s.streamLogs)
@@ -818,6 +892,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/llm/records", s.pgDeleteLLMRecords)
 	mux.HandleFunc("GET /api/llm/records/tasks", s.pgLLMTasks)
 	mux.HandleFunc("GET /api/llm/records/by-model", s.pgTokenByModel) // 按模型聚合本任务 token 用量
+	mux.HandleFunc("GET /api/llm/records/by-agent", s.pgTokenByAgent) // 按子 agent 角色聚合 + 失败原因分布
 	mux.HandleFunc("GET /api/llm/records/{id}", s.pgGetLLMRecord)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
@@ -1639,7 +1714,17 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 var (
 	reURL    = regexp.MustCompile(`https?://[^\s'"]+`)
 	reIPPort = regexp.MustCompile(`\b((?:\d{1,3}\.){3}\d{1,3})(?::(\d{1,5}))?`)
-	reDomain = regexp.MustCompile(`\b((?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(?::(\d{1,5}))?`)
+	// 单标签主机名 + 端口：`delulu:1337`。
+	//
+	// 为什么必须单独一条：reDomain 要求「label.label.tld」，而 docker 服务名是没有点号的
+	// 单标签（delulu / redis / xben009-poc）。不认它，题面写「连 delulu:1337」时 seed
+	// 建不出站点、沙箱也不会把任务容器接进 delulu 所在的网络 —— 模型只能自己猜 IP
+	// （task 187/194 各浪费 10~17 分钟）。
+	//
+	// 强制要求带端口：无端口的单个单词与普通英文词无法区分（"请侦察这个服务"里的
+	// "服务" 在英文里就是一个单词），放进来会把大量普通词误判成主机名。
+	reHostPort = regexp.MustCompile(`\b([a-zA-Z][a-zA-Z0-9_-]*):(\d{1,5})\b`)
+	reDomain   = regexp.MustCompile(`\b((?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})(?::(\d{1,5}))?`)
 )
 
 // parseTarget extracts a target (scheme, host, port) from free text, supporting
@@ -1659,8 +1744,23 @@ func parseTarget(text string) (scheme, host string, port int, ok bool) {
 		port = portOr(m[2], 80)
 		return schemeForPort(port), host, port, true
 	}
+	// 单标签主机名 + 端口（docker 服务名）。放在 domain 之前：`delulu:1337` 只有这条能认。
+	if m := reHostPort.FindStringSubmatch(text); m != nil {
+		host = strings.ToLower(m[1])
+		port = portOr(m[2], 80)
+		return schemeForPort(port), host, port, true
+	}
 	if m := reDomain.FindStringSubmatch(text); m != nil {
 		host = strings.ToLower(m[1])
+		// 文件名不是域名：`script.sh` / `main.py` / `README.md` 都会被 reDomain 当成
+		// label.tld（`.sh`/`.md` 恰好是真实 TLD）。实测后果（task 203，2026-10-30）：
+		// 一道"附件里有 script.sh"的 CTF 题被 seed 成一个 `https://script.sh` 的假站点。
+		// 假站点本身不致命，但它会污染资产表、并让 planner 把"访问 script.sh"当成任务的一部分。
+		if fileExts[strings.ToLower(strings.TrimPrefix(filepath.Ext(host), "."))] && !strings.Contains(host, ":") {
+			// 只排除"整体就是一个文件名"的情形：`evil.sh` 是文件，`a.evil.sh` 大概率也是，
+			// 但真正的 .sh 域名在渗透目标里几乎不会出现，宁可漏判也不误建站点。
+			return "", "", 0, false
+		}
 		if m[2] == "" {
 			return "https", host, 443, true
 		}
@@ -1668,6 +1768,19 @@ func parseTarget(text string) (scheme, host string, port int, ok bool) {
 		return schemeForPort(port), host, port, true
 	}
 	return "", "", 0, false
+}
+
+// fileExts 是"看起来像域名、实际几乎总是文件名"的扩展名。
+//
+// 为什么不要求白名单 TLD：那会漏掉大量真实目标（.local/.lan/内部域）。
+// 这个列表只覆盖"作为文件名出现频率极高、作为目标域几乎为零"的那些。
+var fileExts = map[string]bool{
+	"sh": true, "py": true, "md": true, "txt": true, "json": true, "yml": true, "yaml": true,
+	"zip": true, "tar": true, "gz": true, "tgz": true, "log": true, "csv": true, "xml": true,
+	"go": true, "js": true, "ts": true, "rb": true, "pl": true, "php": true, "java": true,
+	"c": true, "h": true, "cpp": true, "rs": true, "exe": true, "dll": true, "so": true,
+	"bin": true, "png": true, "jpg": true, "jpeg": true, "gif": true, "pdf": true,
+	"html": true, "htm": true, "toml": true, "ini": true, "cfg": true, "conf": true,
 }
 
 func portOr(s string, d int) int {

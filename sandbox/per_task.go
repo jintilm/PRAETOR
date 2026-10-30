@@ -68,6 +68,14 @@ type PerTaskConfig struct {
 	// 不挂的后果不是"读不到文件"这么轻——模型会拿到一串宿主绝对路径，
 	// 在容器里 `ls` 全部 ENOENT，然后得出"题目附件缺失"，转而自己编题。
 	MountFor func(taskID string) []Mount
+	// TargetHosts 返回该任务题面里出现的主机名（如 delulu / 10.0.0.5），供
+	// TargetNetwork 推断「任务容器该接入哪个 docker 网络」。
+	//
+	// 为什么由上层注入：host 来自题面文本（描述/目标/资产），那是 server 侧的知识，
+	// 沙箱只该知道"给了这些名字，去问 docker"。
+	//
+	// nil 或返回空 = 不做推断，行为与改造前一致（用 Network 或默认 bridge）。
+	TargetHosts func(taskID string) []string
 }
 
 // Mount 是一个额外挂载。
@@ -418,8 +426,35 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 	for _, m := range mounts {
 		args = append(args, "-v", m.spec())
 	}
-	if p.cfg.Network != "" {
-		args = append(args, "--network", p.cfg.Network)
+	// 目标网络自动对齐（见 TargetNetwork 注释）：题面主机名（delulu 之类）只在与目标
+	// 容器相同的自定义网络里才能被 Docker 内嵌 DNS 解析；任务容器默认在 bridge，
+	// 解析不了时模型会自己猜 IP —— 实测浪费 10~17 分钟（task 187 / 194 各一次）。
+	// declared 非空时以部署配置为准，TargetNetwork 会自动让路。
+	netName := p.cfg.Network
+	var targetHosts []string
+	if p.cfg.TargetHosts != nil {
+		targetHosts = p.cfg.TargetHosts(key)
+	}
+	if n, extra := TargetNetwork(ctx, netName, targetHosts); n != "" {
+		netName = n
+		// 两种网络靠的机制不同，日志必须说清是哪一种，否则排查时会往错的方向找：
+		//   - 自定义网络：容器名由 Docker 内嵌 DNS 解析，接进同一网络即可；
+		//   - 默认 bridge：**没有内嵌 DNS**，容器名只能靠 --add-host 写进 /etc/hosts
+		//     （2026-10-30 用真实容器验证：不写 hosts 时 getent 直接失败）。
+		why := "题面主机名只能在同一自定义网络内解析"
+		if n == "bridge" {
+			why = "默认 bridge 无内嵌 DNS，靠 --add-host 兜底"
+		}
+		log.Printf("[sandbox] task %s 接入目标网络 %q（%s）", key, n, why)
+		if len(extra) > 0 {
+			log.Printf("[sandbox] task %s 目标主机映射：%s", key, strings.Join(extra, ", "))
+		}
+		for _, h := range extra {
+			args = append(args, "--add-host", h)
+		}
+	}
+	if netName != "" {
+		args = append(args, "--network", netName)
 	}
 	for _, e := range p.cfg.Env {
 		args = append(args, "-e", e)

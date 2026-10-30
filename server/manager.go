@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jintilm/praetor/agent"
+	"github.com/jintilm/praetor/config"
 	pgdb "github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/enrich"
 	"github.com/jintilm/praetor/guard"
@@ -57,16 +59,18 @@ type Task struct {
 	CompanyIDs         []int64 `json:"company_ids,omitempty"`
 	Status             string  `json:"status"` // persisted lifecycle status (done/failed/timeout 为终态；空/其它则由运行态推导)
 	// 任务级超时(见 docs/任务级超时与收尾设计.md)。DeadlineAt/FirstRunAt 为 unix 秒,0=未设/未运行。
-	TimeoutSeconds       int                    `json:"timeout_seconds"`
-	PlanHeartbeatSeconds int                    `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
-	CoverageEnabled      bool                   `json:"coverage_enabled"`       // 资产覆盖度功能开关(创建时定,默认开)
-	FirstRunAt           int64                  `json:"first_run_at,omitempty"`
-	DeadlineAt           int64                  `json:"deadline_at,omitempty"`
-	Store                *pgdb.ExplorationStore `json:"-"`
-	Guard                *guard.Guard           `json:"-"`
-	notify               chan struct{}
-	lifecycleMu          sync.RWMutex
-	llmMu                sync.RWMutex
+	TimeoutSeconds       int   `json:"timeout_seconds"`
+	PlanHeartbeatSeconds int   `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
+	CoverageEnabled      bool  `json:"coverage_enabled"`       // 资产覆盖度功能开关(创建时定,默认开)
+	FirstRunAt           int64 `json:"first_run_at,omitempty"`
+	DeadlineAt           int64 `json:"deadline_at,omitempty"`
+	// PausedAt = 本次暂停开始的 unix 秒（0 = 未暂停）。预算闸门用它把暂停时长从墙钟里扣掉。
+	PausedAt    int64                  `json:"paused_at,omitempty"`
+	Store       *pgdb.ExplorationStore `json:"-"`
+	Guard       *guard.Guard           `json:"-"`
+	notify      chan struct{}
+	lifecycleMu sync.RWMutex
+	llmMu       sync.RWMutex
 
 	// pendingTriggers accumulates the concrete changes (worker done / finding) that
 	// fired planning rounds since the last one consumed them. The debounce coalesces
@@ -350,6 +354,47 @@ func (m *Manager) SetWorkers(n int) error {
 // Enrich returns the asset auto-completion engine (may be nil if init failed).
 func (m *Manager) Enrich() *enrich.Engine { return m.enrich }
 
+// runningUnderGoTest 判断当前进程是不是 `go test` 拉起的测试二进制。
+//
+// 依据：testing 包在自己的 init 里注册 -test.* 一组标志，所以「这些标志存在」等价于
+// 「本进程是测试二进制」。其余几种常见判据都不成立——看 os.Args[0] 的后缀会被
+// -o 参数和 IDE 改掉的临时路径骗过；看工作目录会被 `go test ./...` 的多包场景搞混；
+// 看某个自定义环境变量则要求每个开发者都记得设，等于没有。
+func runningUnderGoTest() bool { return flag.Lookup("test.v") != nil }
+
+// guardTestDatabase 是「测试只许碰 *_test 库」这条红线的**生产侧**实现。
+//
+// 与 internal/testpg.Require 的分工：Require 是测试侧入口（库不可用就 skip），
+// 本函数是最后一道闸（连都不许连）。两者判据一致，都是有意的 fail-closed：
+// 库名解析不出来（DatabaseName 返回 ""）也算不安全。
+func guardTestDatabase(dsn, source string) error {
+	return checkTestDatabase(dsn, source, runningUnderGoTest(), config.Env("TEST_ALLOW_NON_TEST_DB"))
+}
+
+// checkTestDatabase 是 guardTestDatabase 的纯判定版：进程身份与逃生口都由调用方传入。
+//
+// 分开是为了能测：真正要锁的是"库名不带 _test 就拒绝"这条分支，而 runningUnderGoTest()
+// 在测试里永远为 true、环境变量又是进程级的——把判据抽成参数，才能在不依赖进程状态
+// 的前提下逐个断言（尤其是 fail-closed 那几格）。
+func checkTestDatabase(dsn, source string, isTestProcess bool, allowEnv string) error {
+	if !isTestProcess || allowEnv == "1" {
+		return nil
+	}
+	name := config.DatabaseName(dsn)
+	if strings.HasSuffix(name, "_test") {
+		return nil
+	}
+	shown := name
+	if shown == "" {
+		shown = "(无法解析库名)"
+	}
+	return fmt.Errorf("拒绝在非测试库 %q 上跑测试（DSN 来源：%s）：server 包的集成用例会建表、"+
+		"改任务、甚至清空 llm_profiles，拿开发库跑会毁掉你自己在 UI 里配的配置。"+
+		"请把 PRAETOR_PG_DSN 指向独立的 *_test 库（如 .../praetor_test，db.Open 会自动建库），"+
+		"或显式设 PRAETOR_TEST_ALLOW_NON_TEST_DB=1（仅用于一次性实例）",
+		shown, source)
+}
+
 // NewManager connects to PostgreSQL and, if proxyAddr is non-empty, starts the
 // traffic-recording proxy. PostgreSQL is required (it is the single data source).
 func NewManager(dir, proxyAddr string) (*Manager, error) {
@@ -370,6 +415,20 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		return nil, err
 	}
 	log.Printf("[pg] 数据库配置来源: %s", source)
+	// 测试二进制禁止连开发库。必须在连接**之前**拦，而不是在各个用例里各写一遍。
+	//
+	// 为什么这道联锁在 NewManager 里而不只在 internal/testpg 里：本包有 50 处
+	// `NewManager(t.TempDir(), "")`，它读的是**环境里**的 DSN。于是任何开发者只要把
+	// PRAETOR_PG_DSN 指向自己的开发库，`go test ./server/` 就会改那个库——这不是理论风险，
+	// 已经发生过：某用例为了构造"没有活跃 profile"这一状态，开头把 llm_profiles 全删了，
+	// 顺带清掉了开发者 UI 里配好的 key。删 key 是不可逆的（只能回供应商控制台重取）。
+	//
+	// 放在这里还有一个好处：以后新写的用例只要走 NewManager，就自动受保护，
+	// 不需要作者知道这条规矩。判据与 internal/testpg 完全一致（库名 _test 后缀 +
+	// 同名逃生口），所以两处的行为不会分叉。
+	if err := guardTestDatabase(dsn, source); err != nil {
+		return nil, err
+	}
 	pg, err := pgdb.Open(dsn)
 	if err != nil {
 		return nil, err
@@ -866,7 +925,8 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
 		CoverageEnabled: pt.CoverageEnabled,
 		FirstRunAt:      unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
-		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
+		PausedAt: unixOrZero(pt.PausedAt),
+		Store:    store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
 	}
 }
 
@@ -1205,10 +1265,16 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 	        WHEN $6='timeout' AND $2 NOT IN ('done','failed','timeout') THEN NULL
 	        ELSE first_run_at
 	    END,
+	    -- 暂停期间不消耗墙钟预算：恢复时把 deadline 顺延「暂停了多久」。
+	    -- 三个分支的顺序有意义：超时复活要先清零（那一轮重新计时），不能被顺延盖住。
 	    deadline_at=CASE
 	        WHEN $6='timeout' AND $2 NOT IN ('done','failed','timeout') THEN NULL
+	        WHEN paused_at IS NOT NULL AND deadline_at IS NOT NULL
+	            THEN deadline_at + (now() - paused_at)
 	        ELSE deadline_at
-	    END
+	    END,
+	    -- 顺延完立刻清空：一次暂停只顺延一次。重复 admission（排队→运行）不会再动 deadline。
+	    paused_at=NULL
 	WHERE id=$1 AND deleted_at IS NULL AND status=$6
 	RETURNING queued_at, queue_mode, completed_at, first_run_at, deadline_at`, n, status, queued, mode, preservePosition, expectedStatus).
 		Scan(&queuedAt, &committedMode, &completedAt, &firstRunAt, &deadlineAt)
@@ -1261,7 +1327,10 @@ func (m *Manager) ApplyTaskPause(id string) error {
 	}
 	var mode string
 	err = m.pg.QueryRow(`UPDATE tasks
-		SET paused=true, queued=false, queued_at=NULL
+		SET paused=true, queued=false, queued_at=NULL,
+		    -- 记暂停起点，供恢复时顺延 deadline（now()-paused_at）。已有值不覆盖：
+		    -- 重复暂停（幂等调用、并发点击）不能把起点往后推，否则暂停时长会被吃掉。
+		    paused_at=COALESCE(paused_at, now())
 		WHERE id=$1 AND deleted_at IS NULL AND paused=false
 		  AND status NOT IN ('done','failed','timeout')
 		RETURNING COALESCE(queue_mode,'')`, n).Scan(&mode)
@@ -1878,6 +1947,11 @@ func (t *Task) drainTriggers() []agent.TriggerEvent {
 	t.pendingTriggers = nil
 	return ev
 }
+
+// peekTriggers was here for the P0-2(a) observation-round gate. Both are gone:
+// the gate had no wake source to gate (see engine.go 的同名备注 + 计划 §3.3),
+// and an unused non-consuming reader is a trap — the next person to call it in a
+// guard by mistake silently drops done/finding events. Use drainTriggers.
 
 // EgressUpstreams 返回任务级出口池的副本（nil/空 = 未配置，回落全局出口代理）。
 func (m *Manager) EgressUpstreams() []string {

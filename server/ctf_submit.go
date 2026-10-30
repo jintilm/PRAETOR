@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -129,6 +130,12 @@ func (c *ctfSubmitter) SubmitFlag(ctx context.Context, challengeID, flag string)
 	sum := sha256.Sum256([]byte(flag))
 	sha := hex.EncodeToString(sum[:])
 	taskID, _ := strconv.ParseInt(c.taskID, 10, 64)
+	// challengeID 决定"这题算哪一道"，而模型经常不传（题库题本来只有一道）。
+	// 为空时按题面目录名兜底，否则 ctf_progress 写不进去、看板上永远显示未解出
+	// （2026-10-30 实测：task 212 判题 accepted，但 ctf_progress 没有行）。
+	if strings.TrimSpace(challengeID) == "" {
+		challengeID = defaultChallengeID(c.pg, c.taskID)
+	}
 
 	// ① 已提交过 → **不再打平台**，但要分清是哪种"提交过"。
 	//
@@ -142,34 +149,18 @@ func (c *ctfSubmitter) SubmitFlag(ctx context.Context, challengeID, flag string)
 		detail := "该 flag 本任务已提交过（verdict=" + own.Verdict + "），本次未再次提交"
 		return &agent.CTFSubmitResult{Verdict: "duplicate", Detail: detail, Raw: own.Raw}, nil
 	}
-	// 再看有没有别的任务/别的运行交过：不再问平台，但要为本任务落一行。
-	if prior, err := c.pg.GetCTFSubmission(sha); err == nil && prior != nil {
-		// 跨任务/跨运行：沿用此前判定，为本任务落一行。
-		inserted, ierr := c.pg.InsertCTFSubmission(&db.CTFSubmission{
-			TaskID: taskID, FlagSHA: sha, ChallengeID: challengeID,
-			Flag: flag, Verdict: prior.Verdict, Raw: prior.Raw,
-		})
-		if ierr != nil {
-			return nil, fmt.Errorf("记录提交结果失败：%w", ierr)
-		}
-		accepted := prior.Verdict == db.CTFVerdictAccepted
-		if accepted {
-			if c.onAccept != nil {
-				c.onAccept(challengeID)
-			}
-			if c.converge != nil {
-				c.converge("flag 已通过平台判题：" + flag)
-			}
-		}
-		detail := fmt.Sprintf("该 flag 此前已由平台判为 %s（task %d），本次未重复请求平台", prior.Verdict, prior.TaskID)
-		if !inserted {
-			// 并发：另一条请求刚为同一任务记过同一个 flag，结论一致，不必再写。
-			detail += "；并发提交已由另一条请求记录本任务"
-		} else {
-			detail += "；已按同一结论记录本任务"
-		}
-		return &agent.CTFSubmitResult{Verdict: prior.Verdict, Detail: detail, Raw: prior.Raw}, nil
-	}
+	// 刻意**不**复用「别的任务对这个 flag 的判决」。
+	//
+	// 原实现会查全局最早的同类提交，把它的 verdict 直接复制给本任务、不再问判题后端。
+	// 设计初衷是 bench 重跑同一道题时省一次平台请求，但它有一个致命副作用：
+	// **任何一个 flag 只要在别处被判过 accepted，就永远 accepted**。
+	// 2026-10-30 实测：task 209（HTB Labyrinth）的沙箱没接进目标网络，模型转而扫
+	// 172.17.0.0/24 打到了另一个靶机 xben009，拿到它的 flag 提交——本任务期望的是
+	// HTB{...}，却因为该 flag 在 task 205 被判过 accepted 而被直接判对，任务被标成 done。
+	// 也就是说：跨题复用把"判题"退化成"这个字符串历史上被谁认过"。
+	//
+	// 判题后端本来就很便宜（offline 是字符串比较，ctfd 是一次 API 调用），
+	// 省这一次请求不值得拿正确性换。同一任务内的重复提交仍在 ① 短路。
 
 	// ② 问平台
 	accepted, raw, err := c.judge.Ask(ctx, challengeID, flag)
@@ -273,7 +264,21 @@ func (s *Server) buildCTFJudge(t *Task) (ctfJudge, error) {
 			exp = config.Env(envCTFExpectedFlag)
 		}
 		if strings.TrimSpace(exp) == "" {
-			return nil, fmt.Errorf("offline 模式缺少期望 flag（设 settings ctf.expected_flag.%s 或环境变量 PRAETOR_%s）", t.ID, envCTFExpectedFlag)
+			// 本地题库的约定：flag 就放在题面目录里（`flag.txt`，多题时在 `<root>/<id>/`）。
+			// 不自动读的话，每建一道题都要手工录一次 settings，而录错/漏录的表现是
+			// 「ctf_submit 不可用」——模型只能自己猜，任务最后永远无法 done（见
+			// docs/batch-198-199-2026-10-30.md 缺陷二）。
+			if dir := s.taskChallengeDir(t); dir != "" {
+				if flag, src, ok := flagFromChallengeDir(dir); ok {
+					log.Printf("[ctf] task %s 从题面目录读到 expected flag（%s）", t.ID, src)
+					exp = flag
+				}
+			}
+		}
+		if strings.TrimSpace(exp) == "" {
+			return nil, fmt.Errorf("offline 模式缺少期望 flag：设 settings ctf.expected_flag.%s、"+
+				"环境变量 PRAETOR_%s，或在题面目录里放一份 flag.txt（`ctf.challenge_dir.%s` 指向的目录，"+
+				"多题时放在 `<root>/<题目id>/flag.txt`）", t.ID, envCTFExpectedFlag, t.ID)
 		}
 		return offlineJudge{expected: exp}, nil
 	case "ctfd":
@@ -296,4 +301,26 @@ func (s *Server) buildCTFJudge(t *Task) (ctfJudge, error) {
 	default:
 		return nil, fmt.Errorf("未知判题模式 %q（offline|ctfd）", mode)
 	}
+}
+
+// defaultChallengeID 给"模型没传 challenge_id"的提交一个稳定的题目标识：
+// 题面目录的 basename（`.../corpus/ctf/htb-locktalk` → `htb-locktalk`），
+// 没有目录时退到 `task-<id>`。
+//
+// 为什么不用空串：ctf_progress 的主键是 (task_id, challenge_id)，空串虽然能建行，
+// 但看板按题目聚合时会把所有空串混成一道题；而 markCTFSolvedOnAccept 原本遇到空串
+// 直接 return —— 表现是"判题通过了，看板还是未解出"，静默且难查。
+func defaultChallengeID(pg *db.DB, taskID string) string {
+	if pg != nil && strings.TrimSpace(taskID) != "" {
+		if dir := strings.TrimSpace(settingOr(pg, "ctf.challenge_dir."+taskID, "")); dir != "" {
+			base := filepath.Base(filepath.FromSlash(strings.TrimRight(dir, "/\\")))
+			if base != "" && base != "." && base != string(filepath.Separator) {
+				return base
+			}
+		}
+	}
+	if strings.TrimSpace(taskID) == "" {
+		return "unknown"
+	}
+	return "task-" + taskID
 }

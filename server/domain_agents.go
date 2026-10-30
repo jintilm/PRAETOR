@@ -3,6 +3,7 @@ package server
 import (
 	"log"
 	"strings"
+	"time"
 
 	"github.com/jintilm/praetor/agent/domain"
 	"github.com/jintilm/praetor/db"
@@ -72,6 +73,73 @@ func (s *Server) applyAgentOverrides(defs map[string]subagent.Definition) {
 				def.Provider = prov
 			}
 		}
+		// 轮次：库里这一列默认 0 = 未设置，语义干净，接上就能让运营在页面上给 solver 加轮次
+		// （此前是纯死配置：改了不生效）。
+		if a.MaxTurns > 0 {
+			def.MaxTurns = a.MaxTurns
+		}
+		// 角色级单次派发墙钟：读**可空**的 max_duration_seconds（NULL/0 = 继承 pack 声明）。
+		//
+		// 为什么不用 run_seconds：那一列是 NOT NULL DEFAULT 1200，播种角色行时也落 1200，
+		// 「未设置」在库里表达不出来。按"大于 0 就覆盖"接上，每个角色的 MaxDuration 都会
+		// 变成 1200s —— 而 worker 自己的 run_seconds 也是 1200s，subagent.run() 的派发前
+		// 检查要求父 run 还剩 1200+120s，于是**所有派发一律被拒**，子 agent 静默全废。
+		// 可空的新列才能区分「没配过」和「配了 1200」。
+		if d, ok := resolveRoleMaxDuration(def.MaxDuration, a.MaxDurationSecs); ok {
+			def.MaxDuration = d
+		}
 		defs[key] = def
 	}
+}
+
+// warnSubagentBudgets 在启动期检查「最大角色的墙钟」与「worker 的 run 预算」是否匹配。
+//
+// 为什么不交给运行时才发现：不匹配的后果是 subagent.run() 的派发前检查拒绝每一次派发，
+// 而拒绝是一条工具错误，模型会照常换个说法继续跑 —— 任务不会失败，只是子 agent 静默没了。
+// 那种"功能消失但没人报错"的状态最难查，所以在这里显式喊一声。
+func warnSubagentBudgets(workerRunSecs int) {
+	if workerRunSecs <= 0 {
+		return // 0 = worker 墙钟不设限，子 agent 的 MaxDuration 总是装得下
+	}
+	budget := time.Duration(workerRunSecs) * time.Second
+	worst, worstRole := time.Duration(0), ""
+	for _, domainKey := range spawnEnabledDomains {
+		pack, ok := domain.Get(domain.Key(domainKey))
+		if !ok {
+			continue
+		}
+		for _, r := range pack.Roles() {
+			// 余量取 120s（与 subagent.dispatchSettleMargin 同值）：这里不 import 那个包的
+			// 常量只是为了少一条跨层依赖，数值改一处要记得另一处。
+			//
+			// 曾经是 30s。真机 task 185 证明 30s 不够：子 agent 硬 deadline 到点后还要
+			// 写 NOTES、产出结论文本，1~3 分钟，30s 的余量让父 run 在它收尾时就把工具调用
+			// 打断了（`tool execution interrupted`）。告警阈值必须跟判定阈值同源，
+			// 否则会出现"启动期不告警、运行期照样派不出去/收不了尾"。
+			if r.MaxDuration > 0 && r.MaxDuration+120*time.Second > budget && r.MaxDuration > worst {
+				worst, worstRole = r.MaxDuration, r.Key
+			}
+		}
+	}
+	if worst == 0 {
+		return
+	}
+	log.Printf("[subagent] 警告：角色 %s 需要 %s，但 worker 的 run_seconds 只有 %ds —— "+
+		"派发前检查会拒绝它，该角色实际不可用。把 worker 的 run_seconds 调大（Agent 管理页），"+
+		"或调小 domain.RoleSpec.MaxDuration。", worstRole, worst, workerRunSecs)
+}
+
+// resolveRoleMaxDuration 决定一个角色的「单次派发墙钟」。
+//
+//	declared  pack 里声明的值（domain.RoleSpec.MaxDuration）
+//	cfg       库里配的秒数；nil 或 <=0 表示没配 / 已清除
+//
+// 返回 (最终值, 是否被配置覆盖)。覆盖时不校验"是否超过父 run 预算" —— 那是
+// warnSubagentBudgets（启动期）与 subagent 的派发前检查（运行期）的职责：
+// 在这里悄悄改小用户的配置，会让"配了 20 分钟却只跑 10 分钟"变成无法解释的行为。
+func resolveRoleMaxDuration(declared time.Duration, cfg *int) (time.Duration, bool) {
+	if cfg == nil || *cfg <= 0 {
+		return declared, false
+	}
+	return time.Duration(*cfg) * time.Second, true
 }

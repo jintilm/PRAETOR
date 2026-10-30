@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"sort"
 	"strings"
 	"sync"
 
@@ -32,6 +34,7 @@ type Planner struct {
 	window            int                                    // context window in tokens (for compaction)
 	windowFn          func() int                             // optional dynamic task-chain minimum
 	maxTurns          int                                    // max agent turns per run (0 = unlimited)
+	domain            string                                 // 任务领域（ctf/reverse/redteam/pentest），决定工具面
 	killWork          func(intentID int64) error             // engine callback to terminate a running work (nil = off)
 	steerWork         func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
 	proxyAddr         string                                 // recording proxy for WebFetch (empty = direct)
@@ -50,6 +53,11 @@ type Planner struct {
 	// dispatch it step-by-step over rounds instead of front-loading it in parallel.
 	todoMu sync.Mutex
 	todos  map[int64]*actool.TodoStore
+
+	// toolFaceOnce 让"本任务 planner 看到的工具清单"只打一次日志：Plan() 每个
+	// 唤醒轮都会重新组装工具，逐轮打就是噪音，而完全不打则谁也不知道领域裁剪
+	// 到底生效没有（P0-1 第三项就是靠这条日志验的）。
+	toolFaceOnce sync.Once
 }
 
 func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *Planner {
@@ -57,6 +65,50 @@ func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, 
 }
 
 func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
+
+// SetDomain 设置任务领域：planner 的工具面按领域裁剪（Linux 域不给 Bash）。
+// 与 Worker.SetDomain 同名同义，由装配层（server/task_llm.go）一起接。
+func (p *Planner) SetDomain(domainKey string) { p.domain = domainKey }
+
+// plannerBaseTools 返回 planner 的基础工具面，并按领域裁掉注定跑不通的工具。
+//
+// Linux 域（ctf/reverse/redteam）的产出物在任务容器里，而 planner 的 Bash 永远跑在
+// 宿主（sandboxAgentKeys 只含 worker）：容器里的 /work、/chal 在宿主上都不存在。
+// 实测 4 次调用 4 次失败，全是 `cd: can't cd to /work/i183` 这类开局就死。planner
+// 的本职是读图、读文件、产意图，Read/LS/Glob/Grep 已经够用，留着 Bash 只是给模型
+// 多一条注定失败的路。
+//
+// **但只在容器真的在用的时候才裁**：`PRAETOR_SANDBOX=off`（或根本没装 Docker）时
+// worker 与 planner 都在宿主上跑、看的是同一棵树，planner 的 Bash 就是个正常可用的
+// POSIX shell —— 那时砍掉它纯属平白少一条路。部署形态比宿主操作系统更重要：
+// Linux 宿主 + 沙箱开、Windows 宿主 + 沙箱开，两者都要裁。
+func plannerBaseTools(base []actool.CoreTool, domain string) []actool.CoreTool {
+	if needsPOSIXDomain(domain) && SandboxState() == SandboxContainer {
+		return dropTool(base, "Bash")
+	}
+	return base
+}
+
+// logToolFace 在第一次规划轮把最终工具清单打出来（一行、按字母序）。
+//
+// 为什么要一条日志：领域裁剪是"少一个工具"这类**无事件**的行为——裁对了没有任何
+// 输出，裁错了也只表现为模型反复尝试一个不存在的名字。没有这行，验 P0-1 第三项
+// 就只能靠读代码；有了它，任何人跑一遍任务就能在日志里确认。
+func (p *Planner) logToolFace(taskID int64, tools []actool.CoreTool) {
+	p.toolFaceOnce.Do(func() {
+		names := make([]string, len(tools))
+		for i, t := range tools {
+			names[i] = t.Name()
+		}
+		sort.Strings(names)
+		dom := p.domain
+		if dom == "" {
+			dom = "默认"
+		}
+		log.Printf("[tools] task %d planner 工具面(%s, 共 %d): %s",
+			taskID, dom, len(names), strings.Join(names, " "))
+	})
+}
 
 // SetCompactor wires the cold-node compactor (cold-digest §7). Called each
 // planner wake-up to advance the round counter, maintain cold stamps, and
@@ -377,6 +429,11 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		tsx.SetAssetStore(as, as.Companies())
 	}
 	tsx.SetTaskID(taskID)
+	// 领域必须落到 ToolSet 上，不能只用来裁工具面：
+	// tools.go 里的 isCTF()/isReverse() 与 verifyGoalEvidence 都读这个字段，
+	// 漏设时它们静默返回 false —— 「确定性验收被跳过」不会有任何报错，
+	// 这正是 task 198 的 done 变成「planner 自称达成」的那条链。
+	tsx.SetDomain(p.domain)
 	tsx.SetCoverageEnabled(as == nil || as.CoverageEnabled(taskID))
 	tsx.killWork = p.killWork   // enable kill_work tool (nil = unavailable)
 	tsx.steerWork = p.steerWork // enable steer_work tool (nil = unavailable)
@@ -385,10 +442,11 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	}
 	// 领域工具 + 基础默认工具集（Read/Write/Edit/MultiEdit/LS/Glob/Grep/Bash）
 	// 资产覆盖度功能关闭时剔除 add_task_scope/list_untested_assets（不入 prompt）。
-	base := append(tsx.DropCoverageTools(tsx.PlannerTools()), actool.DefaultTools()...)
-	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
-	tools, def, cleanup := AugmentTools(ctx, "planner", base)
+	base := plannerBaseTools(append(tsx.DropCoverageTools(tsx.PlannerTools()), actool.DefaultTools()...), p.domain)
+	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), Domain: p.domain})
+	tools, _, def, cleanup := AugmentTools(ctx, "planner", base)
 	defer cleanup()
+	p.logToolFace(taskID, tools)
 	// 关键态势（刚完成的意图 + 预取的完整图）改放【本轮 user 输入】(见下方 input)，system
 	// 只留静态规划正文。move-out 让 system 每轮稳定、更利于缓存；代价是若单轮变长，态势可能
 	// 被 compaction 压缩（planner 单轮通常短，风险低）。situational 会拼进下方 input。

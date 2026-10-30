@@ -52,6 +52,12 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   const [preview, setPreview] = React.useState("");
   const [maxTurns, setMaxTurns] = React.useState("0");
   const [runSecs, setRunSecs] = React.useState("600");
+  // 角色级单次派发墙钟："" = 继承域声明（不写库），否则为秒数。
+  // 与上面的 run_seconds 是两件事：那个管"这个 worker 自己跑多久"，
+  // 这个管"这个角色被派出去时最多跑多久"（subagent 的父 run 预算检查用的是它）。
+  const [maxDur, setMaxDur] = React.useState("");
+  // 停滞升级目标 profile："" = 不升级；否则为 profile id 字符串。
+  const [upgradeProfile, setUpgradeProfile] = React.useState("");
   // "" = 跟随(未绑定)；否则为 profile id 字符串
   const [llmProfileId, setLlmProfileId] = React.useState("");
   const [llmProfiles, setLlmProfiles] = React.useState<NonNullable<AgentDetail["llm_profiles"]>>([]);
@@ -91,6 +97,8 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
         setSkillVisible(d.visibility?.skill ?? []);
         setMaxTurns(String(d.agent?.max_turns ?? 0));
         setRunSecs(String(d.agent?.run_seconds ?? 600));
+        setMaxDur(d.agent?.max_duration_seconds != null ? String(d.agent.max_duration_seconds) : "");
+        setUpgradeProfile(d.agent?.upgrade_profile_id != null ? String(d.agent.upgrade_profile_id) : "");
         setLlmProfileId(d.agent?.llm_profile_id != null ? String(d.agent.llm_profile_id) : "");
         setLlmProfiles(d.llm_profiles ?? []);
         setWebSearch(!!d.agent?.web_search);
@@ -186,6 +194,12 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
       if (showConfig) {
         patch.max_turns = Math.max(0, Math.floor(Number(maxTurns) || 0));
         patch.run_seconds = Math.max(0, Math.floor(Number(runSecs) || 0));
+        // 留空 = 清除（0 → 库里写 NULL，回到域声明值）；正数 = 覆盖。
+        // 不能把空当成 0 直接发下去：后端 0 的语义就是"清除"，这里保持一致。
+        const dur = maxDur.trim();
+        patch.max_duration_seconds = dur === "" ? 0 : Math.max(1, Math.floor(Number(dur) || 0));
+        // 停滞升级目标：留空 = 清除（0 → NULL，不做角色级升级）。
+        patch.upgrade_profile_id = upgradeProfile === "" ? 0 : Number(upgradeProfile);
       }
       if (showWebSearch) patch.web_search = webSearch;
       if (showInteractiveShell) patch.interactive_shell = interactiveShell;
@@ -318,6 +332,28 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
                       <Label htmlFor="run-seconds" className="text-xs">运行时长（秒，0=不限）</Label>
                       <Input id="run-seconds" type="number" min={0} className="h-8 w-32"
                         value={runSecs} onChange={(e) => setRunSecs(e.target.value)} />
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="max-duration" className="text-xs">单次派发墙钟（秒，留空=继承）</Label>
+                      <Input id="max-duration" type="number" min={1} placeholder="继承域声明" className="h-8 w-32"
+                        value={maxDur} onChange={(e) => setMaxDur(e.target.value)} />
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="upgrade-profile" className="text-xs">停滞升级模型（可选）</Label>
+                      <Select value={upgradeProfile === "" ? "none" : upgradeProfile}
+                        onValueChange={(v) => setUpgradeProfile(v === "none" ? "" : v)}>
+                        <SelectTrigger id="upgrade-profile" className="h-8 w-48">
+                          <SelectValue placeholder="不升级" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">不升级（默认）</SelectItem>
+                          {llmProfiles.map((p) => (
+                            <SelectItem key={p.id} value={String(p.id)}>
+                              {p.name}（{p.model}）
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
                   </>
                 )}

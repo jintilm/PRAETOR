@@ -8,10 +8,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/jintilm/praetor/agent/domain"
 	"github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/intercept"
 	"github.com/jintilm/praetor/internal/norma/agentcore"
@@ -22,6 +25,7 @@ import (
 	"github.com/jintilm/praetor/internal/norma/tool"
 	actool "github.com/jintilm/praetor/internal/norma/tool"
 	"github.com/jintilm/praetor/internal/norma/transcript"
+	"github.com/jintilm/praetor/llmrec"
 )
 
 // Worker is an LLM work agent (docs §4.4): it claims ONE intent, completes it
@@ -89,6 +93,12 @@ type Worker struct {
 	// 由 server 注入：CTF 域返回 lead 可派的 solver 定义；渗透/红队域不注入。
 	// 惰性是因为角色表与任务领域挂钩，而 worker 实例可能在领域判定前创建。
 	subagents func() (map[string]subagent.Definition, int, error)
+	// toolFaceOnce 让「本 worker 的工具面」只打一行日志（与 planner.logToolFace 对称）。
+	//
+	// 为什么要专门记一行：P1-4 的失效表现不是报错，而是**工具面上少一个工具**。
+	// 没有这一行，"模型没派子 agent" 与 "Agent 工具根本没给它" 在日志里长得一模一样，
+	// 只能靠读代码猜（本轮 task 182 就是这么卡住的）。
+	toolFaceOnce sync.Once
 	// campaignGate 是红队战役的阶段闸门（nil = 不在战役域）。
 	// 判定在 internal/campaign，server 注入一个"读进度 + 判定"的闭包。
 	campaignGate func(string) error
@@ -376,6 +386,99 @@ func ensureRunDir(base string, taskID, intentID int64) string {
 // cmdOutDir is the SDK large-tool-output spill dir under an agent's run dir.
 func cmdOutDir(dir string) string { return filepath.Join(dir, "cmd-output") }
 
+// logToolFace 把本 worker 实际装配出的工具面打一行（每 worker 进程内一次）。
+//
+// 与 planner.logToolFace 对称。P1-4 的失效模式是「工具面上少一个工具」而没有任何报错，
+// 这一行是唯一能在日志里区分「模型没派子 agent」和「Agent 工具根本没给它」的证据。
+func (w *Worker) logToolFace(taskID int64, tools []actool.CoreTool) {
+	w.toolFaceOnce.Do(func() {
+		names := make([]string, len(tools))
+		for i, t := range tools {
+			names[i] = t.Name()
+		}
+		sort.Strings(names)
+		dom := w.domain
+		if dom == "" {
+			dom = "默认"
+		}
+		log.Printf("[tools] task %d worker 工具面(%s, 共 %d): %s",
+			taskID, dom, len(names), strings.Join(names, " "))
+	})
+}
+
+// sortedKeys 返回排序后的角色名。排序是为了让提示词与日志在多次 run 之间稳定
+// （map 迭代顺序随机，不排序会让同一段提示词每次都不一样，既干扰阅读也让缓存失效）。
+func sortedKeys(defs map[string]subagent.Definition) []string {
+	keys := make([]string, 0, len(defs))
+	for k := range defs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// subagentBrief 拼出「可派给谁、什么时候该派」的提示词段落。
+//
+// 为什么必须有：Agent 工具只有一句通用的英文描述（"Delegates a self-contained
+// sub-task…"），而 worker 的其余指令全是中文、围绕单一意图展开。没有这一段，模型会
+// 沿着既有习惯自己往下做 —— task 182 的 69 次 Bash / 0 次 Agent 就是这么来的。
+// 角色说明用的是域自己声明的 Description（谁擅长什么），不在这里重复硬编码领域知识。
+func subagentBrief(defs map[string]subagent.Definition) string {
+	if len(defs) == 0 {
+		// 空表返回空串：不能承诺"有子 agent 可派"却一个角色都不给 ——
+		// 模型会照着这段去调 Agent，然后拿到 unknown agent_type。
+		return ""
+	}
+	keys := sortedKeys(defs)
+	var b strings.Builder
+	b.WriteString("\n\n【可派生的子 agent（Agent 工具）】\n")
+	b.WriteString("你有一个 Agent 工具：把「自成一体的子任务」交给隔离的子 agent 执行。它有自己的上下文和工具集，" +
+		"只把最终结论交回给你 —— 它跑出来的大量中间输出不会堆进你的上下文，你只需要读那一句结论。\n")
+	b.WriteString("可用角色（agent_type）：\n")
+	for _, k := range keys {
+		b.WriteString("- " + k + "：" + defs[k].Description + "\n")
+	}
+	b.WriteString("该派的时候：子任务边界清晰、能独立完成、且会产生大量中间输出（起服务、扫目录、爆破、" +
+		"写脚本反复调参、长时间抓包）。这类活自己干会把上下文堆满，派出去只回一句结论。\n")
+	// "默认先派"这一句是实测补上的：只写"该派的时候"，模型会把它读成「可选优化」，
+	// 于是继续沿既有习惯自己从第一条命令做起（task 183：侦察 15 次 Bash 后才想起可以派，
+	// 那时父 run 的剩余时间已不够，派发被压到极短）。提示词的默认值必须写明，否则默认永远是
+	// "自己干" —— 自己干在单轮里永远是最省事的那个选择。
+	b.WriteString("默认动作：接到一条完整挑战/整条链路时，**先判断它属于哪个角色，然后派给对应子 agent 去做**，" +
+		"你自己负责拆解、验收、写回结论。不要从第一条侦察命令开始把整件事自己做完 —— " +
+		"你的上下文是这次 run 里最稀缺的资源，中间过程的噪音应该留在子 agent 那边。\n")
+	b.WriteString("不该派的时候：一两步就能答的、必须你亲自读全局态势判断的、或者本轮剩余时间连两分钟都不到" +
+		"（派发前有预算检查；剩余不够时会自动压缩子任务的墙钟，连最小可用时间都不够才会拒绝）。\n")
+	b.WriteString("派发要点：子 agent 看不到你的上下文，prompt 里要写清「从哪开始、做什么、什么算完成、要带回什么产物」。\n")
+	return b.String()
+}
+
+// leadPromptFor 返回「当 worker 就是本域 lead 时」要追加的下半段提示词。
+//
+// 只有声明了 LeadRunner 且 WorkerIsLead() 为真的域才有内容（CTF / 逆向）。渗透与红队
+// 的 lead 是 planner，worker 只是执行者 —— 给它们注入「你负责统筹、把活派出去」会让
+// worker 去规划，破坏既有秩序，所以那里必须返回 nil。
+//
+// 提示词正文取 RolePrompt（域约束 + lead 角色段），与子 agent 读到的是同一份：
+// 以前它只喂给 solver 自己，真正做决策的 lead 反而读不到。task 182（69 次 Bash、
+// 0 次 Agent）就是这条链的结果，见 docs §5.5(6)。
+func leadPromptFor(domainKey string) []string {
+	p, ok := domain.Get(domain.Key(domainKey))
+	if !ok {
+		return nil
+	}
+	lr, ok := p.(domain.LeadRunner)
+	if !ok || !lr.WorkerIsLead() {
+		return nil
+	}
+	for _, r := range p.Roles() {
+		if r.Kind == domain.RoleLead {
+			return domain.RolePrompt(p, r)
+		}
+	}
+	return nil
+}
+
 func workerSystem(proxyAddr, caCert, dataDir, runDir string) string {
 	body := renderSystem("worker", workerDefaultTmpl, WorkerVars{ProxyAddr: proxyAddr, DataDir: dataDir, Now: nowStr()})
 	// caCert is present only when the recording MITM is on, which is exactly when
@@ -478,7 +581,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	base = append(base, defaultToolsExcept("MultiEdit", "Glob", "Grep")...)
 	// Worker 名一并带进去：竞速拓扑下两路要跑不同模型（server/llm_lane.go），
 	// 而 runinfo 是唯一能跨到 LLM 解析层的每-run 身份。
-	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID, Worker: name})
+	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID, Worker: name, Domain: w.domain})
 	// emitWrap 先于 Agent 工具注册定义：子 agent 的 activity tap 也要走同一归口
 	// （NodeID = 本意图，Worker = 本 worker 名），不然子代理动作在图上无归属。
 	intentID := intent.ID
@@ -488,8 +591,20 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 			emit(r)
 		}
 	}
-	tools, def, cleanup := AugmentTools(ctx, "worker", base)
+	tools, fullTools, def, cleanup := AugmentTools(ctx, "worker", base)
 	defer cleanup()
+
+	// Linux 域的 Bash 必须真能跑 Linux：沙箱未就绪时用「永远拒绝」的 Bash 顶替。
+	//
+	// 为什么不在启动期直接让任务失败：任务还能跑（Read/Write/Grep/图谱写回都在宿主），
+	// 只是跑不了命令。让它在第一条 Bash 上拿到一句可读的原因，比烧 20 分钟超时、
+	// 或者让模型对着 PowerShell 的语法错误反复"修正"要便宜得多。判据见 bashRefusalReason。
+	if needsPOSIXDomain(w.domain) {
+		if reason, refuse := bashRefusalReason(SandboxState(), actool.HostShellIsPOSIX()); refuse {
+			log.Printf("[worker] task %d 域 %s 需要 Linux 环境，Bash 已替换为拒绝执行（sandbox=%s）", taskID, w.domain, SandboxState())
+			tools = refuseTool(tools, "Bash", reason)
+		}
+	}
 
 	// 子 agent 派生（CTF 第一批、逆向第二批，渗透/红队刻意不接 —— planner/worker
 	// 与战役闸门是既有秩序，再叠一层是重复建设）。worker 就是域 lead：
@@ -501,30 +616,62 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 这里只看角色表有没有注入 —— 判定权集中一处，避免两边各写一套域列表。
 	// 权限继承父（ModeBypass）：solver 在沙箱里跑，逐调用审批会卡死无人的后台任务。
 	// 降级语义：角色表构造失败只记日志，任务照常 —— 子 agent 是加速器不是依赖。
+	// 但"只记日志"必须真的记：原来这里是 `if err == nil && len(rawDefs) > 0`，
+	// 失败与"角色表为空"挤进同一个 else 且**什么都不打**，于是 Agent 工具从工具面
+	// 静默消失 —— 排查时只能看到"模型没派子 agent"，看不到"工具根本没给它"。
+	// 这条链正是 P1-4 想解决的失效模式（静默降级），所以失败必须出声。
+	// 派生角色表在 execute 期展开（惰性）。成功时把 defs 提到外层：
+	// 下面还要用它拼「可派给谁」的提示词段落 —— 工具注册与提示词必须是同一份角色表，
+	// 两处各读一次会在"页面上刚改过角色"的窗口里给出不一致的答案。
+	var subagentDefs map[string]subagent.Definition
 	if w.subagents != nil {
-		if rawDefs, maxDepth, err := w.subagents(); err == nil && len(rawDefs) > 0 {
+		rawDefs, maxDepth, err := w.subagents()
+		if err != nil {
+			log.Printf("[subagent] task %d 角色表构造失败，本次不注册 Agent 派生工具（任务继续）: %v", taskID, err)
+		} else if len(rawDefs) == 0 {
+			log.Printf("[subagent] task %d 角色表为空（领域 %s 未声明角色？），本次不注册 Agent 派生工具", taskID, w.domain)
+		} else {
 			defs := make(map[string]subagent.Definition, len(rawDefs))
 			for k, d := range rawDefs {
 				// 权限继承父（ModeBypass）：solver 在沙箱里跑，逐调用审批会卡死无人的后台任务。
 				d.PermissionMode = permission.ModeBypass
 				defs[k] = d
 			}
+			subagentDefs = defs
 			// ParentTools 用组装后的完整工具集：solver 的白名单（如 Bash/Read/Write/ctf_submit）
 			// 从中过滤；Agent 自身也在 registry 里，但 solver 白名单不含它 —— 不会递归派生。
+			//
+			// baseCtx 是【子 agent 的根上下文】：worker 自己的 ctx（engine 的 workCtx 派生），
+			// 它**没有本次 run 的墙钟 deadline** —— 那个 deadline 是 harness 给 toolCtx 加的，
+			// 而 run() 拿到的正是 toolCtx。以前子 agent 直接从 toolCtx 派生，于是父 run 的
+			// 20 分钟到点，所有在飞的 solver 一起被 DeadlineExceeded 硬砍（无收尾、无部分产出，
+			// 整段派发作废后重派；task 35 就是这么烧掉两倍的）。
+			//
+			// 取消权一点没丢：workCtx 在 pause / kill_work / 任务删除 / Execute 返回时都会被
+			// 取消，子 agent 跟着死。子 agent 本来就不该活过父 run —— 父 run 结束后没人收它的
+			// 结果，活着只是继续烧 token。
+			// 刻意忽略传入的 parent 参数：父 toolCtx 正是要去掉 deadline 的那个。
+			baseCtx := ctx
 			agentTool := subagent.NewTool(subagent.Config{
 				Provider:    w.prov,
-				ParentTools: tool.NewRegistry(tools...),
+				ParentTools: tool.NewRegistry(fullTools...),
 				Agents:      defs,
 				MaxDepth:    maxDepth,
+				BaseCtx:     func(context.Context) context.Context { return baseCtx },
+				// 派生的每个角色都带 agent_type 进用量账本(worker 泳道不变)。不接的话
+				// solver/re_analyst 的消耗全混在 worker 行里,"哪个角色贵"只能猜 ——
+				// 实测窗口里这类无法归因的调用占了 17.5% 的计费输入。见 docs §6 (P1-5)。
+				TagCtx: llmrec.WithAgentType,
 				// 子 agent 的中间过程镜像进 activity：不接的话 solver 在 UI 上是黑盒
 				//（task 35 真机验证确认的缺口）。见 subagentActivityTap。
 				OnEvent: subagentActivityTap(emitWrap),
 			})
 			tools = append(tools, agentTool)
-		} else if err != nil {
-			log.Printf("[worker] 子 agent 角色表构造失败，本任务不启用派生：%v", err)
 		}
 	}
+	// 工具面落一行日志（每 worker 一次）。这条与 planner 的同名日志对称，
+	// 是「Agent 到底有没有进工具面」的唯一直接证据。
+	w.logToolFace(taskID, tools)
 
 	// 意图是 worker 的【唯一职责、贯穿整个 run 的不变量】→ 连同启动指令、意图锚定的目标资产
 	// 原始数据一起放进 system prompt：system 每次 run 都重新拼一遍、绝不会被 compaction 压掉，
@@ -563,6 +710,29 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 					}
 				}
 			}
+		}
+	}
+	// 派生能力必须写进提示词，不能只靠工具描述。
+	//
+	// 实测依据（task 182，P1-4 真机验证）：Agent 工具已在工具面上，账号日志里能看到
+	// 69 次 Bash、0 次 Agent —— lead 自己把活全干了。原因不是工具缺失，而是**没人告诉它
+	// 该派活**：worker 读到的是通用 worker 模板（workerSystem），而「识别题型后分派给
+	// 对应 solver」这句只写在 ctfPack.Prompt() 里，那个函数只喂给子 agent 自己的系统提示，
+	// 从来不给 lead 读。于是模型手上有一个英文工具，却没有一条中文指令要求它用。
+	// 角色清单来自同一份 defs（与工具注册同源），避免两处各读一次角色表。
+	if len(subagentDefs) > 0 {
+		sysBody += subagentBrief(subagentDefs)
+		// 与工具面日志成对：一个说"工具给了"，一个说"也告诉它怎么用了"。
+		// 少了后者，排查时无法区分「模型不知道能派」与「模型知道但选择不派」。
+		log.Printf("[subagent] task %d 已注入派生提示（%d 个角色: %s）",
+			taskID, len(subagentDefs), strings.Join(sortedKeys(subagentDefs), " "))
+		// 本域 lead 职责（CTF / 逆向的 lead 就是 worker；渗透/红队返回空）。
+		// 放在 subagentBrief 之后：先讲"能派给谁"，再讲"作为 lead 该怎么推进"。
+		// 只在有 Agent 工具时注入 —— 没有派发能力却要求"交给 analyst 验证"，
+		// 模型会反复尝试一个不存在的动作。
+		if lead := leadPromptFor(w.domain); len(lead) > 0 {
+			sysBody += "\n\n【本域 lead 职责】\n" + strings.Join(lead, "\n")
+			log.Printf("[subagent] task %d 已注入域 lead 提示（%s）", taskID, w.domain)
 		}
 	}
 	sysBody += "\n\n开始执行上面这条意图：只做它、只产生事实、assets、finding、做完即停。"
@@ -606,6 +776,10 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		// 墙钟预算,轮边界判,不打断半路;0 = 不限。有任务级 deadline 时夹逼到 min(自身预算,
 		// 距 deadline 剩余),让本 run 在任务到点时自然进收尾(见 taskclock.go)。
 		MaxDuration: maxDur,
+		// 每 N 轮把「还剩多少轮 / 多少墙钟」作为一条 user 消息注入（P2-8）。
+		// 用同一对 (maxTurns, maxDur) 构造：提醒的数字必须与 SDK 真正判定用的上限同源，
+		// 否则会出现"提示说还有 10 轮、第 3 轮就被砍"这种比不提示更坏的误导。
+		BudgetNotice: newBudgetNotice(w.maxTurns, maxDur),
 		// 命中预算(轮次 OR 时长)→ SDK 跑一轮收尾(隐藏 Bash),把已识别的写回,避免烂尾。
 		// clamped(被任务 deadline 夹逼)时用 PromptByReason:因超时=任务到点→任务超时词,
 		// 因步数=夹逼窗口内步数先耗尽→回落 per-run 词。非 clamped 维持纯 per-run。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strings"
 
 	"github.com/jintilm/praetor/agent/domain"
 	actool "github.com/jintilm/praetor/internal/norma/tool"
@@ -128,6 +129,11 @@ func UnresolvedDomainTools(p domain.DomainPack) []string {
 	var out []string
 	for _, r := range p.Roles() {
 		for _, k := range domain.EffectiveTools(p, r) {
+			// MCP 工具（mcp__server__tool）由运行时按可见性注入，平台索引里永远没有；
+			// 把它们算作"未接入"会让任何声明了浏览器的角色都报红。
+			if strings.HasPrefix(k, "mcp__") {
+				continue
+			}
 			if _, ok := idx[k]; ok || optionalSDKTools[k] || seen[k] {
 				continue
 			}

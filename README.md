@@ -273,6 +273,30 @@ CGO_ENABLED=0 go build -tags embedui -o praetor ./cmd/praetor
 
 **常用参数**：`./start.sh -addr :8787 -proxy :8788`（`-addr` 前端+API，`-proxy` 流量录制代理）。启动脚本会把参数原样透传给 `praetor`。
 
+> ⚠️ 监听地址是 `-addr` **参数**，不是 `.env` 里的端口变量。用 `-addr :8797` 启动就必须访问 `:8797`；默认是 `:8787`。
+
+### Windows 上的 Bash（需要 POSIX shell）
+
+工具名虽然叫 `Bash`，但它要的是 **POSIX shell**。Linux/macOS 上 `/bin/sh` 就是，不用管；**Windows 上必须装 Git for Windows 或 MSYS2**，否则 `Bash` 会退化成 PowerShell，`2>/dev/null`、`$?`、`&&`、heredoc 这些语法一条都跑不了。
+
+不需要手工配路径——启动时按这个顺序自动找，找到即用：
+
+1. `PRAETOR_HOST_SHELL`（显式指定，优先级最高）
+2. `PATH` 上的 `bash.exe`
+3. 由 `PATH` 上的 `git.exe` 反推（向上两三层找 `bin\bash.exe` / `usr\bin\bash.exe`，覆盖 Git for Windows、PortableGit、MSYS2 各种布局）
+4. `PATH` 上的 `sh.exe`
+5. 固定安装点：`%ProgramFiles%\Git`、`%ProgramW6432%\Git`、`%ProgramFiles(x86)%\Git`、`%LOCALAPPDATA%\Programs\Git`、`%SystemDrive%\msys64`
+
+`C:\Windows\System32\bash.exe`（WSL）会被**主动拒绝**——它解析不了 `E:\...` 这类 Win32 路径，用它比用 PowerShell 更糟。
+
+启动日志里有一行能直接看出选了谁、为什么：
+
+```
+[shell] 宿主 shell: C:\Program Files\Git\bin\bash.exe [-c] ← 固定安装点 %ProgramFiles%\Git
+```
+
+看到 `← 回退：未找到可用的 POSIX shell` 就说明没装 Git Bash，同一条日志下面会跟一条带修复动作的警告。改完重启即可，不用重建二进制。
+
 ### 反向代理部署（HTTPS / 只开放 443）
 
 前端和 API/SSE 都由同一个后端端口（默认 `:8787`）提供，实时活动流默认走**同源**地址，因此**无需配置 `NEXT_PUBLIC_SSE_BASE`**，公网只开放 443、把 8787 留在内网即可。

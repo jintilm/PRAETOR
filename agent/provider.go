@@ -211,6 +211,13 @@ func FromEnv() (Config, bool) {
 		BaseURL: config.Env("LLM_BASE_URL"),
 		Model:   config.Env("LLM_MODEL"),
 		Proxy:   strings.TrimSpace(config.Env("LLM_PROXY")),
+		// 思考开关/强度：透传，不做取值校验 —— 不同模型支持的档位不同
+		// （有的只认 low/high，有的还有 xhigh/max），本地猜"这个模型支不支持"
+		// 比让上游返回 400 更容易出错。配错时上游的报错会原样带回日志。
+		//   PRAETOR_LLM_THINKING_TYPE     "" | disabled | enabled
+		//   PRAETOR_LLM_REASONING_EFFORT  "" | low | medium | high | xhigh | max
+		ThinkingType:    strings.TrimSpace(config.Env("LLM_THINKING_TYPE")),
+		ReasoningEffort: strings.TrimSpace(config.Env("LLM_REASONING_EFFORT")),
 		// 默认流式;PRAETOR_LLM_STREAM=false/0/off 显式关闭走非流式。
 		Stream: !isFalsy(config.Env("LLM_STREAM")),
 	}

@@ -1,6 +1,7 @@
 import {
   Activity,
   Ban,
+  BarChart3,
   BellRing,
   Bot,
   Brain,
@@ -8,6 +9,7 @@ import {
   ClipboardList,
   FolderOpen,
   FolderSync,
+  Flag,
   LayoutDashboard,
   type LucideIcon,
   MessageSquare,
@@ -75,6 +77,7 @@ export const sidebarItems: NavGroup[] = [
       { id: "llm-records", title: "LLM 录制", url: "/function/llm-records", icon: Radio },
       { id: "assets", title: "资产", url: "/function/assets", icon: Network },
       { id: "sync", title: "资产同步", url: "/function/sync", icon: FolderSync },
+      { id: "ctf-board", title: "CTF 看板", url: "/function/ctf-board", icon: Flag },
       { id: "workspace", title: "工作空间", url: "/function/workspace", icon: FolderOpen },
     ],
   },
@@ -83,6 +86,7 @@ export const sidebarItems: NavGroup[] = [
     label: "系统",
     items: [
       { id: "llm", title: "LLM", url: "/system/llm", icon: Brain },
+      { id: "usage", title: "用量成本", url: "/system/usage", icon: BarChart3 },
       { id: "agents", title: "Agent", url: "/system/agents", icon: Bot },
       { id: "mcp", title: "MCP", url: "/system/mcp", icon: Plug },
       { id: "skills", title: "Skill", url: "/system/skills", icon: Sparkles },

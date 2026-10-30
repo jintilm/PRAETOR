@@ -357,8 +357,12 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 	// only trigger_* fields) leaves the untouched settings alone instead of resetting
 	// max_turns/run_seconds to 0.
 	var req struct {
-		MaxTurns         *int  `json:"max_turns"`
-		RunSeconds       *int  `json:"run_seconds"`
+		MaxTurns   *int `json:"max_turns"`
+		RunSeconds *int `json:"run_seconds"`
+		// MaxDurationSeconds 是角色级单次派发墙钟；缺省=不动，0=清除（回到 pack 声明值）。
+		MaxDurationSeconds *int `json:"max_duration_seconds"`
+		// UpgradeProfileID 是停滞升级目标 profile；缺省=不动，0=清除（不做角色级升级）。
+		UpgradeProfileID *int  `json:"upgrade_profile_id"`
 		WebSearch        *bool `json:"web_search"`
 		InteractiveShell *bool `json:"interactive_shell"`
 		// llm_profile_id 三态:字段缺省=不动;显式 null=解绑(跟随任务/全局);数字=绑定该 profile。
@@ -407,6 +411,26 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 			rs = 0
 		}
 		if err := pg.SetAgentRunSeconds(a.Key, rs); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.UpgradeProfileID != nil {
+		// 正数必须指向真实存在的 profile：外键会挡住，但直接让 FK 报 500 对操作者没有信息量。
+		if *req.UpgradeProfileID > 0 {
+			if _, ok := s.loadProfileConfig(int64(*req.UpgradeProfileID)); !ok {
+				writeErr(w, 400, "指定的升级 LLM 配置不存在或无效")
+				return
+			}
+		}
+		if err := pg.SetAgentUpgradeProfile(a.Key, *req.UpgradeProfileID); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.MaxDurationSeconds != nil {
+		// 0 或负数 = 清除（回到 pack 声明）；正数 = 该角色的单次派发墙钟。
+		if err := pg.SetAgentMaxDuration(a.Key, *req.MaxDurationSeconds); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}

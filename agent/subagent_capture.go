@@ -17,8 +17,9 @@ import (
 //   - Tool 名前缀 "agentType:"，混排时能一眼分辨这步是谁做的；
 //   - 不记 thinking 与 usage —— thinking 噪音大，usage 由 llmrec 在 provider
 //     层记账（子 agent 用同一个 wrapped provider，token 已按任务入账）。
+//
 // 返回的闭包按 agentType 分前缀；tool_use id → 工具名的映射必须按子 agent 隔离
-//（不同 solver 的 id 空间互不相干，共享一张表会串名）。
+// （不同 solver 的 id 空间互不相干，共享一张表会串名）。
 func subagentActivityTap(emit func(db.Activity)) func(string, harness.Event) {
 	if emit == nil {
 		return nil

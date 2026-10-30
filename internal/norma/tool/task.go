@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -556,18 +555,6 @@ func tailFile(path string, maxBytes int) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("[%d KB of earlier output omitted — read the output file directly for full output]\n", off/1024) + string(b), nil
-}
-
-// shellCmd returns the platform shell and the argument flags that precede the
-// command string. On Windows it uses PowerShell with -NoProfile -NonInteractive
-// (the command is passed to -Command) so a user profile can't inject banners or
-// prompts and an interactive prompt can't hang an unattended run. Elsewhere it
-// uses `bash -c`.
-func shellCmd() (string, []string) {
-	if runtime.GOOS == "windows" {
-		return "powershell", []string{"-NoProfile", "-NonInteractive", "-Command"}
-	}
-	return "bash", []string{"-c"}
 }
 
 // short trims a command to a compact single-line label for summaries.

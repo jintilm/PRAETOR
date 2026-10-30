@@ -498,19 +498,28 @@ func (p *ctfBoardProvider) budget(used int64) ctfplan.Budget {
 //
 // 放在提交侧而不是工具侧：只有"平台判对"这一个事实算数（与跑分口径同源）。
 func (s *Server) markCTFSolvedOnAccept(taskID string, challengeID string) {
-	if challengeID == "" {
-		return
+	if strings.TrimSpace(challengeID) == "" {
+		// 不再直接放弃：模型没传 challenge_id 时按题面目录兜底，
+		// 否则"判题通过但看板未解出"（task 212 实测）。
+		challengeID = defaultChallengeID(s.m.pg, taskID)
 	}
 	id, err := strconv.ParseInt(taskID, 10, 64)
 	if err != nil || id <= 0 {
 		return
 	}
+	// 消耗快照 = 全任务累计 − 这道题开跑时的基线。
+	//
+	// 没有进度行时（题目没被 ctf_board 预登记过，或模型没传 challenge_id 被兜底成目录名）
+	// 不能算成 0：202/208 就是这样在看板上显示"判题时消耗 —"，看起来像没花 token。
+	// 这种情况下全任务累计就是最接近的上界，比 0 有用。
 	spent := int64(0)
 	if total, terr := s.m.pg.TaskTokenTotal(taskID); terr == nil {
 		if pr, perr := s.m.pg.GetCTFProgress(id, challengeID); perr == nil && pr != nil {
 			if d := total - pr.BaseTokens; d > 0 {
 				spent = d
 			}
+		} else if total > 0 {
+			spent = total
 		}
 	}
 	if err := s.m.pg.MarkCTFChallengeSolved(id, challengeID, spent); err != nil {

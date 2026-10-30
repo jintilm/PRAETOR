@@ -46,29 +46,46 @@ type Decision struct {
 	Detail string // 人可读，直接进日志/任务备注
 }
 
+// Breaches 返回**所有**已超限的维度，顺序固定为 tokens → tool_calls → wall。
+//
+// 与 Evaluate 的分工：Evaluate 是"只需一个结论"的便捷版（取这里的第一条），
+// 硬闸用它就够——停一次就够了，多报没有意义。
+//
+// 但 dry-run 需要**全部**：它问的是"这个任务会撞到哪几堵墙"。
+// 只看第一条的话，一个同时超 tokens 和 tool_calls 的任务在账本里永远只留 token 一条，
+// 一周后据此决定要不要开硬闸时，就会漏掉一整个维度（而 tool_calls 恰恰是唯一
+// 与"钱"无关、只防死循环的维度，最容易被漏）。
+func Breaches(l Limits, u Usage) []Decision {
+	var out []Decision
+	if l.Tokens > 0 && u.Tokens >= l.Tokens {
+		out = append(out, Decision{
+			Stop: true, Breach: BreachTokens,
+			Detail: fmt.Sprintf("token 预算用尽（%s / %s）", fmtInt(u.Tokens), fmtInt(l.Tokens)),
+		})
+	}
+	if l.ToolCalls > 0 && u.ToolCalls >= l.ToolCalls {
+		out = append(out, Decision{
+			Stop: true, Breach: BreachToolCalls,
+			Detail: fmt.Sprintf("工具调用次数用尽（%d / %d）", u.ToolCalls, l.ToolCalls),
+		})
+	}
+	if l.Wall > 0 && u.Elapsed >= l.Wall {
+		out = append(out, Decision{
+			Stop: true, Breach: BreachWall,
+			Detail: fmt.Sprintf("墙钟预算用尽（%s / %s）", roundDur(u.Elapsed), roundDur(l.Wall)),
+		})
+	}
+	return out
+}
+
 // Evaluate 判定是否应停止。
 //
 // 判定顺序固定为 tokens → tool_calls → wall：
 // 同时超多个时，报 token 更有信息量（它直接对应钱），而 wall 是既有超时协调器也管的事，
 // 晚了会先被那边接走。顺序固定也让日志可预测、测试可断言。
 func Evaluate(l Limits, u Usage) Decision {
-	if l.Tokens > 0 && u.Tokens >= l.Tokens {
-		return Decision{
-			Stop: true, Breach: BreachTokens,
-			Detail: fmt.Sprintf("token 预算用尽（%s / %s）", fmtInt(u.Tokens), fmtInt(l.Tokens)),
-		}
-	}
-	if l.ToolCalls > 0 && u.ToolCalls >= l.ToolCalls {
-		return Decision{
-			Stop: true, Breach: BreachToolCalls,
-			Detail: fmt.Sprintf("工具调用次数用尽（%d / %d）", u.ToolCalls, l.ToolCalls),
-		}
-	}
-	if l.Wall > 0 && u.Elapsed >= l.Wall {
-		return Decision{
-			Stop: true, Breach: BreachWall,
-			Detail: fmt.Sprintf("墙钟预算用尽（%s / %s）", roundDur(u.Elapsed), roundDur(l.Wall)),
-		}
+	if ds := Breaches(l, u); len(ds) > 0 {
+		return ds[0]
 	}
 	return Decision{}
 }

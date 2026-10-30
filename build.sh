@@ -115,15 +115,16 @@ if [ "${PRAETOR_SKIP_FRONTEND:-0}" = "1" ]; then
   [ -d server/webui/dist ] || die "PRAETOR_SKIP_FRONTEND=1 但 server/webui/dist 不存在"
 else
   command -v npm >/dev/null 2>&1 || die "未检测到 npm（前端静态构建需要 Node.js/npm）"
-  command -v rsync >/dev/null 2>&1 || die "未检测到 rsync"
   info "构建前端静态资源"
   if [ "${PRAETOR_SKIP_NPM_CI:-0}" != "1" ]; then
     (cd web && npm ci)
   fi
   (cd web && npm run build:static)
   info "同步前端资源到 server/webui/dist"
+  # 不用 rsync：Windows 的 Git Bash 通常没有它，而这一步只是"清空 + 整目录复制"。
+  rm -rf server/webui/dist
   mkdir -p server/webui/dist
-  rsync -a --delete web/out/ server/webui/dist/
+  cp -R web/out/. server/webui/dist/
 fi
 
 compress_binary() {

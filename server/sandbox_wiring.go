@@ -33,17 +33,22 @@ func WireSandboxWithImage(ctx context.Context, dataDir, image string) {
 	wireSandbox(ctx, dataDir, image, SandboxRouting{})
 }
 
-// SandboxRouting 是按任务做的两项路由决策。
+// SandboxRouting 是按任务做的路由决策。
 //
-// 两者都是"只有上层知道"的知识，所以从外面注入：
+// 都是"只有上层知道"的知识，所以从外面注入：
 //   - ImageFor：这个任务的领域要不要专用工具链（sandbox_image.go）；
-//   - MountFor：这个任务的题面附件在宿主的哪儿、要挂到容器里的哪儿（sandbox_mounts.go）。
+//   - MountFor：这个任务的题面附件在宿主的哪儿、要挂到容器里的哪儿（sandbox_mounts.go）；
+//   - TargetHosts：题面里出现了哪些主机名，用来推断任务容器该接入哪个 docker 网络
+//     （sandbox/target_network.go）。
 type SandboxRouting struct {
 	ImageFor func(taskID string) string
 	MountFor func(taskID string) []sandbox.Mount
 	// Egress 返回该任务的全量出口上游；nil = 不启用（直连）。
 	// 由 server 闭包提供：每次创建容器时求值，全局代理/出口池热改即生效。
 	Egress func(taskID string) *sandbox.EgressUpstream
+	// TargetHosts 返回题面里出现的主机名（描述/目标/资产）。
+	// nil = 不做网络推断，行为与改造前一致。
+	TargetHosts func(taskID string) []string
 }
 
 // WireSandboxWithImages 额外带上「按任务选镜像」的解析器（领域专用工具链，见 sandbox_image.go）。
@@ -84,6 +89,7 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string, routing San
 	mode := sandbox.ModeFromEnv()
 	if mode == sandbox.ModeOff {
 		agent.SandboxExec = nil // 不包 Bash，行为与改造前一致
+		agent.SetSandboxState(agent.SandboxOff)
 		log.Printf("[sandbox] 已关闭（%s=off），Bash 在宿主执行", sandbox.EnvMode)
 		return
 	}
@@ -93,7 +99,7 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string, routing San
 	var runner sandbox.Runner
 	switch isolation {
 	case sandbox.IsolationShared:
-		runner = sandbox.NewDocker(sandbox.ContainerFromEnv(), "/work")
+		runner = sandbox.NewDocker(sandbox.ContainerFromEnv(), SandboxContainerRoot)
 	default:
 		image := strings.TrimSpace(imageOverride)
 		if image == "" {
@@ -104,11 +110,14 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string, routing San
 			ImageFor:      routing.ImageFor,
 			MountFor:      routing.MountFor,
 			HostWorkRoot:  envOr("SANDBOX_WORK_ROOT", filepath.Join(dataDir, "work")),
-			ContainerRoot: "/work",
+			ContainerRoot: SandboxContainerRoot,
 			Network:       config.Env("SANDBOX_NETWORK"),
 			Env:           sandboxContainerEnv(),
 			IdleTTL:       durationOr("SANDBOX_IDLE_TTL", 30*time.Minute),
 			Egress:        routing.Egress,
+			// 题面主机名 → 目标网络：见 sandbox.TargetNetwork。这里只提供"名字从哪来"，
+			// 具体要不要接、接哪个网络由沙箱层问 docker 决定。
+			TargetHosts: routing.TargetHosts,
 		})
 		// 回收协程与探测结果无关：即使当前不可用，起来之后新容器也需要被回收。
 		pt.StartReaper(ctx, 5*time.Minute)
@@ -125,15 +134,21 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string, routing San
 		if mode == sandbox.ModeOptional {
 			log.Printf("[sandbox] %s=optional：降级为宿主执行（仅限本地调试）", sandbox.EnvMode)
 			agent.SandboxExec = &sandbox.HostRunner{}
+			agent.SetSandboxState(agent.SandboxHost)
 			return
 		}
 		log.Printf("[sandbox] worker 的 Bash 将被拒绝；修好 Docker/镜像，或设 %s=optional 降级", sandbox.EnvMode)
 		// 关键：注入「永远拒绝」的 Runner。置空会让 Bash 回落宿主执行 = fail-open。
 		agent.SandboxExec = sandbox.Failing(err)
+		agent.SetSandboxState(agent.SandboxUnavailable)
 		return
 	}
 
 	agent.SandboxExec = runner
+	agent.SetSandboxState(agent.SandboxContainer)
+	// Bash 的 cwd：worker 的 run 落在 <root>/i<intentID>，与提示词（promptRunDir）同源。
+	// 不宣告的话 Bash 会停在任务根，模型用相对路径写的产物落到共享目录里。
+	agent.SetSandboxContainerRoot(SandboxContainerRoot)
 	// 网络配错时容器起不来，而报错发生在每条 Bash 上——启动期说一次比重复几十遍便宜。
 	// 这里只警告不降级：不跑靶机的任务不受影响，不该被别人的配置失误牵连。
 	if err := sandbox.CheckNetwork(ctx, config.Env("SANDBOX_NETWORK")); err != nil {
@@ -226,4 +241,33 @@ func PickUpstreamIndex(taskID string, n int) int {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(taskID))
 	return int(h.Sum32() % uint32(n))
+}
+
+// targetHostsFromText 从若干段题面文本里提取主机名（去重、保序）。
+//
+// 复用 seed 的 parseTarget：站点播种与网络对齐必须看同一段文本、用同一套解析，
+// 否则会出现"资产里有 delulu、沙箱却没接进 delulu 的网络"这种半对齐状态。
+func targetHostsFromText(texts ...string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, text := range texts {
+		if _, host, _, ok := parseTarget(text); ok && host != "" && !seen[host] {
+			seen[host] = true
+			out = append(out, host)
+		}
+	}
+	return out
+}
+
+// taskTargetHosts 供沙箱推断「任务容器该接入哪个 docker 网络」。
+// 任务不存在时返回 nil（沙箱退回默认网络，不报错）。
+func (s *Server) taskTargetHosts(taskID string) []string {
+	if s == nil || s.m == nil {
+		return nil
+	}
+	t, ok := s.m.Task(taskID)
+	if !ok || t == nil {
+		return nil
+	}
+	return targetHostsFromText(t.Description, t.Goal)
 }

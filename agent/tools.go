@@ -1238,7 +1238,7 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			"evidence_id": idp("证明它的发现/事实节点 id"),
 			"reason":      str("为什么这个证据满足该目标"),
 		}, "goal_id", "evidence_id"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				GoalID     json.RawMessage `json:"goal_id"`
 				EvidenceID json.RawMessage `json:"evidence_id"`
@@ -1256,6 +1256,11 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			evidenceNode, err := t.ts.GetNodeWithSources(ev)
 			if err != nil || evidenceNode == nil || (evidenceNode.Kind != db.KindFact && evidenceNode.Kind != db.KindFinding) {
 				return actool.Errorf("evidence_id 必须是本任务或直接关联任务的事实/漏洞节点"), nil
+			}
+			// 确定性验收先于任何写入：目标能不能标 met 由域的 Verifier 说了算，不是模型说了算。
+			// 拒绝时不写 Link、不改 state，把理由原样回给模型，它会继续补证据（或最终超时）。
+			if v, enforced := t.verifyGoalEvidence(ctx, evidenceNode); enforced && !v.Done {
+				return actool.Errorf("目标判定被确定性验收拒绝：" + v.Reason), nil
 			}
 			_ = t.ts.Link(ev, db.RelProves, goal)
 			_ = t.ts.SetNodeState(goal, "met")
@@ -1285,9 +1290,14 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 func (t *ToolSet) goalMet() actool.CoreTool {
 	return writeTool("goal_met", "【立即结束整个任务】——仅当你确认任务的【全部目标都已真正达成、整体收官】时才调（注意是任务【整体】完成；仅仅达成了其中某一个目标/某一个 flag/某一个漏洞【不算】——那种情况用 prove_goal 标记该目标即可）。⚠️它不是用来“结束本轮规划”的：本轮没有新意图要派、或在等 worker 产出，都【直接结束本轮即可，不要调本工具】（0 个意图是完全正常的）。正常判定优先用 prove_goal 逐个证明目标；goal_met 只是绕过逐个证明、直接从全局收官的手段。",
 		obj(map[string]any{"reason": str("达成理由（必须是目标真正达成的证据，不能是“本轮无新方向”这类结束本轮的理由）")}, "reason"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct{ Reason string }
 			_ = json.Unmarshal(in, &a)
+			// 整体收官同样要过确定性验收：goal_met 是绕过逐个 prove_goal 的旁路，
+			// 如果只堵 prove_goal，模型换这个工具就能把"没 flag"的任务标成完成。
+			if v, enforced := t.verifyGoalEvidence(ctx, nil); enforced && !v.Done {
+				return actool.Errorf("整体收官被确定性验收拒绝：" + v.Reason), nil
+			}
 			if err := t.campaignCleanupBlock(); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
@@ -1300,9 +1310,10 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 // --- worker write tools ---
 
 func (t *ToolSet) addFinding() actool.CoreTool {
-	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。", obj(map[string]any{
+	return writeTool("report_finding", "记录确认的漏洞，用 evidence 提供命令输出、日志等可验证证据。任务上下文传当前 intent_id。返回的 finding_id 是独立漏洞记录 ID，finding_node_id 是探索节点 ID（第一行保留该节点编号）。同一位置、同一参数上的同一类问题只登记一次：若已有，本次不会新增，工具会返回已有编号——确认本次是不同问题（不同参数/位置/利用方式）时传 distinct=true 强制新增。", obj(map[string]any{
 		"vulnclass": str("漏洞类别"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要"),
 		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id"},
+		"distinct":         map[string]any{"type": "boolean", "description": "可选。默认 false：若本任务已有同一位置/同一参数上的同一类漏洞，本次不会新增（工具会返回已有编号）。确认本次是不同问题（不同参数、不同位置或不同利用方式）时传 true 强制新增。"},
 		"evidence":         str("证据/PoC 文本"),
 		"evidence_hint_id": idp("可选：本任务中对应此漏洞的提示节点 ID，自动携带其结构化 traffic_refs；不能引用继承提示或其他漏洞的提示"),
 		"traffic_refs": map[string]any{"type": "array", "description": "可选；HTTP/HTTPS 漏洞先检索并逐条核实请求/响应确实支持漏洞结论，再按复现顺序填写真实 ID。TCP 等非 HTTP 漏洞、未采集或找不到确切记录时省略或传 []，不阻止上报；可在 evidence 说明原因并提供其他可验证证据。不要猜测 ID、按域名/时间推定关联或仅为补包重复探测。用途 baseline 正常对照 / proof 漏洞证明 / verification 补充验证 / supporting 辅助证据。",
@@ -1310,6 +1321,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 	}, "vulnclass", "severity", "summary"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 		var a struct {
 			VulnClass, Name, Severity, Summary, Evidence string
+			Distinct                                     bool              `json:"distinct"`
 			IntentID                                     json.RawMessage   `json:"intent_id"`
 			AssetIDs                                     []json.RawMessage `json:"asset_ids"`
 			TrafficRefs                                  []db.TrafficRef   `json:"traffic_refs"`
@@ -1339,6 +1351,22 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		intent := pid(a.IntentID)
 		if intent <= 0 {
 			intent = t.defaultIntent // 子 agent 没传 intent_id 时归口到本 run 的意图
+		}
+		// 去重闸门：同一任务里「同一位置 / 同一参数上的同一类问题」只登记一次
+		// （task 206 实测：6 条 finding 只描述了 3 个问题）。命中时不新增，
+		// 把已有编号回给模型；模型确认是不同问题时带 distinct=true 再来一次。
+		//
+		// 加锁的原因：同一任务的多个 worker 是并行跑的，只"先查后插"而不做临界区，
+		// 它们会各自查不到再各插一条 —— 206 的 6 条重复里有 5 条就是这么来的。
+		// 判定逻辑与阈值见 agent/finding_dedupe.go。
+		if lk := findingReportLock(t.findingLockKey()); lk != nil {
+			lk.Lock()
+			defer lk.Unlock()
+		}
+		if !a.Distinct {
+			if dup, existingClass := t.findDuplicateFinding(a.VulnClass, a.Name, a.Summary, a.Evidence); dup != nil {
+				return t.duplicateFindingResult(a.VulnClass, dup, existingClass), nil
+			}
 		}
 		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: intent, VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs)}
 		var recorded *db.RecordedFinding
@@ -1541,6 +1569,19 @@ func (t *ToolSet) addOneGoal(it goalItem) (int64, error) {
 	if text == "" {
 		return 0, fmt.Errorf("text 不能为空")
 	}
+	// 幂等：同一任务里已有相同 text 的 goal 就复用，不再新增。
+	//
+	// 为什么必须去重（task 198，2026-10-30）：goal 拆解在 grok 上重试了 3 次，
+	// 每次 set_goals 都新增一行，探索图里出现 **4 个一字不差的 goal**。后果：
+	// planner 要逐个 prove 4 次、goal 计数虚高、allMet 判定被稀释（漏标一个就算没完成）。
+	// 拆解是"提交一次结果"而不是"追加一次记录"，重试不该产生副作用。
+	if goals, err := t.ts.ListByKind(db.KindGoal, 1000); err == nil {
+		for _, g := range goals {
+			if goalText(g) == text {
+				return g.ID, nil
+			}
+		}
+	}
 	payload := map[string]any{"text": text}
 	if vc := strings.TrimSpace(it.VulnClass); vc != "" {
 		payload["vulnclass"] = vc
@@ -1557,6 +1598,20 @@ func (t *ToolSet) addOneGoal(it goalItem) (int64, error) {
 		_ = t.ts.Link(of, db.RelSpawns, id) // goals descend from the task root (origin fact)
 	}
 	return id, nil
+}
+
+// goalText 取 goal 节点 payload 里的 text（拆解器与 seed 都写这个字段）。
+func goalText(n *db.Node) string {
+	if n == nil {
+		return ""
+	}
+	var p struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(n.Payload, &p); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(p.Text)
 }
 
 // setGoals 给【本任务】新增探索目标(goal 节点)。既是目标拆解器的提交工具,也是主
