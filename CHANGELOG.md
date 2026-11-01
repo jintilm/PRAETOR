@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+### 部署
+
+#### 修复的问题
+
+- **`./install.sh` 装的是别人的镜像（严重）**：`docker-compose.yml` 里 `praetor` 服务写死了 `image: autumn27/praetor:latest`，`install.sh` 走 `docker compose pull` 于是拉到上游作者的镜像——代码不是仓库里的那份，也无法验证构建来源。现改为 **`docker compose build` 从本仓库源码构建**（`Dockerfile` 的 `runtime-with-source` 目标），宿主不需要装 Node/Go；想用现成镜像时在 `.env` 设 `PRAETOR_IMAGE` 显式指定。
+- **`Dockerfile` 只接受预编译二进制**：原来 `COPY dist/<arch>/praetor`，克隆者必须先本机装好 Go/Node 编一遍才有镜像。现改为多阶段：`runtime-with-binary`（CI 用，行为不变）与 `runtime-with-source`（默认，镜像内编译），两个目标共用同一 `runtime-base`，工具链只维护一份。
+- **CI 把镜像推到别人的命名空间**：`release.yml` 里镜像名写死 `autumn27/praetor`。现改为 `${{ github.repository_owner }}/praetor`（谁 fork 谁推自己名下），且只在上游仓库执行该 job——fork 没有 Docker Hub 凭据，跑了也只会失败。
+- **`./update.sh` 回答「不拉取代码」会直接退出**：`sync_repo` 的跳过分支用无参 `return`，会继承上一条失败命令的退出码 1，配合 `set -e` 等于用户答 `n` 就中断。已改为 `return 0`。
+- **`update.sh` 改镜像 tag 会切掉 registry 端口**：`${img%:*}` 对 `localhost:5000/praetor` 会得到 `localhost`。改为「只有最后一个 `/` 之后出现 `:` 才当成 tag」。
+- **容器化部署的沙箱默认不可用**：不挂 `docker.sock` 时 `PRAETOR_SANDBOX=required` 会让每次 Bash 都报 `sandbox unavailable`，而部署本身看起来成功。新增 `docker-compose.socket.yml` 覆盖层，`install.sh` 会显式询问沙箱运行方式并写入 `PRAETOR_MOUNT_DOCKER_SOCKET`。
+- **README 里的地址/命令与实际不符**：Docker 部署实际监听 `localhost:8797`（容器内 8787、宿主映射由 `PRAETOR_HTTP_PORT` 决定），原文写 8787；更新章节也还在教 `docker compose pull`。已按四种安装方式逐条修正，并补了环境变量速查表。
+
+#### 新增的功能
+
+- **构建源可配置**：`PRAETOR_GOPROXY` / `PRAETOR_NPM_REGISTRY` 作为 build args 传入，被墙或内网环境不必改 Dockerfile。
+
 ## [0.3.15] - 2026-10-07
 
 ### 拦截

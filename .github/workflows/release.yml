@@ -98,8 +98,16 @@ jobs:
 
   # ④ 多架构镜像 → 推 Docker Hub（复用 binaries 编好的 Linux 二进制，
   #    镜像里只装工具 + 放二进制；arm64 仅需模拟 apt 层，构建快很多）
+  #
+  # 镜像名取 `${{ github.repository_owner }}/praetor`：**谁的仓库就推谁的命名空间**。
+  # fork 出去的仓库会推 <你的用户名>/praetor，不会把别人的镜像当成自己的产物。
+  #
+  # 只在上游仓库（jintilm/PRAETOR）发布镜像：fork 没有 DOCKERHUB_* 凭据，
+  # 这一步本来就会失败，而失败对复刻者没有任何信息量。
+  # 换成自己的仓库时，把下面的 'jintilm' 改成你的用户名（或在仓库变量里覆盖）。
   docker:
     needs: binaries
+    if: github.repository_owner == 'jintilm'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4 # 取 Dockerfile 与 skills/
@@ -120,13 +128,15 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: autumn27/praetor
+          images: ${{ github.repository_owner }}/praetor
           tags: |
             type=ref,event=tag
             type=raw,value=latest
       - uses: docker/build-push-action@v6
         with:
           context: .
+          # 吃上面下载的 dist/<arch>/praetor；默认目标会走源码编译，CI 里没必要重编一遍
+          target: runtime-with-binary
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

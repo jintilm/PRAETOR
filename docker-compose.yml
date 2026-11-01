@@ -35,7 +35,25 @@ services:
     restart: unless-stopped
 
   praetor:
-    image: autumn27/praetor:${PRAETOR_TAG:-latest}
+    # 镜像来源：**默认从本仓库源码构建**（见下面 build.target），装的永远是你 clone
+    # 下来的这份代码——不会去 Docker Hub 拉某个人的预编译镜像。
+    #
+    # 想改用现成的发布镜像：在 .env 设 PRAETOR_IMAGE=<registry>/<repo>:<tag>，
+    # 再 `docker compose pull praetor && docker compose up -d praetor`。
+    # 设了 PRAETOR_IMAGE 后仍保留 build 段，但 compose 只在本地缺镜像时才构建。
+    image: ${PRAETOR_IMAGE:-praetor/praetor:${PRAETOR_TAG:-local}}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # 源码构建目标：在镜像里编 Next + Go（宿主不需要 Node/Go）。
+      # CI 发布用的是 runtime-with-binary（吃 release.yml 交叉编译的二进制）。
+      target: runtime-with-source
+      args:
+        # 依赖源。内网 / 国内网络拉不动官方源时在 .env 里改这两个：
+        #   PRAETOR_GOPROXY=https://goproxy.cn,direct
+        #   PRAETOR_NPM_REGISTRY=https://registry.npmmirror.com
+        GOPROXY: ${PRAETOR_GOPROXY:-https://proxy.golang.org,direct}
+        NPM_REGISTRY: ${PRAETOR_NPM_REGISTRY:-https://registry.npmjs.org}
     container_name: praetor-app
     depends_on:
       postgres:

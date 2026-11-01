@@ -1,0 +1,16 @@
+# 可选覆盖层：把宿主 Docker 的控制权交给应用容器。
+#
+# 只有「全部 Docker」部署、且要真正用沙箱（PRAETOR_SANDBOX=required）时才需要：
+# 容器里的 PRAETOR 必须先能 `docker exec` / `docker run`，才能给任务起隔离容器。
+# 不挂这个 socket，required 模式下每次 Bash 都会被拒绝（sandbox unavailable），
+# 而部署本身看起来是成功的 —— 这是最容易踩的坑，所以由 install.sh 显式询问后再带上。
+#
+# 代价必须说清：能访问 docker.sock 就等于宿主 root（可以挂宿主根目录起特权容器）。
+# 更安全的组合是「应用跑宿主机二进制 + 沙箱跑容器」（见 README 方式二/四）。
+#
+# 用法（install.sh 会在 PRAETOR_MOUNT_DOCKER_SOCKET=1 时自动带上）：
+#   docker compose -f docker-compose.yml -f docker-compose.socket.yml up -d
+services:
+  praetor:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

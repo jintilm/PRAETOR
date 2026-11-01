@@ -103,6 +103,12 @@ CTF 与逆向域的 worker 即领域 lead，可通过 `Agent` 工具把「解一
 ## 安装
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
+>
+> Docker 部署的镜像是**从本仓库源码现编**的（不需要你装 Node/Go），首次构建要拉
+> `node:22` / `golang:1.26` / `python:3.12-slim` 三个基础镜像并从 npm、Go proxy 取依赖，
+> 大约 5~10 分钟；之后改代码只重编变化的那几层。网络受限时给 Docker 配镜像加速，
+> 并在 `.env` 设 `PRAETOR_GOPROXY=https://goproxy.cn,direct`、
+> `PRAETOR_NPM_REGISTRY=https://registry.npmmirror.com`。
 
 ### 方式一：一键安装脚本（推荐）
 
@@ -112,24 +118,42 @@ cd PRAETOR
 ./install.sh
 ```
 
+两种模式**都只用当前仓库的代码**：Docker 模式在镜像里从源码编译（`Dockerfile` 的
+`runtime-with-source` 目标），不会去 Docker Hub 拉别人的预编译镜像。
+
 脚本会：检测 / 自动安装 Docker → 让你选 **① 全部 Docker** 或 **② 本地编译运行**：
 
-- **① 全部 Docker**：填一个 Postgres 密码（可回车随机）→ 自动写 `.env` → `docker compose up -d`。
+- **① 全部 Docker**：填一个 Postgres 密码（可回车随机）→ 写 `.env` → 询问沙箱方式（是否挂 `docker.sock`）→ `docker compose build` + `up -d`。
 - **② 本地运行**：选数据库（连已有 / 用 Docker 起一个）→ 生成 `config.json` → `go` 编译内嵌单二进制 → 启动。
 
-装好后打开 **http://localhost:8787**（首次进入 `/setup` 设置管理员密码）。
+装好后打开 **http://localhost:8797**（方式①）或 **http://localhost:8787**（方式②，二进制默认端口）进入 `/setup` 设置管理员密码。
+
+> 端口不是笔误：容器内固定监听 8787，宿主映射由 `PRAETOR_HTTP_PORT` 决定（默认 **8797**，避开旧栈常用的 8787/8788）；直接跑二进制时监听 **8787**。
 
 ### 方式二：Docker Compose（手动）
 
 ```bash
 git clone https://github.com/jintilm/PRAETOR.git
 cd PRAETOR
-cp .env.example .env          # 填 POSTGRES_PASSWORD、可选 ANTHROPIC_API_KEY
-docker compose up -d          # 拉取 autumn27/praetor 镜像 + postgres
-# → http://localhost:8787
+cp .env.example .env            # 至少填 POSTGRES_PASSWORD
+docker compose up -d --build    # 从本仓库源码构建 praetor 镜像 + 起 postgres
+# → http://localhost:8797
 ```
 
-镜像已含常用工具（ripgrep/curl/vim/npm/nmap…）；`./skills` 与 `./data` 以绑定挂载持久化。
+镜像里已含常用工具（ripgrep/curl/vim/npm/nmap…）；`./skills` 与 `./data` 以绑定挂载持久化。
+
+沙箱要真正可用，应用容器必须能访问宿主 Docker，再叠一层覆盖文件：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.socket.yml up -d --build
+```
+
+> 不挂 `docker.sock` 时，`PRAETOR_SANDBOX=required` 会让每次 Bash 都被拒绝
+> （`sandbox unavailable`）——部署看着成功、一用就报错。要么挂 socket，要么把
+> `PRAETOR_SANDBOX` 改成 `optional`（Bash 跑在应用容器内，用镜像自带工具链）。
+
+想改用现成的发布镜像（而不是自己构建）：在 `.env` 设
+`PRAETOR_IMAGE=<registry>/<repo>:<tag>`，然后 `docker compose pull praetor && docker compose up -d`。
 
 远程 MCP 可在系统设置中选择 `http`（Streamable HTTP）或 `sse`（旧版 SSE）。
 旧版 SSE 服务通常使用 `GET /sse` 建立事件流，再通过服务返回的
@@ -151,8 +175,8 @@ cp config.example.json config.json   # 填好 database 连接
 ### 方式四：从源码编译单二进制
 
 ```bash
-# 1) 前端静态导出（Windows 上 npm script 不认 NEXT_EXPORT=1 前缀语法，
-#    需直接执行：cd web && npm ci && NEXT_EXPORT=1 ./node_modules/.bin/next build）
+# 1) 前端静态导出（build:static 是跨平台的：内部用 Node 设 NEXT_EXPORT 再拉起 next，
+#    Windows 上也能直接跑，不需要手写 NEXT_EXPORT=1 前缀）
 cd web && npm ci && npm run build:static && cd ..
 # 2) 拷进内嵌目录
 cp -r web/out server/webui/dist
@@ -160,6 +184,9 @@ cp -r web/out server/webui/dist
 CGO_ENABLED=0 go build -tags embedui -o praetor ./cmd/praetor
 ./start.sh
 ```
+
+> 只需要后端、前端另跑 `npm run dev` 时，跳过 1~2 步并去掉 `-tags embedui`。
+> 注意不带 `embedui` 编出来的二进制**没有 UI**（页面返回 404 提示语），别拿去部署。
 
 ### 方式五：构建跨平台 Release 压缩包
 
@@ -177,6 +204,56 @@ PRAETOR_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 ./build.sh --target linux/amd64 --upx
 ```
 
+### 方式六：环境变量配置（本地运行要重点看这里）
+
+**二进制不会自动读 `.env`**（它只读 `config.json` 和环境变量），所以本地跑之前要么
+`set -a; . ./.env; set +a`，要么直接 `export`。`docker compose` 则会自动读 `.env`。
+
+宿主机直接跑单二进制的最小配置：
+
+```bash
+# 1) 库：用 compose 里的 praetor-pg（宿主 55433），或任意 PostgreSQL
+docker compose up -d postgres
+
+# 2) 环境变量
+export PRAETOR_PG_DSN='postgres://praetor:<POSTGRES_PASSWORD>@127.0.0.1:55433/praetor?sslmode=disable'
+export PRAETOR_SANDBOX=required                  # 没有 Docker 时改 optional/off
+export PRAETOR_SANDBOX_IMAGE=praetor/sandbox:latest
+export PRAETOR_SANDBOX_WORK_ROOT="$PWD/data/work"   # 建议绝对路径
+export ANTHROPIC_API_KEY='sk-...'                 # 或 OPENAI_API_KEY / 留空到 UI 里配
+
+# 3) 启动（前端已内嵌）
+./praetor -addr :8797
+```
+
+常用变量：
+
+| 变量 | 作用 | 缺省 |
+|---|---|---|
+| `PRAETOR_PG_DSN` | 数据库连接串（优先于 `config.json`） | 读 `config.json` |
+| `POSTGRES_USER/PASSWORD/DB` | compose 里 postgres 的账号与库名 | `praetor` / 必填 / `praetor` |
+| `PRAETOR_HTTP_PORT` | 容器映射到宿主的 HTTP 端口 | `8797` |
+| `PRAETOR_MCP_PORT` | 容器映射到宿主的 MCP 端口 | `8798` |
+| `PRAETOR_DATA_DIR` | 宿主数据目录（jwt.key、工作区） | `./data` |
+| `PRAETOR_IMAGE` | 用外部镜像而不是源码构建 | 空（构建 `praetor/praetor:<tag>`） |
+| `PRAETOR_TAG` | 本地构建的镜像 tag | `latest` |
+| `PRAETOR_GOPROXY` | 构建时 Go 模块代理 | `https://proxy.golang.org,direct` |
+| `PRAETOR_NPM_REGISTRY` | 构建时 npm 源 | `https://registry.npmjs.org` |
+| `PRAETOR_MOUNT_DOCKER_SOCKET` | `1` = compose 带上 socket 覆盖层 | 由 `install.sh` 询问 |
+| `PRAETOR_SANDBOX` | `required` / `optional` / `off` | `required` |
+| `PRAETOR_SANDBOX_ISOLATION` | `per-task`（一任务一容器）/ `shared` | `per-task` |
+| `PRAETOR_SANDBOX_IMAGE` | 沙箱容器镜像 | `praetor/sandbox:latest` |
+| `PRAETOR_SANDBOX_NETWORK` | 打靶机时要接入的 docker 网络 | 空（默认 bridge） |
+| `PRAETOR_LLM_PROVIDER/MODEL/BASE_URL/PROXY` | 覆盖 LLM 提供方、模型、网关、代理 | 空 |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | 模型 API Key（也可在 UI 里配） | 空 |
+| `PRAETOR_DOMAINS` | 启用的域，逗号分隔 | `pentest` |
+| `PRAETOR_SUBAGENTS` | 允许派生 subagent 的域（`ctf,reverse` 或 `all`） | 关 |
+| `PRAETOR_SAMPLE_KEY` | 逆向样本库密钥（64 位 hex，缺则报错，不降级明文） | 空 |
+| `PRAETOR_HEXSTRIKE_DIR` | hexstrike MCP 目录 | 空（不注册） |
+
+Windows 上不要写 `.env` 的 POSIX 语法到 `cmd`；`dev.sh` 与 `start.sh` 是 bash 脚本，
+请用 Git Bash / WSL 执行。
+
 ---
 
 ## 更新升级
@@ -193,7 +270,7 @@ PRAETOR_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 - **随时可回退**：上一版本保留为 `praetor.old`，卡片上有「回滚到上一版本」。注意数据库结构不会回退。
 - **更新会中断正在运行的任务**——更新即重启，请在空闲时进行。
 - **开发构建不给更新**：版本号是 `dev` 或 `git describe` 带后缀时禁用，避免正式版覆盖掉本地调试的二进制。
-- **Docker 下只换程序、不换镜像**：镜像里的 playwright / nmap 等工具链不会跟着升级，且 `docker compose up -d` 重建容器后会退回镜像自带的版本。要连镜像一起升级仍请用 `docker compose pull praetor && docker compose up -d praetor`。
+- **Docker 下只换程序、不换镜像**：镜像里的 playwright / nmap 等工具链不会跟着升级，且 `docker compose up -d` 重建容器后会退回镜像自带的版本。要连镜像一起升级，用源码构建的部署执行 `docker compose build --pull praetor && docker compose up -d praetor`；用外部镜像的部署执行 `docker compose pull praetor && docker compose up -d praetor`。
 - 访问 GitHub 需要代理时，在同一页面配置**全局代理**即可，更新链路会走它。更新只从 GitHub 域名下载并强制 HTTPS。
 
 ### 方式二：一键更新脚本
@@ -205,18 +282,23 @@ cd PRAETOR
 
 脚本先可选 `git pull` 拉取最新代码，再让你选 **① Docker 更新** 或 **② 本地编译更新**（与 `install.sh` 对应）：
 
-- **① Docker**：可指定目标镜像 tag（回车沿用 `.env` 的 `PRAETOR_TAG`，缺省 `latest`）→ `docker compose pull` → `docker compose up -d`（换新镜像重启即自动迁移）。
+- **① Docker**：`git pull` 后**按当前代码重建镜像**（`docker compose build --pull`）再 `up -d`，重启即自动迁移；`.env` 设了 `PRAETOR_IMAGE` 时改为拉取该镜像。
 - **② 本地**：重建前端静态产物 → 重新编译 `./praetor`（完成后重启进程生效）。
 
 ### 方式三：Docker Compose（手动）
 
 ```bash
 cd PRAETOR
-git pull                       # 更新 compose / 脚本（可选）
-# 指定版本：在 .env 设 PRAETOR_TAG=v0.2.0；不设则用 latest
+git pull                          # 更新 compose / 脚本 / 源码
+docker compose build --pull praetor   # 按当前代码重建镜像（改了代码就走这一句）
+docker compose up -d praetor          # 换新镜像重启 → 自动迁移 schema
+docker image prune -f                 # 清理旧镜像（可选）
+```
+
+用的是外部镜像（`.env` 设了 `PRAETOR_IMAGE`）时，第 2 步换成：
+
+```bash
 docker compose pull praetor
-docker compose up -d praetor     # 换新镜像重启 → 自动迁移 schema
-docker image prune -f          # 清理旧镜像（可选）
 ```
 
 ### 方式四：预编译二进制（Releases）

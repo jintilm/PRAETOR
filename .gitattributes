@@ -1,4 +1,7 @@
 *.bat text eol=crlf
-*.sh  text eol=lf
 *.sh text eol=lf
 *.conf text eol=lf
+# 容器内运行的东西一律 LF：Windows 上 clone（core.autocrlf=true）若把 Dockerfile
+# 或启动脚本写成 CRLF，`sh /app/start.sh` 会报 bad interpreter。
+Dockerfile text eol=lf
+start.sh text eol=lf
