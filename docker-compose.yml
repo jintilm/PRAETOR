@@ -54,7 +54,13 @@ services:
         #   PRAETOR_NPM_REGISTRY=https://registry.npmmirror.com
         GOPROXY: ${PRAETOR_GOPROXY:-https://proxy.golang.org,direct}
         NPM_REGISTRY: ${PRAETOR_NPM_REGISTRY:-https://registry.npmjs.org}
+        # 应用容器里的 docker CLI 来源（见 Dockerfile 顶部）；官方源拉不动时换镜像地址
+        DOCKER_CLI_IMAGE: ${PRAETOR_DOCKER_CLI_IMAGE:-docker:27-cli}
     container_name: praetor-app
+    # 让容器能访问宿主上的代理 / 本地服务（如 http://host.docker.internal:7897）。
+    # Docker Desktop 自带该域名，Linux 上靠 host-gateway 补上。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy

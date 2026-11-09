@@ -151,6 +151,31 @@ docker compose -f docker-compose.yml -f docker-compose.socket.yml up -d --build
 > 不挂 `docker.sock` 时，`PRAETOR_SANDBOX=required` 会让每次 Bash 都被拒绝
 > （`sandbox unavailable`）——部署看着成功、一用就报错。要么挂 socket，要么把
 > `PRAETOR_SANDBOX` 改成 `optional`（Bash 跑在应用容器内，用镜像自带工具链）。
+>
+> **挂了 socket 还不够**：容器里必须有 `docker` CLI 才能起任务沙箱。镜像从
+> `docker:27-cli` 拷入静态二进制（可用 `PRAETOR_DOCKER_CLI_IMAGE` 换源），否则启动日志是
+> `exec: "docker": executable file not found in $PATH`，Bash 依旧全拒。
+
+#### 从「宿主机跑二进制」切到「全部 Docker」必查
+
+全容器化后，宿主机上原本成立的三处隐式依赖不会自动跟过来。典型症状是部署成功、页面 200，
+但 agent 的 Bash / 浏览器 / WebFetch 全废：
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| 每条 Bash `sandbox unavailable: docker 不可用` | 应用容器缺 `docker` CLI | 重建带 CLI 的镜像；或临时设 `PRAETOR_SANDBOX=optional` 降级 |
+| `npx playwright install chrome` 也被同一原因拒 | 它本身就是一条 Bash，走同一个拒绝通道 | 修好沙箱即可，不必单独装浏览器 |
+| 浏览器提示 `/opt/google/chrome/chrome` 不存在 | 镜像预装的是 Playwright chromium（`~/.cache/ms-playwright`），不是 Chrome stable | 用 Playwright 自带 chromium；沙箱镜像里另需装浏览器 |
+| WebFetch 对所有站点（含对照站点）都 502 | 设置里全局出口代理仍是 `http://127.0.0.1:7897`，容器内指向容器自己 | 系统设置改为 `http://host.docker.internal:7897`，或清空直连 |
+| 修好 CLI 后又报「沙箱镜像不存在」 | 设置里记着旧机构建的 `praetor/sandbox:custom-*` tag | 组件面板重新应用预设，或清空 `sandbox.image` 回落 `PRAETOR_SANDBOX_IMAGE` |
+
+`required` 是 **fail-closed**：探测失败不阻断启动（UI 能进），但注入一个永远拒绝的 Runner，
+绝不让 Bash 悄悄回落到宿主。所以启动日志里这两行就是总开关：
+
+```text
+[sandbox] 不可用（mode=required, isolation=per-task ...）：docker 不可用: ...
+[sandbox] worker 的 Bash 将被拒绝；修好 Docker/镜像，或设 PRAETOR_SANDBOX=optional 降级
+```
 
 想改用现成的发布镜像（而不是自己构建）：在 `.env` 设
 `PRAETOR_IMAGE=<registry>/<repo>:<tag>`，然后 `docker compose pull praetor && docker compose up -d`。

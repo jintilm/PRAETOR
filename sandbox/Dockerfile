@@ -43,7 +43,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 出口隐身（IP 层透明重定向）：runner 在配置了全局出口代理时 exec 执行。
 # 需要容器 NET_ADMIN capability（仅在该场景下由 runner 加）。
-COPY egress-init.sh /usr/local/bin/praetor-egress
+COPY sandbox/egress-init.sh /usr/local/bin/praetor-egress
 RUN chmod 0755 /usr/local/bin/praetor-egress
 
 # 常用 Python 库：P1 再接 pwntools/requests 等（此处只放无编译依赖的）

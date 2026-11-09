@@ -9,6 +9,15 @@
 # dist/ 要么来自编译阶段。apt / Playwright 这些重活只在 runtime-base 写一份，
 # 两条路径都继承，不会各维护一套工具链。
 
+# 挂了 /var/run/docker.sock 只解决「能不能连到宿主 Docker」，容器里还得有
+# docker CLI 才能 `docker image inspect` / `docker run`。官方 cli 镜像里的二进制
+# 是静态链接的，直接拷过来即可（~40MB，不带 daemon，不引入 containerd）。
+# 缺了它，required 模式启动期探测就失败，之后每条 Bash 都会被拒绝。
+# 拉不到官方镜像时用 .env 换源，例如：
+#   PRAETOR_DOCKER_CLI_IMAGE=docker.m.daocloud.io/library/docker:27-cli
+ARG DOCKER_CLI_IMAGE=docker:27-cli
+FROM ${DOCKER_CLI_IMAGE} AS docker-cli
+
 # ── ① 前端静态导出 ─────────────────────────────
 FROM node:22-bookworm-slim AS web
 
@@ -41,6 +50,9 @@ RUN go build -tags embedui -trimpath -ldflags="-s -w" -o /out/praetor ./cmd/prae
 
 # ── ③ 运行环境（工具链 + Playwright）─────────────
 FROM python:3.12-slim-bookworm AS runtime-base
+
+# 全容器化部署时用它管理任务沙箱容器；不挂 socket 也无害（只是多 40MB）。
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
 # 常用工具：ripgrep / curl / vim，加一批 recon 常备件（按需增删）。
 # Node 从 NodeSource 装 20.x：bookworm 自带的 apt nodejs 是 18，Playwright 要求 >=20。

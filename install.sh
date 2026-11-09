@@ -57,6 +57,21 @@ ensure_docker(){
   esac
 }
 
+# ── docker CLI 来源镜像 ──────────────────────────
+# 应用容器靠 Dockerfile 顶部的 DOCKER_CLI_IMAGE 拿到 docker 命令；官方源拉不动时
+# 自动切镜像源并写进 .env，否则 `compose build` 会在第一个 FROM 就失败。
+ensure_docker_cli_image(){
+  if [ -n "$(env_get PRAETOR_DOCKER_CLI_IMAGE)" ]; then return 0; fi
+  if docker image inspect docker:27-cli >/dev/null 2>&1; then return 0; fi
+  if docker pull docker:27-cli >/dev/null 2>&1; then return 0; fi
+  local mirror="docker.m.daocloud.io/library/docker:27-cli"
+  warn "官方 docker:27-cli 拉不动，改用镜像源 ${mirror}（可用 PRAETOR_DOCKER_CLI_IMAGE 覆盖）"
+  if ! docker pull "$mirror" >/dev/null 2>&1; then
+    die "docker CLI 镜像拉取失败：请在 .env 手动设置 PRAETOR_DOCKER_CLI_IMAGE 后重试"
+  fi
+  env_set PRAETOR_DOCKER_CLI_IMAGE "$mirror"
+}
+
 # ── ① 全部 Docker ───────────────────────────────
 install_docker(){
   ensure_docker
@@ -109,6 +124,7 @@ install_docker(){
     info "随后构建沙箱镜像 praetor/sandbox —— 基于 Kali，装安全工具，时间取决于网络）…"
     # 不带服务名：praetor 与 sandbox 都要构建。沙箱镜像是 per-task 模式的基础
     # （agent 用 `docker run praetor/sandbox:latest` 起容器），缺了它工具调用会失败。
+    ensure_docker_cli_image
     compose build
   fi
   info "启动…"
