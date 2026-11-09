@@ -21,7 +21,41 @@ set -u
 cd "$(dirname "$0")" || exit 1
 
 BIN=./praetor
+# Windows 的构建产物带 .exe 后缀；Git Bash 下也走这个脚本时别误报「找不到可执行文件」。
+if [ ! -x "$BIN" ] && [ -x ./praetor.exe ]; then BIN=./praetor.exe; fi
 [ -x "$BIN" ] || { echo "[praetor] 找不到可执行文件 $BIN" >&2; exit 1; }
+
+# 二进制只读 config.json 和进程环境变量，**不读 .env**（.env 是 docker compose
+# 的插值文件）。直接跑单二进制时不把 .env 搬进环境，启动日志就会显示
+# 「未检测到任何 PRAETOR_* 变量」，而 config.json 又常按容器内端口写、连不上库。
+# 这里补齐；调用方已 export 的同名变量优先，不覆盖。
+# 只搬运白名单前缀，注释行与任意 shell 代码都不会被 source 执行。
+load_dotenv() {
+	[ -f .env ] || return 0
+	while IFS= read -r line || [ -n "$line" ]; do
+		line=$(printf '%s' "$line" | tr -d '\r')
+		case "$line" in
+			''|'#'*) continue ;;
+			PRAETOR_*=*|ANTHROPIC_API_KEY=*|OPENAI_API_KEY=*|POSTGRES_USER=*|POSTGRES_PASSWORD=*|POSTGRES_DB=*) ;;
+			*) continue ;;
+		esac
+		key=${line%%=*}
+		[ -n "$key" ] || continue
+		printenv "$key" >/dev/null 2>&1 && continue
+		export "$key=${line#*=}"
+	done < .env
+}
+
+load_dotenv
+
+# compose 用 POSTGRES_* + PRAETOR_PG_PORT，二进制要的是一个完整 DSN。
+# 仅在没有显式 PRAETOR_PG_DSN 时组装（CI / 手工配置永远优先）。
+if [ -z "${PRAETOR_PG_DSN:-}" ] && [ -n "${POSTGRES_PASSWORD:-}" ] &&
+   [ "$POSTGRES_PASSWORD" != "change-me-please" ]; then
+	PRAETOR_PG_DSN="postgres://${POSTGRES_USER:-praetor}:${POSTGRES_PASSWORD}@127.0.0.1:${PRAETOR_PG_PORT:-55433}/${POSTGRES_DB:-praetor}?sslmode=disable"
+	export PRAETOR_PG_DSN
+	echo "[praetor] 已从 .env 组装 PRAETOR_PG_DSN → 127.0.0.1:${PRAETOR_PG_PORT:-55433}/${POSTGRES_DB:-praetor}"
+fi
 
 RESTART_CODE=75
 MAX_DELAY=60

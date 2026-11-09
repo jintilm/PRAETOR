@@ -200,6 +200,8 @@ func (d Database) buildDSN() string {
 }
 
 // String is a redacted view of the resolved DSN (password masked) for logging.
+// The placeholder is deliberately plain letters: url.UserPassword percent-encodes
+// "*" into %2A, so the old "****" showed up as "%2A%2A%2A%2A" in startup logs.
 func Redact(dsn string) string {
 	u, err := url.Parse(dsn)
 	if err != nil {
@@ -207,7 +209,7 @@ func Redact(dsn string) string {
 	}
 	if u.User != nil {
 		if _, hasPw := u.User.Password(); hasPw {
-			u.User = url.UserPassword(u.User.Username(), "****")
+			u.User = url.UserPassword(u.User.Username(), "REDACTED")
 		}
 	}
 	return fmt.Sprintf("%s", u.String())

@@ -25,6 +25,34 @@ if not exist "%BIN%" (
 	exit /b 1
 )
 
+rem 二进制只读 config.json 和进程环境变量，**不读 .env**（.env 属于 docker compose）。
+rem 这里把 .env 搬进环境并组装 PRAETOR_PG_DSN，否则启动日志会显示
+rem 「未检测到任何 PRAETOR_* 变量」，而 config.json 常按容器内端口写、连不上库。
+rem 只取白名单键，不 source 整个文件；已显式 set 的变量一律不覆盖。
+rem 随机生成的数据库密码只含字母数字，不会与延迟展开的 ! 冲突。
+if exist ".env" (
+	for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b /c:"PRAETOR_" ".env" 2^>nul`) do (
+		if not defined %%A set "%%A=%%B"
+	)
+	for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b /c:"POSTGRES_PASSWORD=" /c:"POSTGRES_USER=" /c:"POSTGRES_DB=" ".env" 2^>nul`) do (
+		if "%%A"=="POSTGRES_PASSWORD" set "PGPASS=%%B"
+		if "%%A"=="POSTGRES_USER" set "PGUSER=%%B"
+		if "%%A"=="POSTGRES_DB" set "PGDB=%%B"
+	)
+)
+if not defined PGUSER set "PGUSER=praetor"
+if not defined PGDB set "PGDB=praetor"
+if not defined PGPORT set "PGPORT=!PRAETOR_PG_PORT!"
+if not defined PGPORT set "PGPORT=55433"
+if not defined PRAETOR_PG_DSN (
+	if defined PGPASS (
+		if not "!PGPASS!"=="change-me-please" (
+			set "PRAETOR_PG_DSN=postgres://!PGUSER!:!PGPASS!@127.0.0.1:!PGPORT!/!PGDB!?sslmode=disable"
+			echo [praetor] 已从 .env 组装 PRAETOR_PG_DSN (127.0.0.1:!PGPORT!/!PGDB!)
+		)
+	)
+)
+
 set "RESTART_CODE=75"
 set "MAX_DELAY=60"
 set /a delay=1

@@ -144,6 +144,31 @@ cd PRAETOR
 
 > 只有手动 `cp .env.example .env` 却没跑 `./install.sh` 时，密码才会停留在公开的示例值 `change-me-please`（脚本会警告）。密码只允许字母数字与 `. _ - ~` —— 它会被原样拼进连接串，含 `@ : / ? # %` 或空格会破坏 DSN。
 
+#### 后续启动：按安装方式选命令
+
+| 安装方式 | 后续启动 | 不要用 |
+| --- | --- | --- |
+| ① 全部 Docker（`./install.sh` 选 1） | `docker compose up -d`（挂了 socket 时加 `-f docker-compose.socket.yml`） | `./praetor.exe` —— 那是另一套部署的产物。硬跑会另起一个实例，而且读不到容器里由 compose 注入的 `PRAETOR_PG_DSN` |
+| ② 本地编译运行（`./install.sh` 选 2） | `./start.sh` / `start.bat`（Git Bash 里 `./start.sh` 也行）；也可直接 `./praetor`，Windows 为 `./praetor.exe` | — |
+| Releases 预编译包 | 用包里的 `start.sh` / `start.bat` | 直接双击 exe：跳过守护脚本，页面「一键更新」换完装不会被拉起 |
+
+**启动横幅是 `PRAETOR` 字形。** 如果终端里看到的是 `ARTEX`，说明跑的是改名之前编译的旧二进制（看 `praetor.exe` 的时间戳）——字形跟着二进制一起编译，改文档不会变，必须重新编译才会更新。
+
+#### 配置读不到时怎么自查
+
+`./praetor -check-config`（Windows：`praetor.exe -check-config`）只打印配置来源，**不连数据库、不启动服务**。正常启动也会打印同样三行：
+
+```text
+[config] 配置文件: E:\...\config.json (已找到)
+[config] 环境变量: 已识别 1 个 PRAETOR_* 变量：PRAETOR_PG_DSN（值不打印）
+[config] 数据库配置: 来源=配置文件 ... (database 字段)，目标=postgres://praetor:REDACTED@127.0.0.1:55433/praetor
+```
+
+- 二进制**只读 `config.json` 和进程环境变量，不读 `.env`**；`.env` 是给 docker compose 用的插值文件。所以直接跑 exe 时「环境变量检测不到」是预期行为，不是故障。
+- `start.sh` / `start.bat` 负责桥接：把 `.env` 里的 `PRAETOR_*` / `POSTGRES_*` 搬进环境，并从 `POSTGRES_PASSWORD` + `PRAETOR_PG_PORT` 自动组装 `PRAETOR_PG_DSN`（调用方已 export 的同名变量优先，不覆盖）。
+- 优先级：`PRAETOR_PG_DSN` > `config.json`（`database.dsn` > 分字段）。两者都没有会**明确报错并指出该创建哪个文件**，不会悄悄连到某个默认库。
+- `config.json` 按 `PRAETOR_CONFIG` → 当前目录 → 可执行文件同级的顺序找第一个存在的文件；启动日志会打印实际命中的绝对路径。常见错误是把端口号写进 `host`、或沿用容器内的 `5432` 而宿主实际是 `55433`。
+
 `compose up -d` 是后台启动，Postgres 首次健康检查要几秒，页面短暂打不开属正常：`docker compose logs -f praetor` 看进度。
 
 ### 方式二：Docker Compose（手动）
@@ -228,6 +253,7 @@ CGO_ENABLED=0 go build -tags embedui -o praetor ./cmd/praetor
 
 > 只需要后端、前端另跑 `npm run dev` 时，跳过 1~2 步并去掉 `-tags embedui`。
 > 注意不带 `embedui` 编出来的二进制**没有 UI**（页面返回 404 提示语），别拿去部署。
+> Windows 把输出名改成 `-o praetor.exe` 并用 `start.bat` 启动（`./install.sh` 选项 2 会自动按平台选名字）；Git Bash 里 `start.sh` 也能识别带 `.exe` 的产物。
 
 ### 方式五：构建跨平台 Release 压缩包
 
@@ -247,8 +273,11 @@ PRAETOR_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 
 ### 方式六：环境变量配置（本地运行要重点看这里）
 
-**二进制不会自动读 `.env`**（它只读 `config.json` 和环境变量），所以本地跑之前要么
-`set -a; . ./.env; set +a`，要么直接 `export`。`docker compose` 则会自动读 `.env`。
+**二进制不会自动读 `.env`**（它只读 `config.json` 和进程环境变量），`docker compose` 才会自动读 `.env`。本地直接跑二进制时：
+
+- **推荐**用 `./start.sh` / `start.bat`：脚本把 `.env` 里的 `PRAETOR_*` / `POSTGRES_*` 搬进环境，并从 `POSTGRES_PASSWORD` + `PRAETOR_PG_PORT` 自动组装 `PRAETOR_PG_DSN`。
+- **手动配置**：`set -a; . ./.env; set +a` 只能带进 `.env` 里**已有的键**，而 `.env` 默认把 `PRAETOR_PG_DSN` 注释掉了 —— 所以还得自己 `export PRAETOR_PG_DSN=...`（或写好 `config.json`），否则仍会连不上库。
+- 不确定读到了什么：先跑 `./praetor -check-config`，见上方「配置读不到时怎么自查」。
 
 宿主机直接跑单二进制的最小配置：
 

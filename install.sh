@@ -106,6 +106,8 @@ show_install_summary(){
   echo "             普通使用不需要它：应用容器内由 compose 注入 PRAETOR_PG_DSN"
   echo "  直连数据库 postgres://praetor:<上面的密码>@127.0.0.1:${pg_port}/praetor"
   echo "  查看日志   docker compose ${COMPOSE_ARGS[*]} logs -f praetor"
+  echo "  后续启动   docker compose ${COMPOSE_ARGS[*]} up -d（选项 1 是容器部署，"
+  echo "             不要去跑 ./praetor.exe；那个二进制属于选项 2 / Releases 包）"
   echo "  停止卸载   ./uninstall.sh（默认只停服务，数据全保留）"
   echo "────────────────────────────────────────────────────────────"
   info "后台启动中：Postgres 首次健康检查要几秒，页面暂时打不开属正常"
@@ -183,7 +185,25 @@ install_docker(){
 }
 
 # ── ② 本地编译运行 ──────────────────────────────
+# Windows 下 `go build -o praetor` 会产出没有 .exe 后缀的 PE：文件在、双击不了、
+# start.bat 也找不到。按目标平台给正确的名字，启动提示才和真实产物对得上。
+local_binary_name(){
+  if [ "$(go env GOOS 2>/dev/null)" = windows ]; then echo praetor.exe; else echo praetor; fi
+}
+# heredoc 拼 JSON 时密码里的 " 或 \ 会破坏结构；最小转义即可（密码不含控制字符）。
+json_escape(){ printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+
 install_local(){
+  # 之前用选项 1 装过的话 .env 已存在，把库参数带进默认值。否则用户按老习惯
+  # 填 5432 + 空密码，会生成一份「看着有配置其实连不上库」的 config.json ——
+  # 这正是「config 和环境变量都检测不到」最常见的来源。
+  local env_pg_port env_pg_user env_pg_db env_pg_pass
+  env_pg_port="$(env_get PRAETOR_PG_PORT)"; env_pg_port="${env_pg_port:-5432}"
+  env_pg_user="$(env_get POSTGRES_USER)";  env_pg_user="${env_pg_user:-praetor}"
+  env_pg_db="$(env_get POSTGRES_DB)";      env_pg_db="${env_pg_db:-praetor}"
+  env_pg_pass="$(env_get POSTGRES_PASSWORD)"
+  if [ "$env_pg_pass" = "change-me-please" ]; then env_pg_pass=""; fi
+
   echo "数据库安装方式："
   echo "  1) 连接已有 PostgreSQL"
   echo "  2) 用 Docker 起一个 PostgreSQL（需要 docker）"
@@ -197,31 +217,41 @@ install_local(){
       DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=praetor DB_PASS="$pw" DB_NAME=praetor DB_SSL=disable ;;
     *)
       DB_HOST="$(ask '数据库地址' 127.0.0.1)"
-      DB_PORT="$(ask '端口' 5432)"
-      DB_USER="$(ask '账号' praetor)"
-      DB_PASS="$(ask '密码' '')"
-      DB_NAME="$(ask '数据库名' praetor)"
-      DB_SSL="$(ask 'sslmode (disable/require)' disable)" ;;
+      DB_PORT="$(ask '端口' "$env_pg_port")"
+      DB_USER="$(ask '账号' "$env_pg_user")"
+      DB_NAME="$(ask '数据库名' "$env_pg_db")"
+      DB_SSL="$(ask 'sslmode (disable/require)' disable)"
+      if [ -n "$env_pg_pass" ]; then
+        # 不把 .env 里的密码回显在提示里：回车沿用，输入其它值才覆盖。
+        printf '数据库密码（回车沿用 .env 中的值，不回显默认值）：'
+        if ! read -r DB_PASS; then DB_PASS=""; fi
+        if [ -z "$DB_PASS" ]; then DB_PASS="$env_pg_pass"; fi
+      else
+        DB_PASS="$(ask '数据库密码' '')"
+      fi ;;
   esac
+  case "$DB_PORT" in ''|*[!0-9]*) die "数据库端口必须是数字，收到：$DB_PORT" ;; esac
 
   # 生成 config.json
   cat > config.json <<JSON
 {
   "database": {
-    "host": "${DB_HOST}",
+    "host": "$(json_escape "$DB_HOST")",
     "port": ${DB_PORT},
-    "user": "${DB_USER}",
-    "password": "${DB_PASS}",
-    "dbname": "${DB_NAME}",
-    "sslmode": "${DB_SSL}"
+    "user": "$(json_escape "$DB_USER")",
+    "password": "$(json_escape "$DB_PASS")",
+    "dbname": "$(json_escape "$DB_NAME")",
+    "sslmode": "$(json_escape "$DB_SSL")"
   }
 }
 JSON
-  ok "已生成 config.json"
+  ok "已生成 config.json → $(pwd)/config.json"
+  info "连接目标 postgres://${DB_USER}:****@${DB_HOST}:${DB_PORT}/${DB_NAME}（密码不回显）"
 
   # go 环境检查
   command -v go >/dev/null 2>&1 || die "未检测到 Go，请先安装 Go（>=1.26）：https://go.dev/dl/"
   ok "Go: $(go version)"
+  local bin; bin="$(local_binary_name)"
 
   # 内嵌前端需要 node 出静态产物
   if command -v npm >/dev/null 2>&1; then
@@ -229,15 +259,25 @@ JSON
     ( cd web && npm ci && npm run build:static )
     rm -rf server/webui/dist && cp -r web/out server/webui/dist
     info "编译内嵌单二进制…"
-    CGO_ENABLED=0 go build -tags embedui -trimpath -o praetor ./cmd/praetor
+    CGO_ENABLED=0 go build -tags embedui -trimpath -o "$bin" ./cmd/praetor
   else
     warn "未检测到 npm：将编译**不内嵌前端**的后端（前端需另跑 npm run dev）"
-    CGO_ENABLED=0 go build -o praetor ./cmd/praetor
+    CGO_ENABLED=0 go build -o "$bin" ./cmd/praetor
   fi
-  ok "编译完成 → ./praetor"
+  ok "编译完成 → ./$bin"
+
+  echo
+  echo "────────────────────────────────────────────────────────────"
+  echo "  本次启动   前台运行 ./$bin  → http://localhost:8787（Ctrl-C 停止）"
+  echo "  后续启动   Linux/macOS: ./start.sh    Windows: start.bat"
+  echo "             这两个脚本会自动读 .env 并组装 PRAETOR_PG_DSN"
+  echo "  直接运行   ./$bin —— 只读 config.json + 环境变量，**不读 .env**"
+  echo "  配置优先级 环境变量 PRAETOR_PG_DSN > config.json"
+  echo "  启动日志   会打印配置路径、来源和已识别的 PRAETOR_* 变量名（值不打印）"
+  echo "────────────────────────────────────────────────────────────"
 
   info "启动…（Ctrl-C 退出）→ http://localhost:8787"
-  ./praetor
+  "./$bin"
 }
 
 echo "=============================="
