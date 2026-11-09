@@ -130,6 +130,22 @@ cd PRAETOR
 
 > 端口不是笔误：容器内固定监听 8787，宿主映射由 `PRAETOR_HTTP_PORT` 决定（默认 **8797**，避开旧栈常用的 8787/8788）；直接跑二进制时监听 **8787**。
 
+#### 安装完成后：密码在哪、还要做什么
+
+脚本结束会打印一份摘要（访问地址、配置路径、密码查看命令、日志命令）。几个最容易混淆的点：
+
+| 问题 | 答案 |
+| --- | --- |
+| 为什么 shell 里 `echo $POSTGRES_PASSWORD` 是空的？ | `.env` 是 **docker compose 的变量插值文件**，不是 shell 环境。compose 读它把值写进容器 `environment:`，不会 export 到当前终端。宿主机直接跑二进制才需要 `set -a; . ./.env; set +a`（见下方「方式六：环境变量配置」） |
+| 数据库密码是空的吗？ | **不是**。首次安装回车 = 脚本随机生成 24 位，或你自己输入；都会写进 `.env`。`docker-compose.yml` 用 `${POSTGRES_PASSWORD:?...}`，为空会直接拒绝启动，不存在「空密码也能跑」 |
+| 我怎么查？ | `grep '^POSTGRES_PASSWORD=' .env`。用随机值时脚本会当场显示一次，之后只存 `.env`（文件权限 600） |
+| 什么时候才需要它？ | 宿主机 `psql` 直连、`pg_dump` 备份、本地跑二进制时。全 Docker 下应用靠 compose 注入的 `PRAETOR_PG_DSN` 走内部网络 `postgres:5432`，不需要手工填 |
+| 登录页面的密码是哪个？ | 打开 `/setup` 自己设的**管理员密码**，存在数据库里，与数据库账号密码完全无关 |
+
+> 只有手动 `cp .env.example .env` 却没跑 `./install.sh` 时，密码才会停留在公开的示例值 `change-me-please`（脚本会警告）。密码只允许字母数字与 `. _ - ~` —— 它会被原样拼进连接串，含 `@ : / ? # %` 或空格会破坏 DSN。
+
+`compose up -d` 是后台启动，Postgres 首次健康检查要几秒，页面短暂打不开属正常：`docker compose logs -f praetor` 看进度。
+
 ### 方式二：Docker Compose（手动）
 
 ```bash
@@ -347,6 +363,54 @@ CGO_ENABLED=0 go build -tags embedui -o praetor ./cmd/praetor
 
 ---
 
+## 卸载与清理
+
+`./uninstall.sh` 是 `install.sh` 的逆操作，**默认只停服务、不删任何数据**：
+
+| 档位 | 做什么 | 数据 |
+|---|---|---|
+| `1` 仅停止（默认） | `docker compose down --remove-orphans` | 全部保留 |
+| `2` 清构建产物 | 停服务 + 归档二进制、`web/out`、`web/node_modules`、`server/webui/dist`、`dist/`、升级暂存件 | 全部保留 |
+| `3` 彻底卸载 | 备份 + `pg_dump` → `compose down -v` → 删本栈镜像 → 归档本地状态 | **数据卷删除，靠备份恢复** |
+| `4` 仅备份 | 复制配置 / 密钥 / `data/` + 导出数据库 | 不删任何东西 |
+| `0` 取消 | 无操作 | — |
+
+```bash
+./uninstall.sh                    # 交互菜单，直接回车 = 档位 1
+./uninstall.sh --dry-run --mode=3  # 只打印档位 3 会动什么，零改动
+./uninstall.sh --mode=4            # 升级 / 迁移前先做一份备份
+./uninstall.sh --backup-dir=/path/to/backups
+```
+
+档位 3 会先列出**每一个将被移动的文件路径**和要删的 Docker 资源，要求输入 `DELETE`
+确认；若 `pg_dump` 失败，还要再输入 `I-UNDERSTAND` 才继续。取消不会留下任何改动。
+
+**备份目录**默认 `./backups/uninstall-<时间戳>-<pid>/`（已加进 `.gitignore`，权限 700）：
+
+```text
+MANIFEST.txt         # 备份内容、恢复命令、未清理项清单
+praetor-pg.sql       # pg_dump --clean --if-exists（数据库容器在跑时才生成）
+pg_dump.err          # 导出失败时的错误
+state/               # 档位 4 的副本，原件不动
+removed/             # 档位 2/3 移出的文件，按原相对路径存放
+```
+
+本地文件一律**移动**到 `removed/` 而不是 `rm`，按原路径移回即可回滚，例如
+`mv backups/uninstall-*/removed/.env ./.env`。数据库卷 `praetor-pgdata` 由 Docker 删除，
+只能靠 `MANIFEST.txt` 里的 `psql < praetor-pg.sql` 恢复。
+
+**脚本刻意不碰**（避免误伤其它部署）：靶场网络 `praetor-ctf` / `chal-*`、
+`docker:27-cli` 等构建镜像、`.workbuddy/`、`docs/`、`skills/`、`.tok`、
+`.playwright-mcp/`，以及宿主机上正在运行的 `praetor` / `praetor.exe` 进程。
+它也不执行任何 `docker prune` 通配删除；只处理 compose 项目 `praetor`、
+`praetor-task-*` 任务容器、`praetor-pgdata` / `praetor-pg` 卷和
+`praetor/praetor:*` / `praetor/sandbox:*` 镜像。
+
+> 用 `./start.sh` / `praetor.exe` 在宿主机跑二进制的部署，卸载前请先自行停止进程；
+> 脚本不会 kill 进程，避免误杀同名进程。
+
+---
+
 ## 配置
 
 **数据库**（`config.json`，或用环境变量 `PRAETOR_PG_DSN` 覆盖）：
@@ -363,6 +427,25 @@ CGO_ENABLED=0 go build -tags embedui -o praetor ./cmd/praetor
 
 **LLM**：`export ANTHROPIC_API_KEY=sk-...`（或 `OPENAI_API_KEY`），也可在 UI 的「LLM 配置」页填写。
 可选：`PRAETOR_LLM_PROVIDER` / `PRAETOR_LLM_MODEL` / `PRAETOR_LLM_BASE_URL` / `PRAETOR_LLM_PROXY`。
+
+### 修改已部署实例的数据库密码
+
+> ⚠️ 数据卷 `praetor-pgdata` 一旦初始化，postgres 官方镜像**只在首次初始化时读** `POSTGRES_PASSWORD`。只改 `.env` 不会改库里的密码，重启后应用会报密码认证失败 —— 别被「改完重启生效」这种说法带偏。
+
+两步，顺序不能反：
+
+```bash
+# 1) 先改库内密码（容器在跑）
+docker exec -it praetor-pg psql -U praetor -d praetor \
+  -c "ALTER USER praetor WITH PASSWORD '新密码';"
+
+# 2) 再同步 .env，并只重建应用容器（postgres 不必重建）
+grep -v '^POSTGRES_PASSWORD=' .env > .env.tmp
+printf 'POSTGRES_PASSWORD=%s\n' '新密码' >> .env.tmp && mv .env.tmp .env
+docker compose up -d --force-recreate praetor
+```
+
+新密码同样只允许字母数字与 `. _ - ~`。若还没有任何数据（`down -v` 后重装），直接改 `.env` 再 `up -d` 即可。
 
 
 

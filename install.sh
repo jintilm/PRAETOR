@@ -9,10 +9,27 @@ cd "$(cd "$(dirname "$0")" && pwd)"
 
 info(){ printf '\033[36m[*]\033[0m %s\n' "$*"; }
 ok(){   printf '\033[32m[+]\033[0m %s\n' "$*"; }
-warn(){ printf '\033[33m[!]\033[0m %s\n' "$*"; }
+# warn 必须走 stderr：read_db_password 在 $(...) 里调用，往 stdout 打的任何东西
+# 都会被当成"密码"捕获并写进 .env（曾把警告文本整个塞进 POSTGRES_PASSWORD）。
+warn(){ printf '\033[33m[!]\033[0m %s\n' "$*" >&2; }
 die(){  printf '\033[31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
-ask(){  local p="$1" d="${2:-}" a; read -rp "$p${d:+ [$d]}: " a; echo "${a:-$d}"; }
-rand(){ head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24; }
+# stdin 关闭（CI / 管道）时 read 会返回非 0，配合 set -e 会让脚本静默退出；
+# 这里让用户直接落到默认值，而不是半夜莫名中断。
+ask(){  local p="$1" d="${2:-}" a; read -rp "$p${d:+ [$d]}: " a || a=""; echo "${a:-$d}"; }
+# 32 字节 → base64 约 44 字符，剔除 +/ 后仍稳够 24，避免 18 字节时偶尔只出 22 位。
+rand(){ head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24; }
+
+# compose 把密码原样拼进 PRAETOR_PG_DSN（postgres://user:密码@postgres:5432/...），
+# 含 @ : / ? # % 或空格会截断 / 改义连接串：容器能起来，应用却连不上库。
+# 随机值天然只含字母数字，这里约束的是用户手工输入的那一路。
+read_db_password(){
+  local def="$1" p
+  while :; do
+    p="$(ask 'Postgres 密码（回车随机生成；仅字母数字与 . _ - ~）' "$def")"
+    if [[ "$p" =~ ^[A-Za-z0-9._~-]+$ ]]; then printf '%s' "$p"; return 0; fi
+    warn "密码含 URL 保留字符（@ : / ? # % 空格等），会破坏数据库连接串，请换一个"
+  done
+}
 
 # ── .env 读写 ───────────────────────────────────
 # 用「删旧行 + 追加」而不是 sed 替换：值里可能带 / & | 等字符，
@@ -72,24 +89,57 @@ ensure_docker_cli_image(){
   env_set PRAETOR_DOCKER_CLI_IMAGE "$mirror"
 }
 
+# ── 安装完成摘要 ────────────────────────────────
+# up -d 是后台启动，脚本到这里就该结束；但"结束"和用户"知道怎么用"是两回事。
+# 把凭据位置、初始化入口、端口、日志命令一次讲清，别让人翻代码找密码。
+show_install_summary(){
+  local port pg_port
+  port="$(http_port)"
+  pg_port="$(env_get PRAETOR_PG_PORT)"; pg_port="${pg_port:-55433}"
+  echo
+  ok "安装完成 → http://localhost:${port}"
+  echo "────────────────────────────────────────────────────────────"
+  echo "  首次使用   打开上面的地址，在 /setup 设置「管理员登录密码」"
+  echo "             （Web 登录用，和下面的数据库密码是两回事）"
+  echo "  配置在哪   $(pwd)/.env —— docker compose 自动读取，不会 export 到当前 shell"
+  echo "  数据库密码 grep '^POSTGRES_PASSWORD=' .env"
+  echo "             普通使用不需要它：应用容器内由 compose 注入 PRAETOR_PG_DSN"
+  echo "  直连数据库 postgres://praetor:<上面的密码>@127.0.0.1:${pg_port}/praetor"
+  echo "  查看日志   docker compose ${COMPOSE_ARGS[*]} logs -f praetor"
+  echo "  停止卸载   ./uninstall.sh（默认只停服务，数据全保留）"
+  echo "────────────────────────────────────────────────────────────"
+  info "后台启动中：Postgres 首次健康检查要几秒，页面暂时打不开属正常"
+}
+
 # ── ① 全部 Docker ───────────────────────────────
 install_docker(){
   ensure_docker
   if [ ! -f .env ]; then
     [ -f .env.example ] || die "缺少 .env.example"
     cp .env.example .env
-    local pw key
-    pw="$(ask 'Postgres 密码（回车随机生成）' "$(rand)")"
+    chmod 600 .env 2>/dev/null || true
+    local default_pw pw key
+    default_pw="$(rand)"
+    pw="$(read_db_password "$default_pw")"
     key="$(ask 'ANTHROPIC_API_KEY（可留空，后续在 UI 配）' '')"
     env_set POSTGRES_PASSWORD "$pw"
     # 用 if 而不是 `[ -n ] && env_set`：后者在 key 为空时返回 1，
     # 配合 set -e 会让脚本静默退出（正是最不该出错的地方）。
     if [ -n "$key" ]; then env_set ANTHROPIC_API_KEY "$key"; fi
-    ok "已生成 .env（POSTGRES_PASSWORD 已设置）"
+    ok "已生成 .env（POSTGRES_PASSWORD 已写入，权限 600）"
+    if [ "$pw" = "$default_pw" ]; then
+      info "随机生成的数据库密码：$pw"
+      info "只显示这一次；之后用 grep '^POSTGRES_PASSWORD=' .env 查看"
+    else
+      info "你设置的密码已写入 .env；用 grep '^POSTGRES_PASSWORD=' .env 可核对"
+    fi
   else
-    info "沿用已存在的 .env"
+    info "沿用已存在的 .env（保留已有值；下面仍会补齐缺失的沙箱选项）"
+    info "查看当前数据库密码：grep '^POSTGRES_PASSWORD=' .env"
     if [ "$(env_get POSTGRES_PASSWORD)" = "change-me-please" ]; then
-      warn ".env 里还是示例密码 change-me-please，建议换成随机值（改完重启生效）"
+      warn ".env 仍是示例弱密码 change-me-please（手动 cp .env.example 才会这样）"
+      warn "注意：数据卷已初始化后，只改 .env 不会改库里的密码，反而会让应用连不上库。"
+      info  "要改需两步：先在库里 ALTER USER，再同步 .env 并重启（命令见 README）"
     fi
   fi
 
@@ -129,8 +179,7 @@ install_docker(){
   fi
   info "启动…"
   compose up -d
-  ok "启动完成 → http://localhost:$(http_port)"
-  info "查看日志：docker compose ${COMPOSE_ARGS[*]} logs -f praetor"
+  show_install_summary
 }
 
 # ── ② 本地编译运行 ──────────────────────────────
