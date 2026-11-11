@@ -4,8 +4,7 @@
 
 AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
-
-🌐 **在线 Demo**： [https://praetor-demo.vercel.app/](https://praetor-demo.vercel.app/)
+二开ARTEX
 
 </div>
 
