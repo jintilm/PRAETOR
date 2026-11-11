@@ -103,7 +103,8 @@ KEEP_DB=1 ./test-with-db.sh      # 保留容器连续调试
 | `PRAETOR_SANDBOX` | `required` | 不可用 → Bash 明确拒绝（fail-closed）；`optional` 降级宿主；`off` 不包 Bash |
 | `PRAETOR_SANDBOX_ISOLATION` | `per-task` | `per-task` / `shared` |
 | `PRAETOR_SANDBOX_IMAGE` | `praetor/sandbox:latest` | 任务容器镜像 |
-| `PRAETOR_SANDBOX_WORK_ROOT` | `<data>/work` | 任务工作区根，每任务一个子目录 |
+| `PRAETOR_SANDBOX_WORK_ROOT` | `<data>/work` | **应用进程视角**的任务工作区根；compose 部署固定 `/app/data/work` |
+| `PRAETOR_SANDBOX_WORK_HOST_ROOT` | 空 | 覆盖自动推导的 `docker -v` 宿主源；仅远程 daemon 需要 |
 | `PRAETOR_SANDBOX_IDLE_TTL` | `30m` | 空闲回收阈值（reaper 每 5m 扫一次） |
 | `PRAETOR_SANDBOX_PROXY` | 空 | 注入容器的 `HTTP(S)_PROXY`，走宿主记录代理需填 `http://host.docker.internal:<port>` |
 | `PRAETOR_SANDBOX_NETWORK` | 空 | 任务容器加入的 docker 网络（打靶场时用） |
@@ -191,6 +192,7 @@ go run ./cmd/ctfbench -root /path/to/corpus -dry-run
 | 3 | 面板 `challenge_ready=true`，模型却说"没有配置题面来源" | `agentsForTask` 的 bundle 是**进程内单例**，任务常是"先建、后配题"，配置写在缓存之后 | 题面来源与判题后端都改成**惰性解析**（每次调用重新取） |
 | 4 | 模型开局 `cd E:\...\data\tasks\25\i141` 必然失败 | 系统提示词给的是宿主 `tasks/<id>/i<id>`，与容器挂载的 `work/<id>` 是两棵树 | `Worker.SetSandboxWorkRoot`，提示词改成 `/work/i<id>` |
 | 5 | `ctf_challenge` 的 files 里出现 `/chal/flag.txt` | 题目录整体挂载 + 附件列表未过滤答案文件 | 答案文件**两道闸门**：列表过滤 + 挂载前生成脱敏视图（`chal-view/<id>`） |
+| 6 | 每条 Bash `OCI runtime exec failed: chdir to cwd ("/work/i622")`、退出码 127，命令一行没跑 | 应用容器内路径 `/app/data/work/...` 被原样当成 `docker -v` 的宿主源，Docker 建了个空目录 | 启动期 `docker inspect` 自身容器推导 bind mount 宿主源（`sandbox/hostpath.go`）；推导失败即 fail-closed |
 
 第 5 条最危险：`cat /chal/flag.txt` 就结束了，题目形同虚设。脱敏视图**只在源目录真含答案文件时才复制**
 （多数题库本来没有），所以常态零开销；构建失败时**宁可返回空**也不回落原目录——少给附件比多给答案划算。
@@ -250,9 +252,12 @@ go run ./cmd/ctftarget -challenge /path/to/corpus/very-easy-delulu -up
 
 两个容易被忽略但会安静吃掉时间的点：
 
-- **`.env` 里的 `PRAETOR_SANDBOX_WORK_ROOT=./data/work` 是相对路径**。docker 的 `-v` 把相对路径
-  当**卷名**，于是每条 Bash 都 `invalid volume specification`。代码里已经用 `filepath.Abs` 兜底
-  （相对服务启动目录），但写绝对路径能省掉"换个目录启动就行为变了"这类玄学。
+- **任务工作区有「两个路径视角」**：应用进程内是 `/app/data/work`（Linux 容器），`docker run -v`
+  要的却是 `E:/.../data/work` 或 `/opt/.../data/work`。把前者交给 daemon 会挂出一个空目录，
+  于是 `/work/i<id>` 不存在、`docker exec --workdir` 直接 chdir 失败。现在的解法是启动期
+  `docker inspect` 自身容器读回 Compose 已解析好的宿主源（见 `sandbox/hostpath.go`），
+  `.env` 不需要写任何机器相关的绝对路径 —— 换机器、换 clone 位置、挪动仓库都能直接复跑。
+  启动日志的 `[config] 沙箱工作区` 一行会打印两个视角和推导依据。
 - **`PRAETOR_SANDBOX_NETWORK` 指向不存在的网络**时，容器创建会全部失败，而报错发生在**每条 Bash** 上。
   现在启动期会探一次并打警告（`sandbox.CheckNetwork`），因为让模型在几十次工具调用里反复撞
   `network xxx not found` 比在启动日志里说一句贵得多。

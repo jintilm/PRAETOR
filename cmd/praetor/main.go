@@ -77,7 +77,7 @@ func run() int {
 	// -check-config 是纯只读自查：放在 selfupdate / 开库 / 监听端口之前，
 	// 用来回答「配置到底读到没有」，不会碰正在运行的数据库或服务。
 	if *checkConfig {
-		logConfigDiagnostics()
+		logConfigDiagnostics(*dataDir)
 		return 0
 	}
 
@@ -93,7 +93,7 @@ func run() int {
 
 	// 启动即把「配置到底从哪来」讲清楚，避免用户只能靠猜：路径、来源、
 	// 识别到的变量名都打印，但绝不打印值（DSN 与 API key 都是秘密）。
-	logConfigDiagnostics()
+	logConfigDiagnostics(*dataDir)
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -157,7 +157,7 @@ func run() int {
 // and the LLM keys carry secrets. The binary deliberately does not read .env —
 // that file belongs to docker compose — so an empty variable list is the normal
 // case for a bare `./praetor.exe`; start.sh / start.bat bridge the gap.
-func logConfigDiagnostics() {
+func logConfigDiagnostics(dataDir string) {
 	cfgPath := config.Path()
 	if abs, e := filepath.Abs(cfgPath); e == nil {
 		cfgPath = abs
@@ -181,6 +181,10 @@ func logConfigDiagnostics() {
 	} else {
 		log.Printf("[config] 环境变量: 已识别 %d 个 PRAETOR_* 变量：%s（值不打印）", len(names), strings.Join(names, ", "))
 	}
+
+	// 全容器化部署最常见的坑：宿主目录与容器内 /work 是两棵树。把两个视角
+	// 与推导依据打到日志里，别处的机器不需要猜（只读，不连库）。
+	log.Printf("[config] 沙箱工作区: %s", server.SandboxWorkRootDiagnostics(context.Background(), dataDir))
 
 	dsn, source, err := config.PostgresDSN()
 	if err != nil {

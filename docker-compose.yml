@@ -79,8 +79,15 @@ services:
       PRAETOR_SANDBOX_ISOLATION: ${PRAETOR_SANDBOX_ISOLATION:-per-task}
       PRAETOR_SANDBOX_IMAGE: ${PRAETOR_SANDBOX_IMAGE:-praetor/sandbox:latest}
       PRAETOR_SANDBOX_CONTAINER: praetor-sandbox
-      # 任务工作区根（宿主），每个任务一个子目录
-      PRAETOR_SANDBOX_WORK_ROOT: ${PRAETOR_SANDBOX_WORK_ROOT:-/app/data/work}
+      # 任务工作区根 —— 这是**应用容器内**看到的路径（os.MkdirAll / 文件工具用它），
+      # 固定为 /app/data/work，与上面的数据挂载点配套，不要写成宿主路径。
+      # `docker run -v` 需要的宿主源路径由程序在启动期 `docker inspect` 自身容器
+      # 自动推导（见 sandbox/hostpath.go），因此这里不需要、也不应该填任何与机器
+      # 相关的绝对路径：换台机器、换个 clone 目录、挪动仓库都能直接复跑。
+      PRAETOR_SANDBOX_WORK_ROOT: /app/data/work
+      # 逃生舱：只有 Docker daemon 不在本机（远程 DOCKER_HOST）等非常规布局才需要，
+      # 填 daemon 能识别的宿主绝对路径。留空 = 自动推导。
+      PRAETOR_SANDBOX_WORK_HOST_ROOT: ${PRAETOR_SANDBOX_WORK_HOST_ROOT:-}
       PRAETOR_SANDBOX_IDLE_TTL: ${PRAETOR_SANDBOX_IDLE_TTL:-30m}
     ports:
       - "${PRAETOR_HTTP_PORT:-8797}:8787"
@@ -88,6 +95,10 @@ services:
     volumes:
       # 数据目录（含 jwt.key 等）绑定到宿主机，方便查看/备份，容器重建不丢。
       # 与旧栈共用同一仓库目录时注意：两套栈不应同时指向同一个 data/。
+      #
+      # 必须是**宿主目录（bind mount）**，不要填 Docker 命名卷名：per-task 沙箱要把
+      # 这个目录的子目录再挂进任务容器，命名卷没有「宿主路径」可供 -v 使用。
+      # 相对路径由 compose 按本文件所在目录解析，程序会自动读回解析后的绝对路径。
       - ${PRAETOR_DATA_DIR:-./data}:/app/data
       # 项目根目录的 skills 挂进容器（覆盖镜像内置的 /app/skills）：
       # 改 skill 无需重建镜像。

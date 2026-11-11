@@ -38,13 +38,25 @@ type PerTaskRunner struct {
 // PerTaskConfig 是一任务一容器的参数。
 type PerTaskConfig struct {
 	Image         string        // 沙箱镜像，如 praetor/sandbox:latest
-	HostWorkRoot  string        // 宿主任务目录根，如 <data>/work
+	HostWorkRoot  string        // 宿主任务目录根（daemon 侧绝对路径，见 hostpath.go）
 	ContainerRoot string        // 容器内挂载点，默认 /work
 	Network       string        // docker 网络；空 = 默认 bridge
 	Env           []string      // 注入容器的环境变量（K=V），如 HTTP_PROXY=host.docker.internal:8080
 	IdleTTL       time.Duration // 空闲回收阈值，默认 30m
 	LabelPrefix   string        // 容器标签前缀，用于批量清理；默认 praetor.task
 	Command       string        // 容器常驻命令，默认 sleep infinity
+	// InitErr 是装配期（路径视角解析等）留下的致命错误。
+	//
+	// 存在理由：wireSandbox 的统一流程是「构造 → Available() → 决定降级/拒绝」。
+	// 把致命错误挂在这里由 Available 报出，就不必在调用方复制一遍 fail-closed
+	// 分支，也不会出现「探测通过但每条 Bash 都挂错目录」的半可用状态。
+	InitErr error
+	// TranslateHostPath 把「应用进程视角的额外挂载源」翻译成 daemon 侧宿主路径。
+	//
+	// 题面附件（/chal）与工作区同源：应用跑在容器里时，配置里写的 /app/chal-view
+	// 只有应用自己看得到，直接交给 `docker run -v` 会挂出一个空目录。nil = 不做
+	// 转换（宿主二进制部署，两个视角本来就是同一个）。
+	TranslateHostPath func(string) (string, error)
 	// ImageFor 按任务选镜像；nil 或返回空 = 用 Image。
 	//
 	// 为什么镜像要按任务选：CTF 域需要 pwntools/gdb/rizin 这套工具链（约 700MB），
@@ -90,7 +102,7 @@ type Mount struct {
 
 // spec 转成 docker -v 的写法。Windows 上源路径也必须是正斜杠（E:/x 可以，E:\x 不行）。
 func (m Mount) spec() string {
-	s := filepath.ToSlash(m.Source) + ":" + m.Target
+	s := normalizeDaemonPath(m.Source) + ":" + m.Target
 	if m.ReadOnly {
 		s += ":ro"
 	}
@@ -118,6 +130,18 @@ func (p *PerTaskRunner) mountsFor(taskID string) []Mount {
 		}
 		if !isDir(src) {
 			continue
+		}
+		// 应用进程能打开的目录，不等于 daemon 能挂的目录。全 Docker 部署下
+		// 二者是两条不同的路径（见 hostpath.go）；翻译失败宁可跳过挂载并留日志，
+		// 也不要把 /app/... 原样交给 -v —— 那会挂出一个空目录，模型据此判定
+		// 「题面附件缺失」然后开始编题。
+		if p.cfg.TranslateHostPath != nil {
+			daemonSrc, err := p.cfg.TranslateHostPath(src)
+			if err != nil {
+				log.Printf("[sandbox] task %s 跳过挂载 %s：%v", taskID, src, err)
+				continue
+			}
+			src = daemonSrc
 		}
 		if seen[src+">"+tgt] {
 			continue
@@ -168,6 +192,14 @@ type taskBox struct {
 	mountKey string
 	// mu 串行化「同一任务的创建」，避免两个并发 Exec 各建一个容器。
 	mu sync.Mutex
+	// verified 标记「已确认过这个容器的 /work 挂在正确的宿主目录上」。
+	// 进程重启后第一次见到遗留容器时查一次即可，不必每条 Bash 都 inspect。
+	verified bool
+	// dirs 记录已经确保存在过的容器内工作目录（/work/i<id>）。
+	// docker exec --workdir 的 chdir 发生在 shell 启动之前，命令里写 mkdir 没用；
+	// 每个意图目录只在首次使用时补一次，避免每条 Bash 多起一个进程。
+	dirMu sync.Mutex
+	dirs  map[string]bool
 }
 
 // NewPerTask 构造一任务一容器 Runner。
@@ -178,12 +210,11 @@ func NewPerTask(cfg PerTaskConfig) *PerTaskRunner {
 	// 宿主工作目录必须是**绝对路径**：`docker -v 相对路径:/work` 会把相对路径当卷名，
 	// 于是每一条 Bash 都以 "invalid volume specification" 失败，而错误发生在 create 阶段，
 	// 表现为"沙箱完全不可用"——但真正的原因只是一个没展开的 `.`。
-	// 配置里写 `./data/work` 是很自然的事（.env 里就是这么写的），所以在这里兜底。
-	if cfg.HostWorkRoot != "" {
-		if abs, err := filepath.Abs(cfg.HostWorkRoot); err == nil {
-			cfg.HostWorkRoot = abs
-		}
-	}
+	//
+	// 但「绝对」要按 daemon 的视角判断：应用跑在 Linux 容器、daemon 在 Windows 宿主上时，
+	// 推导出的 E:/repo/data/work 对 filepath.IsAbs 是相对路径，若在这里 filepath.Abs
+	// 就会被拼成 /app/E:/repo/data/work，挂载源彻底错位。见 normalizeWorkRoot。
+	cfg.HostWorkRoot = normalizeWorkRoot(cfg.HostWorkRoot)
 	if cfg.IdleTTL <= 0 {
 		cfg.IdleTTL = 30 * time.Minute
 	}
@@ -205,6 +236,12 @@ func (p *PerTaskRunner) Name() string { return "per-task:" + p.cfg.Image }
 
 // Available 探测：镜像存在 + docker 可调用。镜像不存在时给出可执行的修复命令。
 func (p *PerTaskRunner) Available(ctx context.Context) error {
+	if p.cfg.InitErr != nil {
+		return p.cfg.InitErr
+	}
+	if strings.TrimSpace(p.cfg.HostWorkRoot) == "" {
+		return fmt.Errorf("sandbox: 任务工作区根为空，无法确定 docker -v 的宿主源")
+	}
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	_, stderr, code, err := p.exec(cctx, []string{"image", "inspect", p.cfg.Image}, "")
@@ -236,6 +273,9 @@ func (p *PerTaskRunner) Exec(ctx context.Context, req Request) (Result, error) {
 	dir := req.WorkDir
 	if dir == "" {
 		dir = p.cfg.ContainerRoot
+	}
+	if err := p.ensureWorkDir(ctx, box, dir); err != nil {
+		return Result{}, err
 	}
 	args := []string{"exec", "-i", "--workdir", dir}
 	for _, k := range sortedKeys(req.Env) {
@@ -274,6 +314,9 @@ func (p *PerTaskRunner) ExecBackground(ctx context.Context, req Request) (Result
 	if dir == "" {
 		dir = p.cfg.ContainerRoot
 	}
+	if err := p.ensureWorkDir(ctx, box, dir); err != nil {
+		return Result{}, err
+	}
 	args := []string{"exec", "-d", "--workdir", dir, box.container, "sh", "-lc", wrapped}
 	_, stderr, code, err := p.exec(ctx, args, "")
 	if err != nil || code != 0 {
@@ -286,6 +329,38 @@ func (p *PerTaskRunner) ExecBackground(ctx context.Context, req Request) (Result
 		Runner: p.Name(),
 	}
 	return res, nil
+}
+
+// ensureWorkDir 在正式 exec 前确保 --workdir 指向的目录在容器里真的存在。
+//
+// 正常路径下 server.prepareIntentWorkDir 已在宿主侧预建（bind mount 让容器立刻
+// 可见），这里只是兜底：容器复用期间目录被删、宿主预建失败、或没走 Engine 的
+// 调用路径时，`docker exec --workdir` 的 chdir 会在 shell 启动之前失败，
+// 整条命令一行都跑不到，而报错（OCI runtime exec failed / exit 127）看起来
+// 完全不像「目录不存在」。chdir 早于 shell，所以只能靠一条独立的 exec 补建。
+//
+// 这次 exec 刻意不带 --workdir：容器创建时的默认工作根（/work）一定存在。
+// 每个 (容器, 目录) 只补一次，避免每条 Bash 都多起一个进程。
+func (p *PerTaskRunner) ensureWorkDir(ctx context.Context, box *taskBox, dir string) error {
+	if dir == "" || dir == p.cfg.ContainerRoot {
+		return nil
+	}
+	box.dirMu.Lock()
+	defer box.dirMu.Unlock()
+	if box.dirs == nil {
+		box.dirs = map[string]bool{}
+	}
+	if box.dirs[dir] {
+		return nil
+	}
+	_, stderr, code, err := p.exec(ctx, []string{
+		"exec", box.container, "sh", "-lc", "mkdir -p -- " + shellQuote(dir),
+	}, "")
+	if err != nil || code != 0 {
+		return fmt.Errorf("sandbox: 预建容器工作目录 %s 失败: %v (%s)", dir, err, strings.TrimSpace(stderr))
+	}
+	box.dirs[dir] = true
+	return nil
 }
 
 // Release 立即删除任务容器（工作目录保留，供取证/复盘）。幂等。
@@ -350,6 +425,9 @@ func (p *PerTaskRunner) ReapIdle(ctx context.Context) int {
 
 // box 返回任务容器，必要时创建。并发安全：同一任务只会创建一个容器。
 func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error) {
+	if p.cfg.InitErr != nil {
+		return nil, p.cfg.InitErr
+	}
 	key := normalizeTaskID(taskID)
 
 	p.mu.Lock()
@@ -358,6 +436,7 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 		box = &taskBox{
 			container: "praetor-task-" + key,
 			hostDir:   filepath.Join(p.cfg.HostWorkRoot, key),
+			dirs:      map[string]bool{},
 		}
 		p.boxes[key] = box
 	}
@@ -375,10 +454,20 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 		return nil, err
 	}
 	if exists {
-		// 镜像换了就换容器：否则"上一轮用基础镜像建的容器"会让新镜像永远用不上
-		// （容器还在就直接 exec），现象是"装了工具却找不到"，且只在重启后才诡异地好了。
-		// 挂载同理：题面目录从"没配"变成"配了"时，旧容器里没有 /chal，模型会看到空目录。
-		if sameImage(current, image) && box.mountKey == mk {
+		// 老版本把应用容器内路径（/app/data/work/214）当成 -v 的宿主源，
+		// 升级后正确的根是 E:/.../data/work。遗留容器会被 containerState 认成
+		// 「已存在且镜像一致」而一直复用，空目录与 chdir 失败也就一直跟着。
+		// 所以重启后第一次见到遗留容器时比一次挂载源，错了就重建。
+		// 读不到挂载源时不动（docker 权限/版本差异不该导致每次都重建）。
+		stale := false
+		if !box.verified {
+			stale = p.workMountStale(ctx, box)
+			box.verified = true
+			if stale {
+				log.Printf("[sandbox] task %s 的遗留容器挂载源与当前工作根不符，重建容器", key)
+			}
+		}
+		if !stale && sameImage(current, image) && box.mountKey == mk {
 			return box, nil
 		}
 		if err := p.removeContainer(ctx, box.container); err != nil {
@@ -403,7 +492,7 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 		"--name", box.container,
 		"--label", p.cfg.LabelPrefix + "=" + key,
 		"--workdir", p.cfg.ContainerRoot,
-		"-v", filepath.ToSlash(box.hostDir) + ":" + p.cfg.ContainerRoot,
+		"-v", normalizeDaemonPath(box.hostDir) + ":" + p.cfg.ContainerRoot,
 		"--security-opt", "no-new-privileges:true",
 	}
 	// 全量出口隐身：egress 启用时容器需要 NET_ADMIN（iptables）与宿主网关映射
@@ -463,12 +552,13 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 
 	_, stderr, code, err := p.exec(ctx, args, "")
 	if err != nil {
-		return nil, fmt.Errorf("sandbox: 创建任务容器失败: %w (%s)", err, strings.TrimSpace(stderr))
+		return nil, fmt.Errorf("sandbox: 创建任务容器失败: %w (%s) [挂载=%q]", err, strings.TrimSpace(stderr), volumeArgs(args))
 	}
 	if code != 0 {
-		return nil, fmt.Errorf("sandbox: 创建任务容器失败: %s", strings.TrimSpace(stderr))
+		return nil, fmt.Errorf("sandbox: 创建任务容器失败: %s [挂载=%q]", strings.TrimSpace(stderr), volumeArgs(args))
 	}
 	box.mountKey = mk
+	box.verified = true
 
 	// 出口隐身初始化：环境变量已在 run 时注入，这里只触发脚本。
 	// exec -d 异步执行，失败降级为直连并记日志 —— 隐身失败不该让任务失败，
@@ -481,6 +571,21 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 		}
 	}
 	return box, nil
+}
+
+// volumeArgs 只挑出 -v 的参数用于报错。
+//
+// 容器创建失败最常见的两类原因是「宿主源路径不对」和「挂载目标写错」，把挂载
+// 列进报错能一眼定位；但不能把整条 args 打进日志 —— 里面可能有 -e 注入的
+// 代理凭据。只摘 -v 既够用又不会泄密。
+func volumeArgs(args []string) []string {
+	var out []string
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-v" || args[i] == "--volume" {
+			out = append(out, args[i+1])
+		}
+	}
+	return out
 }
 
 func (p *PerTaskRunner) containerExists(ctx context.Context, name string) (bool, error) {
@@ -524,7 +629,7 @@ func sameImage(have, want string) bool {
 // 即便如此仍先校验 /work 的宿主源落在我方 HostWorkRoot 之下才删，
 // 免得误伤另一个 checkout 的容器（它可能有同名任务 id）。
 func (p *PerTaskRunner) SweepOrphans(ctx context.Context) int {
-	if p == nil {
+	if p == nil || p.cfg.InitErr != nil || strings.TrimSpace(p.cfg.HostWorkRoot) == "" {
 		return 0
 	}
 	out, _, code, err := p.exec(ctx, []string{
@@ -561,6 +666,21 @@ func (p *PerTaskRunner) SweepOrphans(ctx context.Context) int {
 	return n
 }
 
+// workMountStale 判断现存容器的 /work 是否挂在当前工作根之外。
+//
+// 只在能明确读到宿主源、且它确实不在根下时返回 true；读不到就当没问题，
+// 免得 inspect 权限差异让每次执行都重建容器（重建会丢掉容器里已装的工具和后台进程）。
+func (p *PerTaskRunner) workMountStale(ctx context.Context, box *taskBox) bool {
+	if strings.TrimSpace(p.cfg.HostWorkRoot) == "" {
+		return false
+	}
+	src, owned := p.workMountSource(ctx, box.container)
+	if !owned {
+		return false
+	}
+	return !underRoot(src, p.cfg.HostWorkRoot)
+}
+
 // workMountSource 返回容器 /work 挂载的宿主源；不是本系统建的容器返回 owned=false。
 func (p *PerTaskRunner) workMountSource(ctx context.Context, name string) (string, bool) {
 	format := `{{range .Mounts}}{{if eq .Destination "` + p.cfg.ContainerRoot + `"}}{{.Source}}{{end}}{{end}}`
@@ -568,7 +688,7 @@ func (p *PerTaskRunner) workMountSource(ctx context.Context, name string) (strin
 	if err != nil || code != 0 {
 		return "", false
 	}
-	src := strings.TrimSpace(out)
+	src := normalizeDaemonPath(out)
 	return src, src != ""
 }
 

@@ -116,15 +116,29 @@ func (s *Server) taskWorkHost(t *Task) string {
 // taskWorkHostFor 是 taskWorkHost 的纯函数版：Engine 手上只有 *Manager，没有
 // *Server，但它同样需要这条路径（预建 /work/i<id>）。两处各写一套规则的话，
 // 一旦 SANDBOX_WORK_ROOT 的语义变了，只有真跑容器才会发现对不上。
+//
+// 注意这里返回的是**应用进程视角**的路径（容器内是 /app/data/work/...），
+// 不是 `docker run -v` 要用的宿主路径 —— 后者由 wireSandbox 里的
+// sandbox.ResolvePathView 单独推导。两个视角混用就是「宿主建好了 i622、
+// 容器里 /work 却是空的」那个事故。
 func taskWorkHostFor(t *Task, dataDir string) string {
 	if t == nil || t.ID == "" {
 		return ""
 	}
+	return filepath.Join(localSandboxWorkRoot(dataDir), t.ID)
+}
+
+// localSandboxWorkRoot 返回任务工作区根在**本进程**里的绝对路径。
+//
+// 这是 os.MkdirAll、LS/Read/Write 等宿主侧工具唯一该用的根；文件工具跑在
+// 应用进程里，看不到 daemon 的宿主路径。相对值按当前工作目录展开（老行为，
+// 也是 start.sh / start.bat 从项目目录启动时所依赖的）。
+func localSandboxWorkRoot(dataDir string) string {
 	root := envOr("SANDBOX_WORK_ROOT", filepath.Join(dataDir, "work"))
 	if abs, err := filepath.Abs(root); err == nil {
 		root = abs
 	}
-	return filepath.Join(root, t.ID)
+	return root
 }
 
 // resolveContainerPath 把容器路径翻成宿主路径，并保证结果**真的**落在挂载里。

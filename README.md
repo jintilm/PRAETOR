@@ -156,11 +156,12 @@ cd PRAETOR
 
 #### 配置读不到时怎么自查
 
-`./praetor -check-config`（Windows：`praetor.exe -check-config`）只打印配置来源，**不连数据库、不启动服务**。正常启动也会打印同样三行：
+`./praetor -check-config`（Windows：`praetor.exe -check-config`）只打印配置来源，**不连数据库、不启动服务**。正常启动也会打印同样几行：
 
 ```text
 [config] 配置文件: E:\...\config.json (已找到)
 [config] 环境变量: 已识别 1 个 PRAETOR_* 变量：PRAETOR_PG_DSN（值不打印）
+[config] 沙箱工作区: 应用内=E:\...\data\work | docker -v 源=E:/.../data/work | 依据=宿主进程（无需转换）
 [config] 数据库配置: 来源=配置文件 ... (database 字段)，目标=postgres://praetor:REDACTED@127.0.0.1:55433/praetor
 ```
 
@@ -168,6 +169,7 @@ cd PRAETOR
 - `start.sh` / `start.bat` 负责桥接：把 `.env` 里的 `PRAETOR_*` / `POSTGRES_*` 搬进环境，并从 `POSTGRES_PASSWORD` + `PRAETOR_PG_PORT` 自动组装 `PRAETOR_PG_DSN`（调用方已 export 的同名变量优先，不覆盖）。
 - 优先级：`PRAETOR_PG_DSN` > `config.json`（`database.dsn` > 分字段）。两者都没有会**明确报错并指出该创建哪个文件**，不会悄悄连到某个默认库。
 - `config.json` 按 `PRAETOR_CONFIG` → 当前目录 → 可执行文件同级的顺序找第一个存在的文件；启动日志会打印实际命中的绝对路径。常见错误是把端口号写进 `host`、或沿用容器内的 `5432` 而宿主实际是 `55433`。
+- `[config] 沙箱工作区` 一行给出「应用内路径 / `docker -v` 宿主源 / 推导依据」。全 Docker 部署下两者不同是正常的；若显示「解析失败」，按报错检查容器内是否有 `docker` CLI、`PRAETOR_DATA_DIR` 是不是宿主目录，详见[两个路径视角](#任务工作区的两个路径视角全-docker-部署)。
 
 `compose up -d` 是后台启动，Postgres 首次健康检查要几秒，页面短暂打不开属正常：`docker compose logs -f praetor` 看进度。
 
@@ -209,6 +211,7 @@ docker compose -f docker-compose.yml -f docker-compose.socket.yml up -d --build
 | 浏览器提示 `/opt/google/chrome/chrome` 不存在 | 镜像预装的是 Playwright chromium（`~/.cache/ms-playwright`），不是 Chrome stable | 用 Playwright 自带 chromium；沙箱镜像里另需装浏览器 |
 | WebFetch 对所有站点（含对照站点）都 502 | 设置里全局出口代理仍是 `http://127.0.0.1:7897`，容器内指向容器自己 | 系统设置改为 `http://host.docker.internal:7897`，或清空直连 |
 | 修好 CLI 后又报「沙箱镜像不存在」 | 设置里记着旧机构建的 `praetor/sandbox:custom-*` tag | 组件面板重新应用预设，或清空 `sandbox.image` 回落 `PRAETOR_SANDBOX_IMAGE` |
+| 每条 Bash `OCI runtime exec failed: chdir to cwd ("/work/i622")`，退出码 127 | 任务容器挂错了宿主目录，`/work` 里没有意图子目录 | 见下节；确认启动日志的「工作区」两行指向同一棵树 |
 
 `required` 是 **fail-closed**：探测失败不阻断启动（UI 能进），但注入一个永远拒绝的 Runner，
 绝不让 Bash 悄悄回落到宿主。所以启动日志里这两行就是总开关：
@@ -217,6 +220,33 @@ docker compose -f docker-compose.yml -f docker-compose.socket.yml up -d --build
 [sandbox] 不可用（mode=required, isolation=per-task ...）：docker 不可用: ...
 [sandbox] worker 的 Bash 将被拒绝；修好 Docker/镜像，或设 PRAETOR_SANDBOX=optional 降级
 ```
+
+#### 任务工作区的两个路径视角（全 Docker 部署）
+
+应用跑在容器里时，同一棵任务目录树有两个名字：
+
+| 视角 | 例子 | 谁在用 |
+| --- | --- | --- |
+| 应用进程内 | `/app/data/work/214/i622` | `os.MkdirAll`、LS/Read/Write 等工具、提示词里的 `/work/i622` |
+| Docker daemon（宿主） | `E:/Code/pentest/PRAETOR/data/work/214` 或 `/opt/praetor/data/work/214` | `docker run -v <源>:/work` |
+
+老实现把前者原样交给 `-v`，宿主上没有 `/app/...`，Docker 就自动建了个空目录挂进任务容器：
+宿主预建好的 `i622` 和容器里的 `/work` 变成两棵树，`docker exec --workdir /work/i622`
+在 shell 启动之前就 `chdir` 失败，表现为 `OCI runtime exec failed: ... no such file or directory`
++ 退出码 127 —— 命令一行都没执行，26 个端口一个 `OPEN:` 都扫不出来。
+
+现在的处理是**启动期自动推导**：程序 `docker inspect` 自身容器，把 Compose 已经解析好的
+bind mount 宿主源读回来，再拼上 `work/<taskID>` 作为 `-v` 的源。因此：
+
+- `.env` 里**不需要**填任何机器相关的绝对路径；全新 clone 后 `./install.sh` 选 1 在
+  Windows / Linux / macOS 上都能直接跑，换 clone 目录、从别的目录执行 compose、事后挪动仓库也自愈。
+- `PRAETOR_DATA_DIR` 必须是**宿主目录**（bind mount），不要填 Docker 命名卷名；落在命名卷里会
+  明确报错并指出改法，而不是静默挂空目录。
+- 只有 daemon 不在本机（远程 `DOCKER_HOST`）等非常规布局，才需要设 `PRAETOR_SANDBOX_WORK_HOST_ROOT`
+  覆盖自动推导。设了它就会跳过推导，换机器后记得清空。
+- 启动日志 / `-check-config` 会打印三元组：`应用内=… | docker -v 源=… | 依据=…`；
+  路径推导不出来时按 `required` 的规则 fail-closed，不会退化成那个空目录。
+- 兜底：正式 `exec` 前还会按容器缓存地补建一次 `--workdir` 指向的目录，防止目录在容器复用期间被删。
 
 想改用现成的发布镜像（而不是自己构建）：在 `.env` 设
 `PRAETOR_IMAGE=<registry>/<repo>:<tag>`，然后 `docker compose pull praetor && docker compose up -d`。
@@ -304,7 +334,9 @@ export ANTHROPIC_API_KEY='sk-...'                 # 或 OPENAI_API_KEY / 留空�
 | `POSTGRES_USER/PASSWORD/DB` | compose 里 postgres 的账号与库名 | `praetor` / 必填 / `praetor` |
 | `PRAETOR_HTTP_PORT` | 容器映射到宿主的 HTTP 端口 | `8797` |
 | `PRAETOR_MCP_PORT` | 容器映射到宿主的 MCP 端口 | `8798` |
-| `PRAETOR_DATA_DIR` | 宿主数据目录（jwt.key、工作区） | `./data` |
+| `PRAETOR_DATA_DIR` | 宿主数据目录（jwt.key、工作区），必须是 bind mount 宿主目录而非命名卷名 | `./data` |
+| `PRAETOR_SANDBOX_WORK_HOST_ROOT` | 覆盖自动推导的 `docker -v` 宿主源；仅远程 daemon 等非常规布局需要 | 空（自动推导） |
+| `PRAETOR_SANDBOX_WORK_ROOT` | 仅宿主二进制部署：应用进程内的工作区根。compose 部署固定为 `/app/data/work`，忽略此值 | `<data>/work` |
 | `PRAETOR_IMAGE` | 用外部镜像而不是源码构建 | 空（构建 `praetor/praetor:<tag>`） |
 | `PRAETOR_TAG` | 本地构建的镜像 tag | `latest` |
 | `PRAETOR_GOPROXY` | 构建时 Go 模块代理 | `https://proxy.golang.org,direct` |

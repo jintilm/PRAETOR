@@ -106,6 +106,8 @@ show_install_summary(){
   echo "             普通使用不需要它：应用容器内由 compose 注入 PRAETOR_PG_DSN"
   echo "  直连数据库 postgres://praetor:<上面的密码>@127.0.0.1:${pg_port}/praetor"
   echo "  查看日志   docker compose ${COMPOSE_ARGS[*]} logs -f praetor"
+  echo "  路径自查   docker compose ${COMPOSE_ARGS[*]} logs praetor | grep '沙箱工作区'"
+  echo "             （宿主路径自动推导，.env 无需写任何本机绝对路径）"
   echo "  后续启动   docker compose ${COMPOSE_ARGS[*]} up -d（选项 1 是容器部署，"
   echo "             不要去跑 ./praetor.exe；那个二进制属于选项 2 / Releases 包）"
   echo "  停止卸载   ./uninstall.sh（默认只停服务，数据全保留）"
@@ -164,6 +166,13 @@ install_docker(){
         env_set PRAETOR_SANDBOX optional
         ;;
     esac
+  fi
+  # 可移植性：任务工作区的宿主路径由程序在启动期自动推导，.env 里不写任何
+  # 机器相关的绝对路径。老版本若手工填过 HOST_ROOT，它会覆盖自动推导 ——
+  # 换机器 / 挪动仓库后就会挂错目录，这里明确提醒一次而不是静默沿用。
+  if [ -n "$(env_get PRAETOR_SANDBOX_WORK_HOST_ROOT)" ]; then
+    warn ".env 里的 PRAETOR_SANDBOX_WORK_HOST_ROOT 会覆盖自动推导的宿主路径"
+    warn "换机器或挪动仓库后请清空该行；常规部署不需要它"
   fi
   load_compose_overlays
 

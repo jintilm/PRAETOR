@@ -2,9 +2,9 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"hash/fnv"
 	"log"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -96,6 +96,13 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string, routing San
 
 	isolation := sandbox.IsolationFromEnv()
 
+	// 任务工作区根有两个视角，只有 per-task 才需要「daemon 侧」那一个：
+	//   Local  = 应用进程内 os.MkdirAll / 文件工具看到的路径（/app/data/work）
+	//   Daemon = 交给 `docker run -v` 的宿主路径（E:/repo/data/work）
+	// 宿主二进制部署时二者相同；全 Docker 部署下不同，靠启动期 docker inspect
+	// 自身容器自动推导，不需要填任何机器相关的绝对路径（见 sandbox/hostpath.go）。
+	localWorkRoot := localSandboxWorkRoot(dataDir)
+
 	var runner sandbox.Runner
 	switch isolation {
 	case sandbox.IsolationShared:
@@ -105,16 +112,32 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string, routing San
 		if image == "" {
 			image = envOr("SANDBOX_IMAGE", "praetor/sandbox:latest")
 		}
+		view, viewErr := sandbox.ResolvePathView(ctx, localWorkRoot, config.Env("SANDBOX_WORK_HOST_ROOT"))
+		if viewErr != nil {
+			// 绝不把 Local 当 Daemon 兜底：那正是本次事故（宿主上不存在的
+			// /app/data/work 被 Docker 建了个空目录）的成因。交给 Available()
+			// 统一报出，由下面的 mode 分支 fail-closed 或降级。
+			log.Printf("[sandbox] 工作区路径视角解析失败：%v", viewErr)
+		} else {
+			log.Printf("[sandbox] 工作区: 应用内=%s | docker -v 源=%s | 依据=%s",
+				view.Local, view.Daemon, view.Via)
+		}
+		root := view.Daemon
+		if viewErr != nil {
+			root = ""
+		}
 		pt := sandbox.NewPerTask(sandbox.PerTaskConfig{
-			Image:         image,
-			ImageFor:      routing.ImageFor,
-			MountFor:      routing.MountFor,
-			HostWorkRoot:  envOr("SANDBOX_WORK_ROOT", filepath.Join(dataDir, "work")),
-			ContainerRoot: SandboxContainerRoot,
-			Network:       config.Env("SANDBOX_NETWORK"),
-			Env:           sandboxContainerEnv(),
-			IdleTTL:       durationOr("SANDBOX_IDLE_TTL", 30*time.Minute),
-			Egress:        routing.Egress,
+			Image:             image,
+			ImageFor:          routing.ImageFor,
+			MountFor:          routing.MountFor,
+			HostWorkRoot:      root,
+			InitErr:           viewErr,
+			TranslateHostPath: view.Mapping.Translate,
+			ContainerRoot:     SandboxContainerRoot,
+			Network:           config.Env("SANDBOX_NETWORK"),
+			Env:               sandboxContainerEnv(),
+			IdleTTL:           durationOr("SANDBOX_IDLE_TTL", 30*time.Minute),
+			Egress:            routing.Egress,
 			// 题面主机名 → 目标网络：见 sandbox.TargetNetwork。这里只提供"名字从哪来"，
 			// 具体要不要接、接哪个网络由沙箱层问 docker 决定。
 			TargetHosts: routing.TargetHosts,
@@ -159,6 +182,20 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string, routing San
 		sandboxPerTaskActive.Store(true)
 	}
 	log.Printf("[sandbox] 已启用：mode=%s isolation=%s runner=%s", mode, isolation, runner.Name())
+}
+
+// SandboxWorkRootDiagnostics 给 `-check-config` 用：一行说清工作区的两个视角。
+//
+// 换台机器、换 clone 位置、把仓库挪走之后，最容易怀疑的就是「路径是不是又错了」。
+// 这行日志直接给出应用内路径、daemon 侧 -v 源和推导依据，不需要去翻容器挂载表。
+// 只做只读 docker inspect（5s 超时），不连数据库、不改任何东西。
+func SandboxWorkRootDiagnostics(ctx context.Context, dataDir string) string {
+	local := localSandboxWorkRoot(dataDir)
+	view, err := sandbox.ResolvePathView(ctx, local, config.Env("SANDBOX_WORK_HOST_ROOT"))
+	if err != nil {
+		return fmt.Sprintf("应用内=%s | docker -v 源=解析失败（%v）", local, err)
+	}
+	return fmt.Sprintf("应用内=%s | docker -v 源=%s | 依据=%s", view.Local, view.Daemon, view.Via)
 }
 
 // envOr 读 PRAETOR_<key>，空则用默认值。
