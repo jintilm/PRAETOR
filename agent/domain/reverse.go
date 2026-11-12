@@ -168,9 +168,11 @@ func ReverseRecipes() []Recipe {
 				"select=类名时回该类的 Java（装了 jadx）或 smali 源码"},
 		// 第 10 条，正好卡住 TestReverseRecipeCatalogIsLean 的上限。
 		// 再加移动端能力时优先合并进这条（用 select 区分子动作），不要扩表。
-		{Name: "mobile_scan", Upstream: "iBotPeaches/Apktool（仅解包，规则自研）", License: "Apache-2.0", Needs: []string{"apktool"},
-			Returns: "APK 静态规则扫描：导出组件 / 可调试 / 备份 / 明文流量 / 用户 CA / 证书绑定 / 危险权限 / " +
-				"WebView 与硬编码凭据线索；一行一条带「文件:行 + 依据」，分页 ≤60 行，全文落盘"},
+		// Needs 里的 apktool 只对 APK 分支生效；IPA 分支是纯 Go zip，无外部依赖。
+		{Name: "mobile_scan", Upstream: "iBotPeaches/Apktool（APK 解包）＋ Go archive/zip（IPA），规则自研", License: "Apache-2.0", Needs: []string{"apktool"},
+			Returns: "静态规则扫描，按文件形态自动分流：APK → 导出组件 / 可调试 / 备份 / 明文流量 / 用户 CA / " +
+				"证书绑定 / 危险权限 / WebView / 硬编码凭据；IPA → Info.plist（ATS / URL scheme / 权限用途）、" +
+				"Mach-O 魔数、描述文件 entitlement、明文端点。一行一条带「文件:行 + 依据」，分页 ≤60 行，全文落盘"},
 	}
 }
 

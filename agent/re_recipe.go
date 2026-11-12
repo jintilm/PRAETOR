@@ -221,7 +221,8 @@ func (t *ToolSet) reRecipe() actool.CoreTool {
 			"每条配方只做一件事且输出确定：disasm(反汇编函数/地址段) xrefs(交叉引用) decompile(单函数伪代码) "+
 			"strings(还原混淆串) capability(能力命中) packer(编译器/壳判定) triage(全貌，等价 re_triage)。\n"+
 			"mobile(APK 解包：清单摘要/类名清单，select 填类名可取该类源码) "+
-			"mobile_scan(APK 静态规则扫描：导出组件/可调试/明文流量/硬编码凭据等，一行一条带依据) "+
+			"mobile_scan(静态规则扫描：APK 走 apktool，IPA 走纯 Go zip；按文件形态自动分流，"+
+			"命中含导出组件/可调试/ATS 明文/URL scheme/硬编码凭据等，一行一条带依据) "+
 			"trace(动态调用序列，需授权)。\n"+
 			"缺依赖时会明确告诉缺哪个可执行文件 —— 那是环境问题，按提示记下来换路线，不要自己拼命令绕过。"+
 			"输出超过一页就带 page 续取，全文同时落盘，需要细节用 Read 读落盘文件。",
@@ -274,7 +275,7 @@ func (t *ToolSet) reRecipe() actool.CoreTool {
 			if !ok {
 				return actool.Errorf(fmt.Sprintf("配方 %q 还没有实现", name)), nil
 			}
-			if miss := missingTools(name); len(miss) > 0 {
+			if miss := missingToolsFor(name, target); len(miss) > 0 {
 				return actool.Errorf(fmt.Sprintf("缺 %s：这条配方要它才能跑。装法：%s。"+
 					"先用 triage 和静态配方定方向，别在这条路上反复重试",
 					strings.Join(miss, "、"), hintsFor(miss))), nil
@@ -327,6 +328,16 @@ func domainRecipe(name string) (domain.Recipe, bool) {
 }
 
 // missingTools 返回该配方缺哪些可执行文件（空 = 齐了）。
+// missingToolsFor 是带样本形态的依赖判定。mobile_scan 的 IPA 分支用标准库
+// archive/zip，不需要 apktool —— 若一律按域声明的 Needs 检查，没装安卓工具链的
+// 机器连纯静态的 iOS 包都扫不了，那是把「APK 的依赖」错扣到 IPA 头上。
+func missingToolsFor(name, target string) []string {
+	if name == "mobile_scan" && looksLikeIPA(strings.TrimSpace(target)) {
+		return nil
+	}
+	return missingTools(name)
+}
+
 func missingTools(name string) []string {
 	r, ok := domainRecipe(name)
 	if !ok {

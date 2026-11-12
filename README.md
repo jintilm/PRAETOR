@@ -614,9 +614,9 @@ server {
 - 命名避让：项目已有 `task_templates`（任务描述预设），新功能一律用 `report_template` / `ReportTemplate`。
 - 未知模板名在创建任务或导出时返回 400，不会静默回落；读旧库脏值时回落 `praetor`。
 
-## 移动端静态分析（P0）
+## 移动端静态分析（P0 / P2 扩展）
 
-当前只做 **APK 静态分析**，不涉及模拟器、真机、动态运行或联网。真机接入的授权链、设备适配器与沙箱接线已在下一章（P1）落地；真正跑 frida / 抓包的动态工具属于 P2。
+静态侧覆盖 **APK 与 IPA**，都不涉及模拟器、真机、动态运行或联网。真机接入的授权链与沙箱接线见 P1，真机动态工具面与证据落盘见 P2。
 
 ### 安装
 
@@ -631,21 +631,26 @@ server {
 | 配方 | 作用 | 依赖 |
 | --- | --- | --- |
 | `mobile` | 解包摘要：包名 / 入口 Activity / 权限 / 组件 / 类名清单；`select=类名` 取该类 Java 或 smali 源码 | `apktool`（`jadx` 可选） |
-| `mobile_scan` | 静态规则扫描，一行一条命中，每条带「文件:行 + 依据」，按行分页且全文落盘 | `apktool` |
+| `mobile_scan` | 静态规则扫描，按文件形态自动分流（APK 走 apktool，IPA 走纯 Go zip），一行一条命中带「文件:行 + 依据」，按行分页且全文落盘 | `apktool`（仅 APK）；IPA 无外部依赖 |
 
-`mobile_scan` 覆盖：导出组件无权限保护、可调试、备份未关闭、明文流量（`usesCleartextTraffic` / `networkSecurityConfig` / 旧 `targetSdk`）、信任用户 CA、证书绑定配置、敏感权限面、自定义 scheme、WebView JS 桥与远程调试、自定义 TrustManager、硬编码凭据线索。扫描上限 400 个文件 / 单文件 2MB / 每类 8 条，超出会在头行标 `truncated=true`，不静默截断。
+`mobile_scan` 覆盖两组规则，输出格式完全一致（首行标 `mobile_scan` / `ipa_scan`）：
+
+- **APK**：导出组件无权限保护、可调试、备份未关闭、明文流量（`usesCleartextTraffic` / `networkSecurityConfig` / 旧 `targetSdk`）、信任用户 CA、证书绑定配置、敏感权限面、自定义 scheme、WebView JS 桥与远程调试、自定义 TrustManager、硬编码凭据线索。
+- **IPA**：`Info.plist` 的 ATS 明文开关（`NSAllowsArbitraryLoads` / 域名例外）、文件共享（`UIFileSharingEnabled` / `LSSupportsOpeningDocumentsInPlace`）、自定义 URL scheme、敏感权限用途、最低系统版本、Mach-O 主二进制魔数、`embedded.mobileprovision` 里的 `get-task-allow` 调试 entitlement、明文 `http://` 端点与硬编码凭据线索。
+
+扫描上限 400 个文件 / 单文件 2MB / 每类 8 条，超出会在头行标 `truncated=true`，不静默截断。IPA 走标准库 `archive/zip`，**不落盘解包**（只读文本条目 + 主二进制前 4 字节），并拒绝 `..` / 绝对路径的 zip slip 条目；遇到 binary plist 会明确提示需 `plutil -convert xml1` 后人工复核，不猜测内容。
 
 **命中只是线索，不是漏洞结论**：每条都必须回到源码或流量上复核，再用 `re_evidence` 落证据链。不传 `select` 时不需要额外参数；缺 `apktool` 会明确报缺哪个及装法（指向 `mobile-static` 预置），不会静默降级。
 
 ### 边界
 
-- 配方表已满 10 条（`TestReverseRecipeCatalogIsLean` 上限）。后续加移动端能力优先合并进 `mobile_scan` 的 `select` 子动作，不要扩表。
-- 不支持 iOS IPA 解析、APK 动态运行。真机接入、动态授权与设备探测见下一章；frida / 抓包等动态工具本身属于 P2。
+- 配方表已满 10 条（`TestReverseRecipeCatalogIsLean` 上限）。后续加移动端能力优先合并进 `mobile_scan` 的 `select` 子动作，不要扩表 —— iOS 就是按文件形态分流进同一条配方，没有另占一条。
+- iOS **只做静态解析**，动态需 macOS + 越狱真机，平台不承诺自动化；APK / IPA 的动态运行都不在这条配方里。真机接入见 P1，Android 动态工具面见 P2。
 - 与报告模板无关：`report_template` 只影响 Markdown 导出，静态命中等 finding 后按任务所选模板输出。
 
 ## Android 真机动态授权与接入（P1）
 
-本期落地的是**执行链**：任务级授权、短时令牌、设备独占锁、只读探测、沙箱接线。`mobile-dynamic` 预置只提供 adb / frida-tools **客户端**；真正跑 hook、抓包、取数据的设备工具与脚本库属于 P2。换句话说，本期保证「没授权就一次动态操作都做不了」，还不保证「有授权就能自动打完」。
+本期落地的是**执行链**：任务级授权、短时令牌、设备独占锁、只读探测、沙箱接线。它保证「没授权就一次动态操作都做不了」；设备工具面、frida 脚本库、证据落盘与收尾清理在下一章（P2）补齐。`mobile-dynamic` 预置只提供 adb / frida-tools **客户端**，设备本身与 CA 始终由签发人自备。
 
 ### 三条不可让步的边界
 
@@ -697,9 +702,48 @@ server {
 
 「系统设置 → 可选组件」应用 **`mobile-dynamic`** 预置 = `mobile-static` + `android-tools-adb` + `frida-tools`。frida-server、CA、设备本身都由测试机自备，不进镜像；`objection` 仍按「不引重依赖」纪律保持宿主侧可选。
 
-**本期已知限制**：`mobile_*` 设备工具与 frida 脚本库尚未实现，因此授权链目前主要约束 `Bash` 直敲的 adb/frida；真机的动态证据落盘、任务收尾自动清理（清 App 数据、卸 frida 残留、复位代理）、iOS 静态解析、前端授权状态/撤销面板都留到 P2。设备锁靠租约兜底，任务正常收尾尚未主动释放。
+**本期边界**：P1 只解决「能不能做」；`mobile_*` 设备工具、frida 脚本模板、动态证据落盘、任务收尾主动清理、前端授权状态面板与 iOS 静态解析都在 P2（下一章）。P1 的设备锁只靠 15 分钟租约兜底，P2 之后任务落终态会主动释放。
 
 `PRAETOR_RE_DYNAMIC=1` 是逆向域 `trace` 配方（gdb 跑二进制样本）的开关，作用范围与真机动态**完全不同**，不能互相替代；真机动态一律以任务级签发为准。
+
+## Android 真机动态工具面与证据（P2）
+
+### 工具在哪里跑
+
+真机操作**全部由应用容器里的 Go 代码通过 adb TCP 协议完成**（`server/mobile_adb.go`），不依赖沙箱容器里是否装了 adb 二进制，也不碰 USB：adb server 仍在宿主 `:5037`，平台只是按 AOSP 协议说话。安装 APK 用 `sync:` 通道推到 `/data/local/tmp/`，其余动作走 `host:transport:<serial>` + `shell:`。
+
+9 个工具与 P1 的授权 op 一一对应（`mobile_install` / `mobile_launch` / `mobile_shell` / `mobile_frida` / `mobile_hook` / `mobile_proxy` / `mobile_logcat` / `mobile_pull_data` / `mobile_cleanup`），默认 seed 进工具目录并只绑 `worker`。三层纵深：
+
+1. **注入层**：`mobileToolsFor(taskID)` 按当前 run 的 taskID 判定。设备模式未开、任务无生效授权、或调用方不是 worker → 这些工具**根本不出现在模型工具面里**。
+2. **guard 层**：工具名命中 `dynamicOpsForCall`，走 P1 那套 op 白名单 / 短时令牌 / 设备独占锁硬闸。
+3. **工具层**：再读一次 DB 授权，并做参数级约束 —— `mobile_install` 校验本地 APK 的 SHA256 与授权签发的哈希**完全一致**（换包直接拒绝）；`mobile_shell` 只接受只读自省命令白名单；设备侧路径限定 `/data/local/tmp/`；`mobile_hook` 只接受闭集模板名，不接受自定义 JS。
+
+### frida 脚本库
+
+`server/mobile_frida.go` 内置 5 份固定模板：`ssl_pinning_bypass`、`root_detection_bypass`、`crypto_trace`、`http_trace`、`storage_trace`。脚本只记录算法名 / URL / 路径 / 长度，**不打印 Cookie、Token、完整报文或密钥明文**；输出统一带 `[praetor]` 前缀，可用 `mobile_logcat` 过滤。
+
+诚实边界：应用容器是 Go runtime 镜像，**不内置 frida**。`mobile_hook` 把模板写到 `/work/mobile/frida/<name>.js` 并返回可在沙箱容器执行的 `frida -U -l ...` 命令；实际注入由 agent 用 `Bash` 调用（那条 Bash 同样过 frida/hook 授权闸）。`mobile_frida action=ps` 在没有 `frida-ps` 时明确提示降级，不假装成功。
+
+### 证据落盘与脱敏
+
+所有动态输出脱敏后写到 `<workRoot>/<taskID>/mobile/` —— 宿主侧是 `data/work/<taskID>/mobile/`，容器内就是 `/work/mobile/`（同一 bind mount，容器销毁后文件仍在）。`_index.jsonl` 是 append-only 证据索引，记录路径、类型、字节数、脱敏后 SHA256 与一行摘要。工具只回前 4KB 内联预览 + 路径，全文用文件工具读。
+
+脱敏规则与报告模板一致：**允许账号与口令保留**（平台提交材料常需复现账号），但 `Cookie` / `Set-Cookie` / `Authorization` / `X-*-Token` / Bearer、`token|secret|session_id` 长值、短信验证码一律替换成 `[REDACTED#<hash8>]` 或 `[REDACTED]`，完整 HTTP 报文块折叠为「见落盘证据文件」。二进制证据（`adb sync pull`）原样落盘但不进入模型上下文，只回路径 / 大小 / 摘要。
+
+### 收尾
+
+任务落到 `done` / `failed` / `timeout` 时，`Manager` 的终态回调触发 `onTaskTerminal`：立刻作废内存令牌 → 复位全局代理 → 清目标 App 数据 → 删 `/data/local/tmp/praetor-*.apk` → 释放 `device_leases` → 写 `cleanup` 审计。清理是**平台义务**，不受 ops 白名单约束（否则没勾 `cleanup` 的任务会把脏环境留给下一个任务），但只作用于授权签发的那台设备，单项失败不阻断后续项，租约仍作为兜底。也可在任务中途主动调 `mobile_cleanup`。frida-server 若是签发人手工启动的，平台只做可见性报告、不代杀进程。
+
+### 前端
+
+任务详情新增「**真机动态**」页签：展示授权状态（`none/active/revoked/expired`）、签发字段与 ops 闭集、设备探测结果（含 `manual` 项）、append-only 审计列表，并提供带原因与操作者的撤销对话框。未签发授权时明确说明工具不可用与「只能创建任务时签发一次」。
+
+### 仍不做的事
+
+- iOS 动态（macOS + 越狱真机），只做 IPA 静态解析；
+- 不内置模拟器、不提供 `--privileged` / `--device`；
+- 不提供通用 adb 命令直通工具，不让 op 白名单退化；
+- 不自动装系统 CA、不自动绕过证书绑定 —— 这些是设备侧前置，由签发人确认（探测里标 `manual`）。
 
 ---
 ## 开发

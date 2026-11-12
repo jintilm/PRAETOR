@@ -22,7 +22,12 @@ import (
 // hostTools, if set, returns runtime host tools (currently the traffic tools when
 // capture is on) to add to EVERY agent's base list — the DB tools table then
 // filters them per-agent binding. Empty/nil → no host tools this run (capture off).
-func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.CoreTool, map[string][]string)) {
+// mobileTools, if set, supplies per-run 真机动态工具. It receives the run's task id
+// from RunInfo and returns nil for tasks without an active grant — so unauthorized
+// tasks never even see these tool names in their prompt.
+func wireAgentAugment(pg *db.DB, skillDir string,
+	hostTools func() ([]actool.CoreTool, map[string][]string),
+	mobileTools func(int64) []actool.CoreTool) {
 	agent.ToolAugment = func(ctx context.Context, agentKey string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
 		a, err := pg.GetAgentByKey(agentKey)
 		if err != nil || a == nil {
@@ -164,6 +169,16 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 			}
 		}
 
+		// 真机动态工具：按当前 run 的 taskID 注入。planner / chat / 未签发授权的
+		// 任务一律拿不到（mobileToolsFor 返回 nil），工具面不会被 9 个用不上的 schema 撑大。
+		// 绑定过滤仍由 ToolResolve 依 tools 表完成：seed 时默认只绑 worker。
+		if mobileTools != nil && agentKey == "worker" {
+			ri := agent.RunInfoFrom(ctx)
+			if ri.TaskID > 0 {
+				extra = append(extra, mobileTools(ri.TaskID)...)
+			}
+		}
+
 		cleanup := func() {
 			for _, c := range closers {
 				_ = c.Close()
@@ -233,6 +248,16 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		schema, _ := json.Marshal(t.InputSchema())
 		if err := pg.SeedTool(t.Name(), t.Description(), schema, trafficAgents); err != nil {
 			log.Printf("[tools] seed %s 失败: %v", t.Name(), err)
+		}
+	}
+	// 真机动态工具也进目录：默认绑 worker，用户可在工具面板调整可见性。
+	// 运行时是否真的注入由 mobileToolsFor 按「设备模式 + 生效授权」决定，
+	// 目录里有行只代表可管理，不代表对所有任务开放。
+	mobileAgents, _ := json.Marshal([]string{"worker"})
+	for _, sp := range mobileToolSpecs() {
+		schema, _ := json.Marshal(sp.schema)
+		if err := pg.SeedTool(sp.name, sp.desc, schema, mobileAgents); err != nil {
+			log.Printf("[tools] seed mobile %s 失败: %v", sp.name, err)
 		}
 	}
 	// bashInteractiveShellNote is appended to Bash's description ONLY for agents whose

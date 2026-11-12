@@ -299,7 +299,12 @@ func scanMSPayload(dir, nsFile string) ([]mobileHit, int, bool) {
 }
 
 // runMobileScan 返回「一行一条命中」的完整文本，由 re_recipe 统一分页与落盘。
+// 按文件形态自动分流：IPA/zip → 纯 Go zip 解析；其余按 APK 交给 apktool。
+// 配方数保持 10 条不变（逆向域上限），新增平台不额外占一份常驻提示词。
 func runMobileScan(ctx context.Context, target string) (string, error) {
+	if looksLikeIPA(strings.TrimSpace(target)) {
+		return runIPAScan(ctx, strings.TrimSpace(target))
+	}
 	dir, cleanup, err := unpackAPK(ctx, target)
 	if err != nil {
 		return "", err

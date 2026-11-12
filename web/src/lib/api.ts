@@ -38,6 +38,8 @@ import type {
   DailyTokenBucket,
   DeviceProbeResult,
   DynamicGrantInput,
+  DynamicGrantRecord,
+  DynamicGrantAudit,
   UsageSummary,
   CtfBoard,
   DeleteTaskOptions,
@@ -310,11 +312,11 @@ export const api = {
   mobileDevices: (serial?: string) =>
     get<DeviceProbeResult>(`/mobile/devices${serial ? `?serial=${encodeURIComponent(serial)}` : ""}`),
   taskDynamicGrant: (id: string) =>
-    get<{ state: "none" | "active" | "revoked" | "expired" | string; grant: unknown }>(
+    get<{ state: "none" | "active" | "revoked" | "expired" | string; grant: DynamicGrantRecord | null }>(
       `/tasks/${encodeURIComponent(id)}/dynamic-grant`,
     ),
   taskDynamicGrantAudits: (id: string) =>
-    get<{ items: unknown[] }>(`/tasks/${encodeURIComponent(id)}/dynamic-grant/audits`),
+    get<{ items: DynamicGrantAudit[] }>(`/tasks/${encodeURIComponent(id)}/dynamic-grant/audits`),
   revokeTaskDynamicGrant: (id: string, reason: string, operator: string) =>
     post<{ ok: boolean }>(`/tasks/${encodeURIComponent(id)}/dynamic-grant/revoke`, { reason, operator }),
   // ---- CTF（域=ctf 的任务）：判分/题面配置、竞速看板、提交记录 ----

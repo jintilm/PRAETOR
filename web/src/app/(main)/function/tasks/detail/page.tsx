@@ -43,6 +43,7 @@ import { AssetsTab } from "./_tabs/assets-tab";
 import { BroadcastTab } from "./_tabs/broadcast-tab";
 import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
 import { CtfTab } from "./_tabs/ctf-tab";
+import { DynamicTab } from "./_tabs/dynamic-tab";
 import { FindingsTab } from "./_tabs/findings-tab";
 import { GraphTab } from "./_tabs/graph-tab";
 import { InterceptTab } from "./_tabs/intercept-tab";
@@ -61,6 +62,7 @@ const TABS = [
   { value: "assets", label: "测试资产" },
   { value: "coverage", label: "资产覆盖图" },
   { value: "intercept", label: "拦截审批" },
+  { value: "dynamic", label: "真机动态" },
   { value: "report", label: "报告" },
   // CTF 面板只对 domain=ctf 的任务显示（渲染时按 task.domain 过滤）。
   { value: "ctf", label: "CTF", domainOnly: "ctf" as string | undefined },
@@ -449,6 +451,9 @@ function TaskDetailInner() {
         </TabsContent>
         <TabsContent value="intercept" className="mt-0">
           <InterceptTab taskId={id} />
+        </TabsContent>
+        <TabsContent value="dynamic" className="mt-0">
+          <DynamicTab taskId={id} />
         </TabsContent>
         <TabsContent value="report" className="mt-0">
           <ReportTab taskId={id} />

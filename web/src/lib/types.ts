@@ -58,6 +58,35 @@ export function emptyDynamicGrant(): DynamicGrantInput {
   };
 }
 
+export interface DynamicGrantRecord {
+  id: number;
+  task_id: number;
+  grant_ref: string;
+  operator: string;
+  written_authorization: boolean;
+  device_serial: string;
+  apk_sha256: string;
+  ops: string[];
+  valid_from: string;
+  valid_until: string;
+  revoked_at?: string | null;
+  revoke_reason?: string;
+  created_at: string;
+}
+
+export interface DynamicGrantAudit {
+  id: number;
+  task_id: number;
+  action: string;
+  op: string;
+  tool: string;
+  device_serial: string;
+  ticket_digest: string;
+  reason: string;
+  operator: string;
+  created_at: string;
+}
+
 export interface DeviceProbeResult {
   serial: string;
   adb_server: string;
@@ -68,6 +97,7 @@ export interface DeviceProbeResult {
   checks: { name: string; state: string; detail: string }[];
   devices?: string[];
   manual_note?: string;
+  probed_at?: string;
 }
 
 export interface Task {

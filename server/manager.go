@@ -260,6 +260,14 @@ type Manager struct {
 	// dynamicGrantSecret 是任务级动态授权令牌的 HMAC 密钥，独立于 jwt.key。
 	// 令牌只在 Go 侧 hook 里流转，从不进入 LLM 上下文。
 	dynamicGrantSecret []byte
+	// onTaskTerminal 在任务落到终态（done/failed/timeout）时触发一次设备收尾：
+	// 作废令牌、复位代理、清数据、释放设备锁。由 Server 注入，避免 Manager 依赖 HTTP 层。
+	onTaskTerminal func(taskID int64, status string)
+}
+
+// SetOnTaskTerminal 装配终态回调。只在状态真正落终态时调用（由 Server 决定是否异步）。
+func (m *Manager) SetOnTaskTerminal(fn func(taskID int64, status string)) {
+	m.onTaskTerminal = fn
 }
 
 // Settings keys the UI toggles at runtime.
@@ -1519,6 +1527,9 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 		})
 	}
 	m.mu.Unlock()
+	if pgdb.IsTerminal(status) {
+		m.notifyTaskTerminal(n, status)
+	}
 	return true, nil
 }
 
@@ -1550,7 +1561,25 @@ func (m *Manager) SetTaskStatus(id, status string) error {
 		})
 	}
 	m.mu.Unlock()
+	if pgdb.IsTerminal(status) {
+		m.notifyTaskTerminal(n, status)
+	}
 	return nil
+}
+
+// notifyTaskTerminal 把终态通知交给注入的回调。刻意放在锁外、并做 panic 隔离：
+// 设备收尾是尽力而为的补偿动作，绝不能因为一台手机不可达就让任务状态落库失败。
+func (m *Manager) notifyTaskTerminal(taskID int64, status string) {
+	fn := m.onTaskTerminal
+	if fn == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[dynamic-grant] 任务 %d 终态回调异常（已忽略）：%v", taskID, r)
+		}
+	}()
+	fn(taskID, status)
 }
 
 // DeleteTask removes a task and optionally its related global data. Traffic has

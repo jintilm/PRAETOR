@@ -241,7 +241,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			}
 			return a.TaskTimeoutWrapupMaxTurns, true
 		}
-		wireAgentAugment(m.pg, s.skillDir, s.hostTools) // 可见 skills/MCP + 流量/编排 host 工具装配进 agent 工具集
+		wireAgentAugment(m.pg, s.skillDir, s.hostTools, s.mobileToolsFor) // 可见 skills/MCP + 流量/编排 host 工具 + 真机动态工具（按任务授权）装配进 agent 工具集
+		m.SetOnTaskTerminal(s.onTaskTerminal)                             // 任务落终态时自动复位真机环境并释放设备锁
 		domainReg := buildDomainReg(m.Assets())
 		wireTools(m.pg, domainReg) // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
 		// 沙箱：探测容器并注入 runner（required 不可用则 fail-closed）；
