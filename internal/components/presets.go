@@ -64,6 +64,13 @@ func Presets() []Preset {
 			Why:   "只装 apktool：解包 + 纯 Go 静态规则扫描，约 60MB；jadx 保持宿主侧可选增强",
 			IDs:   []string{"apktool"},
 		},
+		{
+			ID:    "mobile-dynamic",
+			Title: "移动端真机动态（静态层 + adb/frida，3 项）",
+			Why:   "在静态预置上叠 adb 与 frida-tools 客户端；设备、frida-server、CA 仍由测试机自备",
+			IDs:   []string{"android-tools-adb", "frida-tools"},
+			Base:  "mobile-static",
+		},
 	}
 }
 

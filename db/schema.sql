@@ -1506,3 +1506,62 @@ CREATE INDEX IF NOT EXISTS idx_notification_deliveries_batch
     ON notification_deliveries(batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_notification_deliveries_channel
     ON notification_deliveries(channel_id, id DESC);
+
+-- ============================================================================
+-- Android 真机动态授权（P1）
+--
+-- 这层与「任务存在」刻意解耦：授权是人在创建任务时**显式签发**的一条独立事实，
+-- 不是 tasks 表上的一个布尔列。理由见 guard/guard.go 的取证边界 —— 提示词与
+-- 用户可编辑的规则都承载不了系统级不变量，授权必须挂在 code-owned 的执行链上：
+--   · 一次人工签发 → 每次工具调用机器校验（agent 全程无需逐次确认）
+--   · agent 不能签发、扩大、续期；没有签发工具，服务端不信任任何来自 LLM 的授权字段
+--   · 授权不可编辑（没有 UPDATE 路径），只能撤销；撤销后令牌自然过期，fail-closed
+-- ============================================================================
+
+-- 一任务最多一条授权（UNIQUE task_id）。ops 存 JSON 数组而不是 PG 数组，
+-- 避免驱动差异；白名单比较在 Go 侧做。这里只记「准做什么」，不含任何凭据。
+CREATE TABLE IF NOT EXISTS task_dynamic_grants (
+    id          BIGSERIAL PRIMARY KEY,
+    task_id     BIGINT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+    grant_ref   TEXT NOT NULL,          -- 书面授权编号，人工签发时填写
+    operator    TEXT NOT NULL,          -- 签发人
+    written_authorization BOOLEAN NOT NULL DEFAULT false, -- 必须显式勾选
+    device_serial TEXT NOT NULL,        -- 设备序列号；授权与设备绑定，不可跨设备复用
+    apk_sha256  TEXT NOT NULL,          -- 目标 APK 的 SHA256，防止换包
+    ops         TEXT NOT NULL DEFAULT '[]',
+    valid_from  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    valid_until TIMESTAMPTZ NOT NULL,
+    revoked_at  TIMESTAMPTZ,
+    revoke_reason TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_dynamic_grants_active
+    ON task_dynamic_grants(task_id) WHERE revoked_at IS NULL;
+
+-- 每次动态调用留痕：谁/何时/哪台设备/哪个 op/哪张调用票/结果。审计是 append-only，
+-- 没有 UPDATE/DELETE 路径；ticket_digest 只存 HMAC 票据的哈希，不存票据本身，
+-- 因此事后能核对「这次放行确实经过机器校验」而不把可重放的凭据写进库。
+CREATE TABLE IF NOT EXISTS dynamic_grant_audits (
+    id            BIGSERIAL PRIMARY KEY,
+    task_id       BIGINT NOT NULL,
+    action        TEXT NOT NULL,       -- allow | block | revoke | issue | cleanup
+    op            TEXT NOT NULL DEFAULT '',
+    tool          TEXT NOT NULL DEFAULT '',
+    device_serial TEXT NOT NULL DEFAULT '',
+    ticket_digest TEXT NOT NULL DEFAULT '',
+    reason        TEXT NOT NULL DEFAULT '',
+    operator      TEXT NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_dynamic_grant_audits_task
+    ON dynamic_grant_audits(task_id, id DESC);
+
+-- 真机是共享物理资源：一任务一容器，但一台手机不能同时被两个任务装 APK / 起 frida。
+-- 用数据库唯一约束做跨进程设备锁（进程内 mutex 在多实例部署下不够），带租约到期，
+-- 任务异常退出不会永久占住设备。
+CREATE TABLE IF NOT EXISTS device_leases (
+    serial      TEXT PRIMARY KEY,
+    task_id     BIGINT NOT NULL,
+    lease_until TIMESTAMPTZ NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

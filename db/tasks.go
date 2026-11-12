@@ -182,6 +182,10 @@ type TaskCreateOptions struct {
 	// ReportTemplate 是报告输出模板；空=praetor（默认）。合法值由应用层校验，
 	// 这里只保证非空（旧库/编排 spawn 等不传该字段的创建路径沿用原模板）。
 	ReportTemplate string
+	// DynamicGrant 是 Android 真机动态授权；nil=未签发。与任务同一事务写入，
+	// 不存在「任务建好了但授权没落库」的窗口（见 schema.sql §Android 真机动态授权）。
+	// 编排 spawn 等内部路径不传，天然继承 fail-closed：子任务没有授权就不能做动态操作。
+	DynamicGrant *DynamicGrantInput
 }
 
 // CreateTaskWithOptions creates an exploration, task, direct source relations,
@@ -273,6 +277,9 @@ RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, descripti
 		return nil, err
 	}
 	if err := insertTaskInterceptRules(tx, t.ID, opts.InterceptRules); err != nil {
+		return nil, err
+	}
+	if err := insertTaskDynamicGrant(tx, t.ID, opts.DynamicGrant); err != nil {
 		return nil, err
 	}
 	if len(opts.LLMProfileIDs) == 0 {

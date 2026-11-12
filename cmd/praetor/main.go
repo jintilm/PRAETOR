@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -59,7 +60,7 @@ func run() int {
 	var (
 		addr        = flag.String("addr", ":8787", "HTTP listen address")
 		dataDir     = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the executable)")
-		proxy       = flag.String("proxy", "127.0.0.1:8788", "traffic recording proxy address (empty to disable)")
+		proxy       = flag.String("proxy", trafficAddrDefault(), "traffic recording proxy address (empty to disable; PRAETOR_TRAFFIC_ADDR overrides the default)")
 		checkConfig = flag.Bool("check-config", false, "只打印配置来源后退出：不连数据库、不启动服务")
 	)
 	flag.Parse()
@@ -157,6 +158,38 @@ func run() int {
 // and the LLM keys carry secrets. The binary deliberately does not read .env —
 // that file belongs to docker compose — so an empty variable list is the normal
 // case for a bare `./praetor.exe`; start.sh / start.bat bridge the gap.
+// trafficAddrDefault 解析录制代理的监听地址。
+//
+// 默认只绑回环：真机在局域网里连不到 127.0.0.1，但反过来「默认就对所有网卡开放
+// 一个 MITM 代理」是更糟的安全边界（任何能访问这台机器的人都能借它出网、装它的 CA）。
+// 所以放绑必须**同时**满足两个显式条件：PRAETOR_TRAFFIC_ADDR 写成 0.0.0.0，
+// 且 PRAETOR_MOBILE_DEVICE_MODE=1。少一个就回落到回环并告警，不静默放开。
+// 命令行 -proxy 是管理员的显式指定，不受这条 env 约束。
+func trafficAddrDefault() string {
+	const loopback = "127.0.0.1:8788"
+	addr := strings.TrimSpace(config.Env("TRAFFIC_ADDR"))
+	if addr == "" {
+		return loopback
+	}
+	if !isLoopbackListen(addr) && config.Env("MOBILE_DEVICE_MODE") != "1" {
+		log.Printf("[traffic] %q 会监听所有网卡，但未开启 PRAETOR_MOBILE_DEVICE_MODE=1；已回落到 %s（真机接入请两项都设）", addr, loopback)
+		return loopback
+	}
+	return addr
+}
+
+func isLoopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	switch strings.Trim(host, "[]") {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	return false
+}
+
 func logConfigDiagnostics(dataDir string) {
 	cfgPath := config.Path()
 	if abs, e := filepath.Abs(cfgPath); e == nil {
@@ -185,6 +218,32 @@ func logConfigDiagnostics(dataDir string) {
 	// 全容器化部署最常见的坑：宿主目录与容器内 /work 是两棵树。把两个视角
 	// 与推导依据打到日志里，别处的机器不需要猜（只读，不连库）。
 	log.Printf("[config] 沙箱工作区: %s", server.SandboxWorkRootDiagnostics(context.Background(), dataDir))
+
+	// 真机接入的四个可观测点：代理监听、设备模式、adb server 落点、egress 旁路。
+	// 全 Docker 下最容易踩的是「容器内代理绑回环 / 宿主端口绑回环」这两处，
+	// 把它们打到 -check-config 里，排查时不用猜。
+	mode := "关（默认仅回环）"
+	if config.Env("MOBILE_DEVICE_MODE") == "1" {
+		mode = "开"
+	}
+	adbHost := config.Env("MOBILE_ADB_HOST")
+	if adbHost == "" {
+		adbHost = "host.docker.internal"
+	}
+	adbPort := config.Env("MOBILE_ADB_PORT")
+	if adbPort == "" {
+		adbPort = "5037"
+	}
+	bind := config.Env("TRAFFIC_BIND")
+	if bind == "" {
+		bind = "127.0.0.1 (compose 默认)"
+	}
+	exclude := config.Env("MOBILE_DEVICE_EXCLUDE")
+	if exclude == "" {
+		exclude = "(未配置)"
+	}
+	log.Printf("[config] 录制代理: 监听=%s，真机模式=%s，宿主绑定=%s，adb=%s:%s，egress旁路=%s",
+		trafficAddrDefault(), mode, bind, adbHost, adbPort, exclude)
 
 	dsn, source, err := config.PostgresDSN()
 	if err != nil {

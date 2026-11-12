@@ -36,6 +36,8 @@ import type {
   CoverageAssetRefs,
   CoverageGraphData,
   DailyTokenBucket,
+  DeviceProbeResult,
+  DynamicGrantInput,
   UsageSummary,
   CtfBoard,
   DeleteTaskOptions,
@@ -280,6 +282,7 @@ export const api = {
     coverageEnabled?: boolean;
     reportTemplate?: ReportTemplate; // 报告输出模板；缺省=praetor
     interceptRules?: AssetInterceptRuleInput[];
+    dynamicGrant?: DynamicGrantInput; // Android 真机动态授权；未启用时不要签发
   }) =>
     post<Task>("/tasks", {
       name: input.name ?? "",
@@ -296,7 +299,24 @@ export const api = {
       coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
       report_template: input.reportTemplate ?? "praetor", // 报告输出模板(创建时定)
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
+      dynamic_grant: input.dynamicGrant?.enabled ? input.dynamicGrant : null, // 真机动态授权(默认不签发)
     }),
+  // ---- Android 真机动态授权 ----
+  // 授权只能随任务创建签发一次；下面只有只读探测/查询与撤销，没有创建/修改入口。
+  dynamicOps: () =>
+    get<{ ops: string[]; descriptions: Record<string, string>; min_hours: number; max_hours: number; default_hours: number }>(
+      "/dynamic-ops",
+    ),
+  mobileDevices: (serial?: string) =>
+    get<DeviceProbeResult>(`/mobile/devices${serial ? `?serial=${encodeURIComponent(serial)}` : ""}`),
+  taskDynamicGrant: (id: string) =>
+    get<{ state: "none" | "active" | "revoked" | "expired" | string; grant: unknown }>(
+      `/tasks/${encodeURIComponent(id)}/dynamic-grant`,
+    ),
+  taskDynamicGrantAudits: (id: string) =>
+    get<{ items: unknown[] }>(`/tasks/${encodeURIComponent(id)}/dynamic-grant/audits`),
+  revokeTaskDynamicGrant: (id: string, reason: string, operator: string) =>
+    post<{ ok: boolean }>(`/tasks/${encodeURIComponent(id)}/dynamic-grant/revoke`, { reason, operator }),
   // ---- CTF（域=ctf 的任务）：判分/题面配置、竞速看板、提交记录 ----
   taskCTFConfig: (id: string) =>
     get<{ task_id: string; domain: string; challenge_dir?: string; expected_flag?: string; challenge_ready: boolean; submitter_ready: boolean }>(

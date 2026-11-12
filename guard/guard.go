@@ -28,6 +28,19 @@ type AuditEntry struct {
 	Command string `json:"command,omitempty"`
 }
 
+// DynamicGrantChecker 是「任务级动态授权」的执行层判定。
+//
+// 为什么定义在 guard 而不是 server：授权要挂在**每次工具调用前**的硬边界上，
+// 与取证边界并列，不能依赖提示词、DB 里用户可编辑的拦截规则，也不能让模型
+// 有机会签发或扩大授权。实现放在 server（那里能读库），guard 只认这个接口，
+// 于是 guard 包不依赖 db，硬闸仍是 code-owned 的独立一层。
+//
+// Check 返回 nil = 放行；返回 error = 立即 block 并把原因交给模型（引导降级静态）。
+// 非动态调用必须直接返回 nil —— 实现方负责识别，guard 不做业务判断。
+type DynamicGrantChecker interface {
+	Check(ctx context.Context, tool string, input json.RawMessage) error
+}
+
 // Guard enforces the side-effect policy via agent-core hooks.
 type Guard struct {
 	mu          sync.Mutex
@@ -35,6 +48,21 @@ type Guard struct {
 	attrib      map[string]int // failure attribution counts (Observer / G5)
 	reg         *hook.Registry
 	interceptor *intercept.Interceptor // optional; nil disables user-configured rules
+	dynamic     DynamicGrantChecker    // optional; nil = 该任务没有动态授权闸
+}
+
+// SetDynamicGrantChecker 装配任务级动态授权闸。
+// 由 Manager 在 Task 装配时调用（每个 Task 有自己的 Guard 实例）。
+// 传 nil 表示不启用 —— 此时任何动态工具调用都会因为「没有闸」而在 server 侧
+// 被识别为未授权？不：server 必须给**每个**任务都装上闸，未签发授权的任务由闸
+// 自己 fail-closed。这里留 nil 只为聊天会话（chatGuard）等无任务上下文的场景。
+func (g *Guard) SetDynamicGrantChecker(c DynamicGrantChecker) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.dynamic = c
 }
 
 // New creates a Guard without user-configured intercept rules (used for pentest
@@ -134,8 +162,32 @@ func (g *Guard) preToolUse(ctx context.Context, ev hook.Event) hook.Result {
 	if reason := evidenceBoundaryReason(ev.ToolName, cmd); reason != "" {
 		return g.block(ev.ToolName, systemBlockMessage(reason), cmd)
 	}
+	// 任务级动态授权：与取证边界同级的硬约束，先于 DB 拦截规则求值。
+	// 放在 record("allow") 之前，避免同一次调用先记一条 allow 再记一条 block。
+	if c := g.dynamicChecker(); c != nil {
+		if err := c.Check(ctx, ev.ToolName, ev.Input); err != nil {
+			return g.block(ev.ToolName, dynamicBlockMessage(err.Error()), cmd)
+		}
+	}
 	g.record(ev.ToolName, "allow", "", cmd)
 	return g.applyIntercept(ctx, ev)
+}
+
+// dynamicChecker 取 checker 快照：装配发生在任务创建期，调用发生在 worker 期，
+// 没有并发写，但用同一把锁读可以让 -race 下的语义明确。
+func (g *Guard) dynamicChecker() DynamicGrantChecker {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.dynamic
+}
+
+// dynamicBlockMessage 把动态授权拒绝框定为平台决策，并明确给出可走的替代路线。
+// 只说「禁止」会让 agent 反复改写命令试图绕过（与 systemBlockMessage 同款坑）；
+// 告诉它静态路线仍然可行，卡住的任务才会继续产出结论而不是空转烧预算。
+func dynamicBlockMessage(reason string) string {
+	return systemBlockMessage(reason) +
+		" 这不是目标侧的限制，改写命令、换端口、换工具都无法获得授权。" +
+		"请立即改走静态分析路线（解包、清单、静态规则扫描），并在结论里注明动态验证未执行的原因。"
 }
 
 // applyIntercept evaluates user-configured intercept rules against the tool call.

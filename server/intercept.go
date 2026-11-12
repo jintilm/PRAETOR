@@ -24,8 +24,13 @@ const judgeWorkerLane = "judge"
 
 // chatGuard returns a guard wired with the manager's interceptor, used for chat
 // conversations. Called once per applyLLM so a new LLM config always gets a fresh guard.
+//
+// 动态授权闸也必须装上：聊天会话没有任务上下文，就不该存在「能跑 adb/frida 却
+// 没有授权记录」的旁路。taskID=0 的闸查不到授权，一律 fail-closed。
 func (s *Server) chatGuard() *guard.Guard {
-	return guard.NewWithInterceptor(s.m.interceptor)
+	g := guard.NewWithInterceptor(s.m.interceptor)
+	g.SetDynamicGrantChecker(s.m.newDynamicGrantGate(0))
+	return g
 }
 
 // wireInterceptReviewer installs the LLM fallback judge into the interceptor. The

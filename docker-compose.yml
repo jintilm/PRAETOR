@@ -89,9 +89,22 @@ services:
       # 填 daemon 能识别的宿主绝对路径。留空 = 自动推导。
       PRAETOR_SANDBOX_WORK_HOST_ROOT: ${PRAETOR_SANDBOX_WORK_HOST_ROOT:-}
       PRAETOR_SANDBOX_IDLE_TTL: ${PRAETOR_SANDBOX_IDLE_TTL:-30m}
+      # ---- Android 真机接入（默认全关，不接手机时零影响）----
+      # 录制代理在**容器内**的监听地址。默认只绑回环；真机 WiFi 代理要连进来时
+      # 必须同时设 PRAETOR_TRAFFIC_ADDR=0.0.0.0:8788 与 PRAETOR_MOBILE_DEVICE_MODE=1，
+      # 只设前者会被后端回落到回环并告警（见 cmd/praetor/main.go trafficAddrDefault）。
+      PRAETOR_TRAFFIC_ADDR: ${PRAETOR_TRAFFIC_ADDR:-127.0.0.1:8788}
+      PRAETOR_MOBILE_DEVICE_MODE: ${PRAETOR_MOBILE_DEVICE_MODE:-0}
+      # adb server 跑在宿主（USB 边界留在宿主），容器里只连 TCP。
+      PRAETOR_MOBILE_ADB_HOST: ${PRAETOR_MOBILE_ADB_HOST:-host.docker.internal}
+      PRAETOR_MOBILE_ADB_PORT: ${PRAETOR_MOBILE_ADB_PORT:-5037}
+      # 真机 IP / adb / frida 端口在全量出口透明层里的直连白名单，逗号分隔。
+      PRAETOR_MOBILE_DEVICE_EXCLUDE: ${PRAETOR_MOBILE_DEVICE_EXCLUDE:-}
     ports:
       - "${PRAETOR_HTTP_PORT:-8797}:8787"
-      - "127.0.0.1:${PRAETOR_MCP_PORT:-8798}:8788"
+      # 宿主侧绑定也默认回环：真机接入时设 PRAETOR_TRAFFIC_BIND=0.0.0.0，
+      # 让手机能访问 <宿主IP>:<PRAETOR_MCP_PORT> 上的录制代理。
+      - "${PRAETOR_TRAFFIC_BIND:-127.0.0.1}:${PRAETOR_MCP_PORT:-8798}:8788"
     volumes:
       # 数据目录（含 jwt.key 等）绑定到宿主机，方便查看/备份，容器重建不丢。
       # 与旧栈共用同一仓库目录时注意：两套栈不应同时指向同一个 data/。

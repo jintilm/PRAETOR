@@ -49,6 +49,11 @@ type SandboxRouting struct {
 	// TargetHosts 返回题面里出现的主机名（描述/目标/资产）。
 	// nil = 不做网络推断，行为与改造前一致。
 	TargetHosts func(taskID string) []string
+	// HostGatewayFor 报告该任务是否需要访问宿主服务（真机的 adb server / 录制代理）。
+	// nil = 只有开了全量出口隐身时才加 host.docker.internal 映射（旧行为）。
+	HostGatewayFor func(taskID string) bool
+	// EnvFor 返回该任务额外的容器环境变量（设备序列号、adb 落点等）。
+	EnvFor func(taskID string) []string
 }
 
 // WireSandboxWithImages 额外带上「按任务选镜像」的解析器（领域专用工具链，见 sandbox_image.go）。
@@ -138,6 +143,8 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string, routing San
 			Env:               sandboxContainerEnv(),
 			IdleTTL:           durationOr("SANDBOX_IDLE_TTL", 30*time.Minute),
 			Egress:            routing.Egress,
+			HostGatewayFor:    routing.HostGatewayFor,
+			EnvFor:            routing.EnvFor,
 			// 题面主机名 → 目标网络：见 sandbox.TargetNetwork。这里只提供"名字从哪来"，
 			// 具体要不要接、接哪个网络由沙箱层问 docker 决定。
 			TargetHosts: routing.TargetHosts,
@@ -263,10 +270,30 @@ func (s *Server) sandboxEgressFor(taskID string) *sandbox.EgressUpstream {
 		log.Printf("[sandbox] 任务 %s 的出口代理无法用于容器透明层（容器保持直连）：%v", taskID, err)
 		return nil
 	}
-	if proxy := strings.TrimSpace(config.Env("SANDBOX_PROXY")); proxy != "" {
-		up.Exclude = sandbox.ParseEgressExclude(proxy)
+	if up == nil {
+		// 没配全局出口时 ParseEgressUpstream 返回 (nil,nil)。旧代码在这里直接
+		// 给 up.Exclude 赋值会 panic —— 只要部署方配了 SANDBOX_PROXY 却没配
+		// 全局出口就会触发。没有透明层时也不存在「需要绕过」的链路，直接返回。
+		return nil
+	}
+	excludes := sandbox.ParseEgressExclude(strings.TrimSpace(config.Env("SANDBOX_PROXY")))
+	// 真机链路：到手机 IP、宿主 adb :5037、frida :27042 的流量不能被透明层
+	// 劫到上游代理，否则 adb 连接直接断、设备看起来「掉线」。
+	excludes = append(excludes, mobileEgressExcludes()...)
+	if len(excludes) > 0 {
+		up.Exclude = append(up.Exclude, excludes...)
 	}
 	return up
+}
+
+// mobileEgressExcludes 给出真机接入时必须直连绕过的 host:port。
+// 设备模式没开时返回空 —— 不接手机的任务不该凭空多出白名单。
+func mobileEgressExcludes() []string {
+	if config.Env("MOBILE_DEVICE_MODE") != "1" {
+		return nil
+	}
+	out := []string{"host.docker.internal:5037", "host.docker.internal:27042"}
+	return append(out, sandbox.ParseEgressExclude(config.Env("MOBILE_DEVICE_EXCLUDE"))...)
 }
 
 // PickUpstreamIndex 是纯函数：hash(taskID) 对 N 取模。

@@ -66,9 +66,12 @@ type Task struct {
 	FirstRunAt           int64  `json:"first_run_at,omitempty"`
 	DeadlineAt           int64  `json:"deadline_at,omitempty"`
 	// PausedAt = 本次暂停开始的 unix 秒（0 = 未暂停）。预算闸门用它把暂停时长从墙钟里扣掉。
-	PausedAt    int64                  `json:"paused_at,omitempty"`
-	Store       *pgdb.ExplorationStore `json:"-"`
-	Guard       *guard.Guard           `json:"-"`
+	PausedAt int64                  `json:"paused_at,omitempty"`
+	Store    *pgdb.ExplorationStore `json:"-"`
+	Guard    *guard.Guard           `json:"-"`
+	// dynamicGate 是同一份任务级动态授权闸的引用。Guard 里装的是接口，
+	// 这里留具体类型是为了撤销授权时能立刻 Invalidate 缓存，不必等 30s 窗口。
+	dynamicGate *dynamicGrantGate
 	notify      chan struct{}
 	lifecycleMu sync.RWMutex
 	llmMu       sync.RWMutex
@@ -254,6 +257,9 @@ type Manager struct {
 	globalProxy string
 	// egressUpstreams 是任务级出口池（见 settingEgressUpstreams）；空 = 全局出口。
 	egressUpstreams []string
+	// dynamicGrantSecret 是任务级动态授权令牌的 HMAC 密钥，独立于 jwt.key。
+	// 令牌只在 Go 侧 hook 里流转，从不进入 LLM 上下文。
+	dynamicGrantSecret []byte
 }
 
 // Settings keys the UI toggles at runtime.
@@ -444,7 +450,10 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if err := pg.EnsureLLMUsageTable(); err != nil {
 		log.Printf("[llmusage] create table: %v", err)
 	}
-	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
+	m := &Manager{
+		dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{},
+		interceptor: intercept.New(pg), dynamicGrantSecret: loadDynamicGrantSecret(dir),
+	}
 	if proxyAddr != "" {
 		tr, err := traffic.Open(filepath.Join(dir, "traffic"), proxyAddr)
 		if err != nil {
@@ -931,6 +940,24 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 	}
 }
 
+// wireTaskDynamicGate 给每个 Task 装配任务级动态授权闸。
+//
+// 刻意给**所有**任务都装，包括没签发授权的那些：闸自己负责 fail-closed，
+// 「没有闸」与「没有授权」不能是同一件事 —— 前者会让未授权任务直接绕过整条链。
+// 闸是懒加载的，非动态工具调用零 DB 开销，启动时批量加载任务不会打爆数据库。
+func (m *Manager) wireTaskDynamicGate(t *Task) {
+	if m == nil || t == nil || t.Guard == nil || m.pg == nil {
+		return
+	}
+	id, err := strconv.ParseInt(t.ID, 10, 64)
+	if err != nil || id <= 0 {
+		return
+	}
+	gate := m.newDynamicGrantGate(id)
+	t.dynamicGate = gate
+	t.Guard.SetDynamicGrantChecker(gate)
+}
+
 // UpdateTaskMetadata changes list-only task metadata without interrupting any
 // planner, main-agent, or worker call.
 func (m *Manager) UpdateTaskMetadata(taskID string, patch pgdb.TaskPatch) (*Task, error) {
@@ -979,6 +1006,7 @@ func (m *Manager) CreateTaskWithOptions(description, goal string, opts pgdb.Task
 		return nil, err
 	}
 	t := taskFromPG(pt, m.pg.Exploration(pt.ExplorationID), m.interceptor)
+	m.wireTaskDynamicGate(t)
 	m.mu.Lock()
 	m.tasks[t.ID] = t
 	m.active = t.ID
@@ -1178,6 +1206,7 @@ func (m *Manager) LoadExisting() []*Task {
 			continue
 		}
 		t := taskFromPG(pt, m.pg.Exploration(pt.ExplorationID), m.interceptor)
+		m.wireTaskDynamicGate(t)
 		m.tasks[id] = t
 		loaded = append(loaded, t)
 	}

@@ -171,6 +171,21 @@ func All() []Item {
 			// 用 test -x 探「文件在不在」，配方侧另有 LookPath 确认可执行性。
 			Probe: []string{"test", "-x", "/usr/bin/apktool"},
 		},
+		{
+			ID: "android-tools-adb", Group: "mobile", Title: "adb (platform-tools)", SizeMB: 15,
+			License: "Apache-2.0（外部进程调用）",
+			Why:     "真机动态客户端：连宿主 adb server 做装包/启动/日志/取数据；需宿主 adb -a -P 5037 nodaemon server 与 PRAETOR_MOBILE_DEVICE_MODE=1",
+			Install: []string{"apt-get install -y --no-install-recommends android-tools-adb"},
+			Probe:   []string{"adb", "version"},
+		},
+		{
+			ID: "frida-tools", Group: "mobile", Title: "frida-tools", SizeMB: 45,
+			License: "未标注（外部进程调用）",
+			Why:     "真机动态 hook 客户端；服务端 frida-server 由测试机自备，不进镜像",
+			Install: []string{"pip3 install --no-cache-dir --break-system-packages frida-tools"},
+			Probe:   []string{"python3", "-c", "import frida;print('ok')"},
+			Needs:   []string{"android-tools-adb"},
+		},
 	}
 }
 

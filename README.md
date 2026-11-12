@@ -517,7 +517,9 @@ docker compose up -d --force-recreate praetor
 | `PRAETOR_SANDBOX` / `PRAETOR_SANDBOX_NETWORK` 等 | 每任务容器沙箱与靶机网络 |
 | `PRAETOR_SAMPLE_DIR` / `PRAETOR_SAMPLE_KEY` | 逆向样本库目录与加密密钥（64 位 hex） |
 | `PRAETOR_CALDERA_URL` / `PRAETOR_CALDERA_KEY` | 红队 Caldera 编排（`caldera_operation`：列 ability / 下发 / 回收） |
-| `PRAETOR_RE_DYNAMIC` | 动态执行总闸：`trace` 配方会真的运行样本，默认拒绝 |
+| `PRAETOR_RE_DYNAMIC` | **只管逆向域 `trace` 配方**（gdb 真的运行二进制样本），默认拒绝；与 Android 真机授权互不替代，不能拿它当设备动态的总闸 |
+| `PRAETOR_MOBILE_DEVICE_MODE` / `PRAETOR_TRAFFIC_ADDR` / `PRAETOR_TRAFFIC_BIND` | Android 真机接入三件套：显式设备模式 + 容器内代理监听 + 宿主端口绑定，默认全关/全回环 |
+| `PRAETOR_MOBILE_ADB_HOST` / `PRAETOR_MOBILE_ADB_PORT` / `PRAETOR_MOBILE_DEVICE_EXCLUDE` | 宿主 adb server 落点与 egress 直连白名单（设备 IP / adb 5037 / frida 27042） |
 
 **并发**：每个任务的 work agent 数在「系统设置」里配置（默认 3）。
 
@@ -614,7 +616,7 @@ server {
 
 ## 移动端静态分析（P0）
 
-当前只做 **APK 静态分析**，不涉及模拟器、真机、动态运行或联网。动态链路（任务级授权、真机适配器、设备锁）尚未实现。
+当前只做 **APK 静态分析**，不涉及模拟器、真机、动态运行或联网。真机接入的授权链、设备适配器与沙箱接线已在下一章（P1）落地；真正跑 frida / 抓包的动态工具属于 P2。
 
 ### 安装
 
@@ -638,8 +640,66 @@ server {
 ### 边界
 
 - 配方表已满 10 条（`TestReverseRecipeCatalogIsLean` 上限）。后续加移动端能力优先合并进 `mobile_scan` 的 `select` 子动作，不要扩表。
-- 不支持 iOS IPA 解析、APK 动态运行、frida / 抓包 / 真机接入；这些属于后续阶段。
+- 不支持 iOS IPA 解析、APK 动态运行。真机接入、动态授权与设备探测见下一章；frida / 抓包等动态工具本身属于 P2。
 - 与报告模板无关：`report_template` 只影响 Markdown 导出，静态命中等 finding 后按任务所选模板输出。
+
+## Android 真机动态授权与接入（P1）
+
+本期落地的是**执行链**：任务级授权、短时令牌、设备独占锁、只读探测、沙箱接线。`mobile-dynamic` 预置只提供 adb / frida-tools **客户端**；真正跑 hook、抓包、取数据的设备工具与脚本库属于 P2。换句话说，本期保证「没授权就一次动态操作都做不了」，还不保证「有授权就能自动打完」。
+
+### 三条不可让步的边界
+
+1. **授权由人签发，不由任务产生**。创建任务时显式勾选书面授权并填写授权编号、设备序列号、APK SHA256、允许操作集、有效期、签发人，服务端校验后与任务**同一事务**写入 `task_dynamic_grants`。「任务存在」≠「已授权」；没有这条记录，所有动态工具调用一律 fail-closed 降级静态。
+2. **一次人工签发 → N 次机器校验**。签发后平台生成短时 HMAC 令牌（绑定 taskID / 设备 / APK / ops / 过期时间），令牌**只走 Go 侧 hook 旁路，不进 LLM 上下文**，模型看不到、伪造不了、也写不进日志。每次工具调用由执行层自动校验，agent 全程无需逐次人工确认。
+3. **授权不能被改写或扩大**。没有「创建授权 / 修改授权 / 续期」接口，工具面也不存在 `grant` 类工具；授权只能撤销。令牌续签仍受数据库 `valid_until` 与撤销状态约束，撤销接口会立刻清掉内存缓存。
+
+### 校验链（挂在哪儿）
+
+`guard.PreToolUse` 是与「取证边界」并列的 code-owned 硬约束，不依赖提示词，也不放在用户可编辑的 DB 拦截规则里。每个 Task 装配时都会挂上 `dynamicGrantGate`（包括没签发授权的），因此「没有闸」和「没有授权」不是同一件事。每次调用先由 `dynamicOpsForCall` 识别是否属于动态作业 —— 既认 P2 的 `mobile_*` 工具名，也认 `Bash` / `shell_*` 里直敲的 `adb`、`frida`、`objection`、`mitmdump`，避免模型随手写一条命令绕过整条链。
+
+判定顺序：授权存在 → 书面授权已勾 → 未撤销 → 在有效期内 → 每个 op 都在签发白名单 → 令牌签名与绑定字段有效 → 设备独占锁可获取 → 放行并写审计。任一环节失败都会 block、留痕，并返回「改走静态分析路线」的明确引导（不会让任务空转烧预算）。`PRAETOR_EGRESS_EXCLUDE` 之外的真机 IP / `adb :5037` / `frida :27042` 已加入透明出口层直连白名单，否则全量出口重定向会把设备链路一起劫走。
+
+### 部署真机（默认全关，不接手机时零影响）
+
+1. 宿主起 adb server，USB 边界留在宿主，平台只连 TCP：`adb kill-server && adb -a -P 5037 nodaemon server`，用 `adb devices` 确认状态为 `device`。
+2. 测试机用**独立 WiFi + 独立账号**，禁止连生产；Android 7+ 需自行装系统 CA 或逐包重打包 `networkSecurityConfig`，证书绑定另需 frida 脚本。系统 CA 只装在这台设备上。
+3. 在 `.env` 里**同时**设置（缺一项就会回落并告警）：
+
+   ```dotenv
+   PRAETOR_MOBILE_DEVICE_MODE=1
+   PRAETOR_TRAFFIC_ADDR=0.0.0.0:8788
+   PRAETOR_TRAFFIC_BIND=0.0.0.0
+   PRAETOR_MOBILE_ADB_HOST=host.docker.internal   # 宿主二进制部署改 127.0.0.1
+   PRAETOR_MOBILE_DEVICE_EXCLUDE=192.168.1.50,host.docker.internal:5037,host.docker.internal:27042
+   ```
+
+   真机 WiFi 代理指向 `http://<宿主局域网 IP>:8798`（`PRAETOR_MCP_PORT`）。抓包复用项目已有的 `traffic` 录制代理与 `mitmproxy-ca-cert.pem`，请求自动进入现有流量库、证据链与三套报告模板，**没有新起一套 mitmproxy**。
+4. `docker compose up -d` 后可用 `./praetor -check-config` 核对「代理监听 / 设备模式 / adb 落点 / egress 旁路」四项。默认 `PRAETOR_TRAFFIC_ADDR` 只绑回环，只把它改成 `0.0.0.0` 而没开设备模式会被强制回落 —— 避免把一个 MITM 代理无意中对整个局域网开放。
+
+### 任务侧
+
+新建任务抽屉的「Android 真机动态授权（可选）」默认折叠且未启用。展开后可先点「探测设备」做只读自查。探测只报能从平台侧机读的事实：adb server 可达、设备在线、adb 已授权；`root` / `frida-server` 作为 advisory（无 root 仍可装包/启动/看日志），而**锁屏状态、系统 CA 安装、真机到代理的连通性一律标 `manual` 交签发人确认**，不假装「六项全绿」。探测失败会明确给出降级原因，不静默跳过。
+
+签发字段与 API：
+
+| 动作 | 接口 |
+| --- | --- |
+| 随任务创建签发（唯一入口） | `POST /api/tasks` 的 `dynamic_grant` |
+| 允许操作闭集 | `GET /api/dynamic-ops` |
+| 只读设备探测 | `GET /api/mobile/devices?serial=<serial>` |
+| 查看授权与状态 | `GET /api/tasks/{id}/dynamic-grant`（`none/active/revoked/expired`） |
+| 查看调用审计 | `GET /api/tasks/{id}/dynamic-grant/audits` |
+| 撤销 | `POST /api/tasks/{id}/dynamic-grant/revoke`（`reason`、`operator`） |
+
+审计是 append-only，记录每次 allow / block 的 op、工具、设备、令牌摘要（只存 SHA256，不存可重放票据）与原因；签发与撤销也各留一条。设备锁用 `device_leases` 的**数据库唯一约束 + 租约**实现，跨进程有效，任务异常退出不会永久占住手机；撤销会主动释放，未释放的靠 15 分钟租约自然过期。
+
+### 组件与边界
+
+「系统设置 → 可选组件」应用 **`mobile-dynamic`** 预置 = `mobile-static` + `android-tools-adb` + `frida-tools`。frida-server、CA、设备本身都由测试机自备，不进镜像；`objection` 仍按「不引重依赖」纪律保持宿主侧可选。
+
+**本期已知限制**：`mobile_*` 设备工具与 frida 脚本库尚未实现，因此授权链目前主要约束 `Bash` 直敲的 adb/frida；真机的动态证据落盘、任务收尾自动清理（清 App 数据、卸 frida 残留、复位代理）、iOS 静态解析、前端授权状态/撤销面板都留到 P2。设备锁靠租约兜底，任务正常收尾尚未主动释放。
+
+`PRAETOR_RE_DYNAMIC=1` 是逆向域 `trace` 配方（gdb 跑二进制样本）的开关，作用范围与真机动态**完全不同**，不能互相替代；真机动态一律以任务级签发为准。
 
 ---
 ## 开发

@@ -127,6 +127,8 @@ import type {
   Company,
   DeleteTaskOptions,
   DeleteTaskResult,
+  DeviceProbeResult,
+  DynamicGrantInput,
   LLMProfile,
   ReportTemplate,
   Task,
@@ -136,7 +138,7 @@ import type {
   TaskStatus,
   TaskDomain,
 } from "@/lib/types";
-import { REPORT_TEMPLATES } from "@/lib/types";
+import { DYNAMIC_OPS, REPORT_TEMPLATES, emptyDynamicGrant } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // fmtBytes renders a human file size for the upload manifest.
@@ -3111,6 +3113,11 @@ function CreateTaskSheet({
   const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
   // 报告输出模板:创建任务时选定并持久化;导出时可临时覆盖(不落库)。与 task_templates 无关。
   const [reportTemplate, setReportTemplate] = React.useState<ReportTemplate>("praetor");
+  // Android 真机动态授权：默认不签发。授权只能由人在创建任务时一次性签发，
+  // agent 不能自己申请；不签发时所有动态工具调用会被执行层 fail-closed 降级到静态。
+  const [dynamicGrant, setDynamicGrant] = React.useState<DynamicGrantInput>(emptyDynamicGrant);
+  const [deviceProbe, setDeviceProbe] = React.useState<DeviceProbeResult | null>(null);
+  const [probingDevice, setProbingDevice] = React.useState(false);
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
   const [uploading, setUploading] = React.useState(false);
   const [uploadCount, setUploadCount] = React.useState(0);
@@ -3152,6 +3159,26 @@ function CreateTaskSheet({
     }
   }
 
+  function patchGrant(patch: Partial<DynamicGrantInput>) {
+    setDynamicGrant((g) => ({ ...g, ...patch }));
+  }
+
+  function toggleGrantOp(op: string, on: boolean) {
+    setDynamicGrant((g) => ({ ...g, ops: on ? Array.from(new Set([...g.ops, op])) : g.ops.filter((x) => x !== op) }));
+  }
+
+  // 探测只是只读自查，不产生授权：探测不通过时后端会在创建校验之外的执行层明确降级。
+  async function probeDevice() {
+    setProbingDevice(true);
+    try {
+      setDeviceProbe(await api.mobileDevices(dynamicGrant.device_serial.trim() || undefined));
+    } catch (e) {
+      toast.error("设备探测失败：" + (e as Error).message);
+    } finally {
+      setProbingDevice(false);
+    }
+  }
+
   async function createTask() {
     if (!description.trim() || !goal.trim()) {
       toast.error("请填写描述与目标");
@@ -3179,6 +3206,7 @@ function CreateTaskSheet({
         planHeartbeatSeconds: heartbeatSec,
         coverageEnabled,
         reportTemplate,
+        dynamicGrant: dynamicGrant.enabled ? dynamicGrant : undefined,
         interceptRules: interceptRules
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
           .filter((r) => r.pattern !== ""),
@@ -3198,6 +3226,8 @@ function CreateTaskSheet({
       setTaskDomain("pentest");
       setCoverageEnabled(true);
       setReportTemplate("praetor");
+      setDynamicGrant(emptyDynamicGrant());
+      setDeviceProbe(null);
       setInterceptRules([]);
       setUploadCount(0);
       draftIdRef.current = "";
@@ -3393,6 +3423,143 @@ function CreateTaskSheet({
               />
               <FieldDescription>按列表顺序故障转移；第一项为当前配置，仅在明确额度不足时切换下一项。</FieldDescription>
             </Field>
+
+            {/* 真机动态授权默认关闭：不接手机的任务不该被这张表单打扰。
+                授权由人在这里一次性签发，之后只能撤销；agent 无法自行申请或扩大。 */}
+            <Collapsible>
+              <CollapsibleTrigger className="group flex w-full items-center gap-2 border-t pt-4 text-sm font-medium">
+                <ChevronRightIcon className="text-muted-foreground size-4 transition-transform group-data-[state=open]:rotate-90" />
+                Android 真机动态授权（可选）
+                <span className="text-muted-foreground ml-auto text-xs font-normal">
+                  {dynamicGrant.enabled ? "已启用" : "未启用 · 动态操作降级静态"}
+                </span>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="grid gap-5 pt-5">
+                <div className="grid gap-2">
+                  <label htmlFor="dynamic-grant-enabled" className="flex items-center gap-2 text-sm">
+                    <Checkbox
+                      id="dynamic-grant-enabled"
+                      checked={dynamicGrant.enabled}
+                      onCheckedChange={(v) => patchGrant({ enabled: !!v })}
+                    />
+                    启用并签发授权
+                  </label>
+                  <p className="text-muted-foreground text-xs">
+                    真机会触发真实登录、推送与数据读写。授权随任务下发后由平台逐步自动校验，无需逐次人工确认；
+                    但授权本身必须由人在这里显式签发，任务存在 ≠ 已授权。未签发时 adb / frida 类调用一律被拦截并改用静态分析。
+                  </p>
+                </div>
+                {dynamicGrant.enabled && (
+                  <>
+                    <div className="grid gap-2">
+                      <label htmlFor="dynamic-grant-written" className="flex items-center gap-2 text-sm">
+                        <Checkbox
+                          id="dynamic-grant-written"
+                          checked={dynamicGrant.written_authorization}
+                          onCheckedChange={(v) => patchGrant({ written_authorization: !!v })}
+                        />
+                        已取得书面授权（必勾）
+                      </label>
+                      <p className="text-muted-foreground text-xs">
+                        测试机请用独立 WiFi 与独立账号，禁止连生产；系统 CA 只装在这台设备上。
+                      </p>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="grid gap-2">
+                        <Label htmlFor="dynamic-grant-ref">书面授权编号</Label>
+                        <Input
+                          id="dynamic-grant-ref"
+                          value={dynamicGrant.grant_ref}
+                          onChange={(e) => patchGrant({ grant_ref: e.target.value })}
+                          placeholder="AUTH-2026-001"
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="dynamic-grant-operator">签发人</Label>
+                        <Input
+                          id="dynamic-grant-operator"
+                          value={dynamicGrant.operator}
+                          onChange={(e) => patchGrant({ operator: e.target.value })}
+                          placeholder="操作者姓名"
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="dynamic-grant-serial">设备序列号</Label>
+                        <div className="flex gap-2">
+                          <Input
+                            id="dynamic-grant-serial"
+                            value={dynamicGrant.device_serial}
+                            onChange={(e) => patchGrant({ device_serial: e.target.value })}
+                            placeholder="adb devices 里的 serial"
+                          />
+                          <Button type="button" variant="outline" size="sm" onClick={probeDevice} disabled={probingDevice}>
+                            {probingDevice ? "探测中" : "探测设备"}
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="dynamic-grant-apk">目标 APK SHA256</Label>
+                        <Input
+                          id="dynamic-grant-apk"
+                          value={dynamicGrant.apk_sha256}
+                          onChange={(e) => patchGrant({ apk_sha256: e.target.value })}
+                          placeholder="64 位十六进制"
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="dynamic-grant-hours">有效期（小时，1~168）</Label>
+                        <Input
+                          id="dynamic-grant-hours"
+                          type="number"
+                          min={1}
+                          max={168}
+                          className="w-32"
+                          value={dynamicGrant.valid_hours}
+                          onChange={(e) => patchGrant({ valid_hours: Number(e.target.value) || 8 })}
+                        />
+                      </div>
+                    </div>
+                    {deviceProbe && (
+                      <div className="rounded-md border p-3 text-xs">
+                        <div className={deviceProbe.ready ? "text-emerald-600" : "text-amber-600"}>
+                          {deviceProbe.ready ? "设备就绪" : "设备未就绪（动态分析将降级静态）"} · {deviceProbe.adb_server}
+                        </div>
+                        {deviceProbe.reason && <p className="text-muted-foreground mt-1">{deviceProbe.reason}</p>}
+                        <ul className="mt-2 space-y-1">
+                          {deviceProbe.checks.map((c) => (
+                            <li key={c.name}>
+                              [{c.state}] {c.name}：{c.detail}
+                            </li>
+                          ))}
+                        </ul>
+                        {deviceProbe.manual_note && (
+                          <p className="text-muted-foreground mt-2">{deviceProbe.manual_note}</p>
+                        )}
+                      </div>
+                    )}
+                    <div className="grid gap-2">
+                      <Label>允许的操作（闭集白名单，服务端复核）</Label>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        {DYNAMIC_OPS.map((op) => (
+                          <label key={op.value} htmlFor={`dynamic-op-${op.value}`} className="flex items-center gap-2 text-sm">
+                            <Checkbox
+                              id={`dynamic-op-${op.value}`}
+                              checked={dynamicGrant.ops.includes(op.value)}
+                              onCheckedChange={(v) => toggleGrantOp(op.value, !!v)}
+                            />
+                            {op.label}
+                          </label>
+                        ))}
+                      </div>
+                      <p className="text-muted-foreground text-xs">
+                        授权不可跨任务、跨设备、跨 APK 复用；签发后只能撤销，不能改写或续期。撤销请调用
+                        POST /api/tasks/&lt;id&gt;/dynamic-grant/revoke。
+                      </p>
+                    </div>
+                  </>
+                )}
+              </CollapsibleContent>
+            </Collapsible>
 
             {/* 高级参数默认折叠:超时/心跳/首个意图,展开才占空间,常用路径保持清爽。 */}
             <Collapsible>

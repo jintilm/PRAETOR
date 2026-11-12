@@ -73,6 +73,15 @@ type PerTaskConfig struct {
 	// 并在创建后 exec 一次 praetor-egress 完成配置；失败只降级为直连并记日志
 	// —— 隐身是增强，不该让任务起不来。
 	Egress func(taskID string) *EgressUpstream
+	// HostGatewayFor 让任务容器能解析 host.docker.internal（宿主服务）。
+	//
+	// 原先这个映射只在 egress 分支里追加，真机链路却同样要访问宿主的 adb server
+	// 与录制代理。抽成独立开关后「需要访问宿主服务」不再与「全量出口隐身」绑死：
+	// 没开 egress 的真机任务也能连宿主，开了 egress 的行为保持不变。
+	HostGatewayFor func(taskID string) bool
+	// EnvFor 返回该任务额外的环境变量（K=V），在 cfg.Env 之后注入。
+	// 用于把设备序列号、adb server 落点这类任务级事实交给容器里的客户端。
+	EnvFor func(taskID string) []string
 	// MountFor 返回该任务额外的只读挂载（题面附件、题库目录等）；nil = 不挂。
 	//
 	// 为什么必须由上层注入：附件放在哪里是**题面来源**的知识（离线题库目录 vs CTFd
@@ -495,17 +504,22 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 		"-v", normalizeDaemonPath(box.hostDir) + ":" + p.cfg.ContainerRoot,
 		"--security-opt", "no-new-privileges:true",
 	}
-	// 全量出口隐身：egress 启用时容器需要 NET_ADMIN（iptables）与宿主网关映射
-	//（上游是回环地址时 host.docker.internal 才能解析到宿主）。
+	// 全量出口隐身：egress 启用时容器需要 NET_ADMIN（iptables）。
+	// host.docker.internal 映射不再绑死在 egress 上（见 HostGatewayFor）——
+	// 两条链路都可能需要它，但只加一次，避免 /etc/hosts 里出现重复条目。
 	var egress *EgressUpstream
 	if p.cfg.Egress != nil {
 		egress = p.cfg.Egress(key)
 	}
+	needHostGateway := egress != nil
+	if p.cfg.HostGatewayFor != nil && p.cfg.HostGatewayFor(key) {
+		needHostGateway = true
+	}
+	if needHostGateway {
+		args = append(args, "--add-host", "host.docker.internal:host-gateway")
+	}
 	if egress != nil {
-		args = append(args,
-			"--cap-add", "NET_ADMIN",
-			"--add-host", "host.docker.internal:host-gateway",
-		)
+		args = append(args, "--cap-add", "NET_ADMIN")
 		for _, e := range egress.env() {
 			args = append(args, "-e", e)
 		}
@@ -547,6 +561,11 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 	}
 	for _, e := range p.cfg.Env {
 		args = append(args, "-e", e)
+	}
+	if p.cfg.EnvFor != nil {
+		for _, e := range p.cfg.EnvFor(key) {
+			args = append(args, "-e", e)
+		}
 	}
 	args = append(args, image, "sh", "-lc", p.cfg.Command)
 

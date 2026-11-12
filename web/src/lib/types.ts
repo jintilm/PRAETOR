@@ -19,6 +19,57 @@ export function reportTemplateLabel(v?: string): string {
   return REPORT_TEMPLATES.find((x) => x.value === v)?.label ?? REPORT_TEMPLATES[0].label;
 }
 
+// Android 真机动态授权：创建任务时由**人**显式签发，之后只读 / 撤销。
+// 后端 db.DynamicOps 是这张表的权威定义；前端这份只用于勾选界面，
+// 服务端会重新按闭集白名单校验，前端改不了放行范围。
+export const DYNAMIC_OPS: { value: string; label: string }[] = [
+  { value: "install", label: "安装 / 卸载 APK" },
+  { value: "launch", label: "启动 App / 组件" },
+  { value: "shell", label: "adb shell" },
+  { value: "frida", label: "frida-server / frida-tools" },
+  { value: "hook", label: "注入脚本 hook" },
+  { value: "proxy", label: "设置 / 复位抓包代理" },
+  { value: "logcat", label: "读取设备日志" },
+  { value: "pull_data", label: "拉取 App 数据作证据" },
+  { value: "cleanup", label: "收尾清理" },
+];
+
+export interface DynamicGrantInput {
+  enabled: boolean;
+  written_authorization: boolean;
+  grant_ref: string;
+  operator: string;
+  device_serial: string;
+  apk_sha256: string;
+  ops: string[];
+  valid_hours: number;
+}
+
+export function emptyDynamicGrant(): DynamicGrantInput {
+  return {
+    enabled: false,
+    written_authorization: false,
+    grant_ref: "",
+    operator: "",
+    device_serial: "",
+    apk_sha256: "",
+    ops: [],
+    valid_hours: 8,
+  };
+}
+
+export interface DeviceProbeResult {
+  serial: string;
+  adb_server: string;
+  reachable: boolean;
+  ready: boolean;
+  degraded: boolean;
+  reason: string;
+  checks: { name: string; state: string; detail: string }[];
+  devices?: string[];
+  manual_note?: string;
+}
+
 export interface Task {
   id: string;
   name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述

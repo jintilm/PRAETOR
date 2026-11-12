@@ -251,6 +251,10 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			ImageFor: s.domainImageFor,
 			MountFor: s.taskMountsFor,
 			Egress:   s.sandboxEgressFor, // 全量出口隐身：容器全部出站 TCP 重定向到全局出口代理（未配置=直连）
+			// 真机任务：需要访问宿主的 adb server / 录制代理，并把设备序列号注入容器。
+			// 两个闭包都只对「设备模式开启 + 已签发生效授权」的任务返回 true/非空。
+			HostGatewayFor: s.mobileHostGatewayFor,
+			EnvFor:         s.mobileEnvFor,
 			// 题面主机名（delulu 之类）只在同一自定义网络内可解析；沙箱据此把任务容器
 			// 接进目标所在网络，省掉模型自己猜 IP 的 10+ 分钟（见 sandbox.TargetNetwork）。
 			TargetHosts: s.taskTargetHosts,
@@ -786,6 +790,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/tasks/{id}/intercept-rules/{rid}", s.taskInterceptUpdateRule)
 	mux.HandleFunc("DELETE /api/tasks/{id}/intercept-rules/{rid}", s.taskInterceptDeleteRule)
 	mux.HandleFunc("POST /api/tasks/{id}/intercept-rules/{rid}/toggle", s.taskInterceptToggleRule)
+	// Android 真机动态授权：只能随任务创建签发，之后只读 / 撤销 / 查审计。
+	mux.HandleFunc("GET /api/dynamic-ops", s.dynamicOpsCatalog)
+	mux.HandleFunc("GET /api/mobile/devices", s.mobileDevices)
+	mux.HandleFunc("GET /api/tasks/{id}/dynamic-grant", s.taskDynamicGrant)
+	mux.HandleFunc("GET /api/tasks/{id}/dynamic-grant/audits", s.taskDynamicGrantAudits)
+	mux.HandleFunc("POST /api/tasks/{id}/dynamic-grant/revoke", s.taskDynamicGrantRevoke)
 	mux.HandleFunc("POST /api/tasks/control/batch", s.controlTasksBatch)
 	mux.HandleFunc("GET /api/task-archives", s.listTaskArchives)
 	mux.HandleFunc("GET /api/task-archives/{id}", s.getTaskArchive)
@@ -1564,6 +1574,9 @@ type createTaskReq struct {
 	// ReportTemplate 报告输出模板（praetor/butian/edusrc）；省略/空=praetor。
 	// 任务级持久化，导出时可用 ?template= 临时覆盖（不落库）。
 	ReportTemplate string `json:"report_template,omitempty"`
+	// DynamicGrant Android 真机动态授权。省略/Enabled=false = 不签发：
+	// 该任务的所有动态工具调用一律 fail-closed 降级静态（见 server/dynamic_grant.go）。
+	DynamicGrant *dynamicGrantReq `json:"dynamic_grant,omitempty"`
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -1630,13 +1643,20 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// 动态授权与任务同一事务写入。校验失败直接 400 —— 授权字段不能靠后端「补默认值」
+	// 变成一条看起来已签发、实际没经过人确认的记录。
+	dynamicGrant, err := buildDynamicGrantInput(req.DynamicGrant)
+	if err != nil {
+		writeErr(w, 400, "Android 动态授权无效："+err.Error())
+		return
+	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
 		Domain: domainKey,
 		Name:   strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
 		CoverageEnabled: req.CoverageEnabled, ReportTemplate: string(reportTemplate),
-		InterceptRules: interceptRules,
+		InterceptRules: interceptRules, DynamicGrant: dynamicGrant,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrTaskCategoryInvalid) || errors.Is(err, db.ErrTaskCategoryNotFound) {
