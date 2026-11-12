@@ -16,8 +16,14 @@ import (
 )
 
 func writeFindingsEvidenceZip(out io.Writer, findings []*db.DBFinding, stage string, now time.Time) error {
+	return writeFindingsEvidenceZipWithTemplates(out, findings, nil, stage, now)
+}
+
+// writeFindingsEvidenceZipWithTemplates 是带报告模板的导出版本；views 为空时
+// 行为与旧版完全一致（全 praetor 单条渲染，不生成提交清单）。
+func writeFindingsEvidenceZipWithTemplates(out io.Writer, findings []*db.DBFinding, views []report.View, stage string, now time.Time) error {
 	zw := zip.NewWriter(out)
-	if err := writeFindingsZipEntries(zw, findings, stage, now); err != nil {
+	if err := writeFindingsZipEntriesWithTemplates(zw, findings, views, stage, now); err != nil {
 		zw.Close()
 		return err
 	}
@@ -25,9 +31,20 @@ func writeFindingsEvidenceZip(out io.Writer, findings []*db.DBFinding, stage str
 }
 
 func writeFindingsZipEntries(zw *zip.Writer, findings []*db.DBFinding, stage string, now time.Time) error {
+	return writeFindingsZipEntriesWithTemplates(zw, findings, nil, stage, now)
+}
+
+func writeFindingsZipEntriesWithTemplates(zw *zip.Writer, findings []*db.DBFinding, views []report.View, stage string, now time.Time) error {
 	store := evidence.New(nil, nil, stage) // private export copy; not subject to GC
 	used := map[string]int{}
-	for _, f := range findings {
+	platformSubmission := false
+	for _, v := range views {
+		if v.Template != "" && v.Template != report.TemplatePraetor {
+			platformSubmission = true
+			break
+		}
+	}
+	for i, f := range findings {
 		base := report.FindingFilename(f)
 		name := base
 		if n := used[base]; n > 0 {
@@ -38,7 +55,12 @@ func writeFindingsZipEntries(zw *zip.Writer, findings []*db.DBFinding, stage str
 		if err != nil {
 			return err
 		}
-		if _, err = io.WriteString(w, report.SingleFindingMarkdown(f, now)); err != nil {
+		// 一漏洞一文件：平台模板按各自表单版式渲染，praetor 沿用原函数。
+		content := report.SingleFindingMarkdown(f, now)
+		if i < len(views) && views[i].Template != "" && views[i].Template != report.TemplatePraetor {
+			content = report.RenderFinding(views[i], views[i].Template)
+		}
+		if _, err = io.WriteString(w, content); err != nil {
 			return err
 		}
 		for _, b := range f.TrafficBindings {
@@ -86,15 +108,29 @@ func writeFindingsZipEntries(zw *zip.Writer, findings []*db.DBFinding, stage str
 			}
 		}
 	}
+	// 平台模板一漏洞一提交，附一份逐份待补项清单；纯 praetor 导出保持原有 zip 结构。
+	if platformSubmission {
+		cw, err := zw.Create("_提交清单.md")
+		if err != nil {
+			return err
+		}
+		if _, err = io.WriteString(cw, report.Checklist(views, "")); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func buildFindingsEvidenceZip(path string, findings []*db.DBFinding, stage string, now time.Time) error {
+	return buildFindingsEvidenceZipWithTemplates(path, findings, nil, stage, now)
+}
+
+func buildFindingsEvidenceZipWithTemplates(path string, findings []*db.DBFinding, views []report.View, stage string, now time.Time) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	writeErr := writeFindingsEvidenceZip(f, findings, stage, now)
+	writeErr := writeFindingsEvidenceZipWithTemplates(f, findings, views, stage, now)
 	syncErr := f.Sync()
 	closeErr := f.Close()
 	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {

@@ -81,6 +81,7 @@ import type {
   NotificationMeta,
   PromptVar,
   PromptVersion,
+  ReportTemplate,
   SessionTokenUsage,
   Settings,
   Severity,
@@ -277,6 +278,7 @@ export const api = {
     seedFirstIntent?: boolean;
     planHeartbeatSeconds?: number;
     coverageEnabled?: boolean;
+    reportTemplate?: ReportTemplate; // 报告输出模板；缺省=praetor
     interceptRules?: AssetInterceptRuleInput[];
   }) =>
     post<Task>("/tasks", {
@@ -292,6 +294,7 @@ export const api = {
       seed_first_intent: input.seedFirstIntent ?? false,
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
       coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
+      report_template: input.reportTemplate ?? "praetor", // 报告输出模板(创建时定)
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
     }),
   // ---- CTF（域=ctf 的任务）：判分/题面配置、竞速看板、提交记录 ----
@@ -610,8 +613,10 @@ export const api = {
     scope: "filtered" | "all" | "selected";
     filters?: Omit<FindingQuery, "page" | "pageSize">;
     ids?: string[];
+    template?: ReportTemplate; // 临时覆盖任务模板(不落库)；缺省=按各 finding 所属任务
   }) => {
     const p = new URLSearchParams({ format: opts.format, scope: opts.scope });
+    if (opts.template) p.set("template", opts.template);
     if (opts.scope === "selected") {
       p.set("ids", (opts.ids ?? []).join(","));
     } else if (opts.scope === "filtered" && opts.filters) {
@@ -929,10 +934,14 @@ export const api = {
     ).then((r) => ({ ...r, deliveries: arr(r.deliveries) }));
   },
   notifyRetryDelivery: (id: number) => post<{ ok: boolean }>(`/notify/deliveries/${id}/retry`),
-  report: async (task?: string) => {
+  report: async (task?: string, template?: ReportTemplate) => {
     if (MOCK) return mockReport(task);
     const token = getToken();
-    const r = await fetch(`/api/report${tq(task)}`, {
+    const p = new URLSearchParams();
+    if (task) p.set("task", task);
+    if (template) p.set("template", template); // 报告 Tab 临时切换(不落库)
+    const qs = p.toString();
+    const r = await fetch(`/api/report${qs ? `?${qs}` : ""}`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
     if (!r.ok) throw new Error(`report: ${r.status}`);

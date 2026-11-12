@@ -8,19 +8,40 @@ import { toast } from "sonner";
 import { Markdown } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { api } from "@/lib/api";
+import { REPORT_TEMPLATES, reportTemplateLabel, type ReportTemplate } from "@/lib/types";
 import { copyText } from "@/lib/utils";
 
 export function ReportTab({ taskId }: { taskId: string }) {
   const [report, setReport] = React.useState<string>("");
   const [loading, setLoading] = React.useState(true);
   const [copied, setCopied] = React.useState(false);
+  // 任务创建时选定的模板（只读展示）；override 是报告页的临时预览切换，不落库。
+  const [taskTemplate, setTaskTemplate] = React.useState<ReportTemplate>("praetor");
+  const [override, setOverride] = React.useState<ReportTemplate | "task">("task");
+  const effective = override === "task" ? taskTemplate : override;
+
+  React.useEffect(() => {
+    let active = true;
+    api
+      .task(taskId)
+      .then((t) => {
+        if (active) setTaskTemplate(t.report_template ?? "praetor");
+      })
+      .catch(() => {
+        if (active) setTaskTemplate("praetor");
+      });
+    return () => {
+      active = false;
+    };
+  }, [taskId]);
 
   React.useEffect(() => {
     let active = true;
     setLoading(true);
     api
-      .report(taskId)
+      .report(taskId, override === "task" ? undefined : override)
       .then((text) => {
         if (active) setReport(text);
       })
@@ -33,7 +54,7 @@ export function ReportTab({ taskId }: { taskId: string }) {
     return () => {
       active = false;
     };
-  }, [taskId]);
+  }, [taskId, override]);
 
   async function copy() {
     if (!report) return;
@@ -76,7 +97,23 @@ export function ReportTab({ taskId }: { taskId: string }) {
         <CardTitle className="flex items-center gap-2 text-sm">
           <FileTextIcon className="size-4" /> 渗透测试报告（Markdown）
         </CardTitle>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          <span className="text-muted-foreground hidden text-xs sm:inline">
+            任务模板：{reportTemplateLabel(taskTemplate)}
+          </span>
+          <Select value={override} onValueChange={(v) => setOverride(v as ReportTemplate | "task")}>
+            <SelectTrigger className="w-44" aria-label="报告输出模板">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="task">沿用任务模板</SelectItem>
+              {REPORT_TEMPLATES.map((t) => (
+                <SelectItem key={t.value} value={t.value}>
+                  {t.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           {report && (
             <Button size="sm" variant="outline" onClick={copy}>
               {copied ? <CheckIcon /> : <CopyIcon />} 复制
@@ -84,7 +121,14 @@ export function ReportTab({ taskId }: { taskId: string }) {
           )}
         </div>
       </CardHeader>
-      <CardContent>{content}</CardContent>
+      <CardContent className="flex flex-col gap-3">
+        <p className="text-muted-foreground text-xs">
+          当前预览：{reportTemplateLabel(effective)}
+          {override !== "task" && "（临时切换，不写入任务；发现页导出时可再次选择）"}。补天 / edusrc 为一漏洞一提交，
+          带「待补充」的字段需在平台表单人工确认。
+        </p>
+        {content}
+      </CardContent>
     </Card>
   );
 }

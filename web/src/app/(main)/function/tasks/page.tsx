@@ -128,6 +128,7 @@ import type {
   DeleteTaskOptions,
   DeleteTaskResult,
   LLMProfile,
+  ReportTemplate,
   Task,
   TaskArchive,
   TaskArchiveState,
@@ -135,6 +136,7 @@ import type {
   TaskStatus,
   TaskDomain,
 } from "@/lib/types";
+import { REPORT_TEMPLATES } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // fmtBytes renders a human file size for the upload manifest.
@@ -3107,6 +3109,8 @@ function CreateTaskSheet({
   const [taskDomain, setTaskDomain] = React.useState<TaskDomain>("pentest");
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
   const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
+  // 报告输出模板:创建任务时选定并持久化;导出时可临时覆盖(不落库)。与 task_templates 无关。
+  const [reportTemplate, setReportTemplate] = React.useState<ReportTemplate>("praetor");
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
   const [uploading, setUploading] = React.useState(false);
   const [uploadCount, setUploadCount] = React.useState(0);
@@ -3174,6 +3178,7 @@ function CreateTaskSheet({
         seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
         coverageEnabled,
+        reportTemplate,
         interceptRules: interceptRules
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
           .filter((r) => r.pattern !== ""),
@@ -3192,6 +3197,7 @@ function CreateTaskSheet({
       setSeedFirstIntent(false);
       setTaskDomain("pentest");
       setCoverageEnabled(true);
+      setReportTemplate("praetor");
       setInterceptRules([]);
       setUploadCount(0);
       draftIdRef.current = "";
@@ -3348,6 +3354,25 @@ function CreateTaskSheet({
               <FieldDescription>
                 决定调度拓扑与预算：CTF 按分值/难度竞速分派；逆向按「一条假设验证完再下一条」串行推进并要求证据链；
                 红队按 ATT&amp;CK 阶段闸门下发、收尾强制 cleanup。红队战役意图需带阶段（phase），前置未完成不下发。
+              </FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="task-report-template">报告输出模板</FieldLabel>
+              <Select value={reportTemplate} onValueChange={(v) => setReportTemplate(v as ReportTemplate)}>
+                <SelectTrigger id="task-report-template" className="w-64">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {REPORT_TEMPLATES.map((t) => (
+                    <SelectItem key={t.value} value={t.value}>
+                      {t.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <FieldDescription>
+                {REPORT_TEMPLATES.find((t) => t.value === reportTemplate)?.hint}
+                。创建后仍可在报告页或发现页导出时临时切换（不写入任务）；模板仅影响 Markdown 输出，CSV / JSON 不变。
               </FieldDescription>
             </Field>
             <Field>

@@ -59,11 +59,12 @@ type Task struct {
 	CompanyIDs         []int64 `json:"company_ids,omitempty"`
 	Status             string  `json:"status"` // persisted lifecycle status (done/failed/timeout 为终态；空/其它则由运行态推导)
 	// 任务级超时(见 docs/任务级超时与收尾设计.md)。DeadlineAt/FirstRunAt 为 unix 秒,0=未设/未运行。
-	TimeoutSeconds       int   `json:"timeout_seconds"`
-	PlanHeartbeatSeconds int   `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
-	CoverageEnabled      bool  `json:"coverage_enabled"`       // 资产覆盖度功能开关(创建时定,默认开)
-	FirstRunAt           int64 `json:"first_run_at,omitempty"`
-	DeadlineAt           int64 `json:"deadline_at,omitempty"`
+	TimeoutSeconds       int    `json:"timeout_seconds"`
+	PlanHeartbeatSeconds int    `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
+	CoverageEnabled      bool   `json:"coverage_enabled"`       // 资产覆盖度功能开关(创建时定,默认开)
+	ReportTemplate       string `json:"report_template"`        // 报告输出模板(praetor/butian/edusrc),空=praetor
+	FirstRunAt           int64  `json:"first_run_at,omitempty"`
+	DeadlineAt           int64  `json:"deadline_at,omitempty"`
 	// PausedAt = 本次暂停开始的 unix 秒（0 = 未暂停）。预算闸门用它把暂停时长从墙钟里扣掉。
 	PausedAt    int64                  `json:"paused_at,omitempty"`
 	Store       *pgdb.ExplorationStore `json:"-"`
@@ -923,8 +924,8 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		SourceTaskIDs:  append([]int64(nil), pt.SourceTaskIDs...),
 		CompanyIDs:     append([]int64(nil), pt.CompanyIDs...),
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
-		CoverageEnabled: pt.CoverageEnabled,
-		FirstRunAt:      unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
+		CoverageEnabled: pt.CoverageEnabled, ReportTemplate: pt.ReportTemplate,
+		FirstRunAt: unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
 		PausedAt: unixOrZero(pt.PausedAt),
 		Store:    store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
 	}

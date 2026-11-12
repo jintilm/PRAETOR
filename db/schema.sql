@@ -596,6 +596,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     timeout_seconds INTEGER NOT NULL DEFAULT 0,
     plan_heartbeat_seconds INTEGER NOT NULL DEFAULT 300,
     coverage_enabled BOOLEAN NOT NULL DEFAULT true,
+    -- 报告输出模板（praetor/butian/edusrc）。存量任务默认 praetor，输出字节级不变。
+    report_template TEXT NOT NULL DEFAULT 'praetor',
     pinned_at      TIMESTAMPTZ,
     first_run_at   TIMESTAMPTZ,
     deadline_at    TIMESTAMPTZ,
@@ -621,6 +623,10 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued BOOLEAN NOT NULL DEFAULT false
 -- 给 agent 开放 add_task_scope/list_untested_assets;false=全部关闭(见 task_scope.go)。
 -- 存量任务默认 true 保持原行为;company 关联(task_scope kind=company)不受此开关影响。
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS coverage_enabled BOOLEAN NOT NULL DEFAULT true;
+-- 报告输出模板;补旧库。默认 praetor = 项目原有模板,存量任务行为不变。
+-- 合法值由应用层校验（report.ParseTemplate），这里不加 CHECK 以免旧库里的脏值
+-- 阻塞启动;读回时 COALESCE + NormalizeTemplate 兜底。
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS report_template TEXT NOT NULL DEFAULT 'praetor';
 -- queued_at makes admission FIFO reflect the actual enqueue order rather than the
 -- task creation order. queue_mode distinguishes first bootstrap from resuming an
 -- exploration that already owns goals/history.

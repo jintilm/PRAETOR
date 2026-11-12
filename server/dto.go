@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jintilm/praetor/db"
+	"github.com/jintilm/praetor/report"
 	"github.com/jintilm/praetor/traffic"
 )
 
@@ -61,6 +62,7 @@ type TaskDTO struct {
 	ArchiveBlockedBy   string             `json:"archive_blocked_by_task_id,omitempty"`
 	CompanyIDs         []int64            `json:"company_ids"`
 	CoverageEnabled    bool               `json:"coverage_enabled"` // 资产覆盖度功能开关(创建时定)
+	ReportTemplate     string             `json:"report_template"`  // 报告输出模板(praetor/butian/edusrc)
 }
 
 // FindingSeverityDTO 是任务列表里按严重度分档的漏洞计数（严重/高/中/低）。
@@ -134,6 +136,7 @@ func taskDTO(t *Task, status string) TaskDTO {
 		SourceTaskIDs:      sourceIDs,
 		CompanyIDs:         lifecycle.CompanyIDs,
 		CoverageEnabled:    t.CoverageEnabled,
+		ReportTemplate:     string(report.NormalizeTemplate(t.ReportTemplate)),
 	}
 }
 

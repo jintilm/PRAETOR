@@ -7,6 +7,18 @@ export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | 
 export type TaskDomain = "pentest" | "ctf" | "reverse" | "redteam";
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
+// 报告输出模板：创建任务时选定并持久化，导出时可临时覆盖（不落库）。
+// 注意与 TaskTemplate（任务描述预设 / task_templates 表）完全是两回事。
+export type ReportTemplate = "praetor" | "butian" | "edusrc";
+export const REPORT_TEMPLATES: { value: ReportTemplate; label: string; hint: string }[] = [
+  { value: "praetor", label: "PRAETOR 原有模板", hint: "任务级汇总 / 单漏洞报告，项目默认，存量任务输出不变" },
+  { value: "butian", label: "补天平台", hint: "公益 SRC 事件型表单，一漏洞一提交；标题为「单位名称+存在+漏洞类型+漏洞」" },
+  { value: "edusrc", label: "edusrc 平台", hint: "教育漏洞报告平台，一漏洞点一份；标题只填单位名称，不写系统名与漏洞名" },
+];
+export function reportTemplateLabel(v?: string): string {
+  return REPORT_TEMPLATES.find((x) => x.value === v)?.label ?? REPORT_TEMPLATES[0].label;
+}
+
 export interface Task {
   id: string;
   name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述
@@ -43,6 +55,7 @@ export interface Task {
   archive_blocked_by_task_id?: string; // live direct dependent that must be archived first
   company_ids?: number[]; // associated company scopes; current company assets join the task at creation
   coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
+  report_template?: ReportTemplate; // 报告输出模板(创建时定,缺省=praetor)
 }
 
 export interface TaskCategory {

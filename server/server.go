@@ -1561,6 +1561,9 @@ type createTaskReq struct {
 	Domain string `json:"domain,omitempty"`
 	// InterceptRules 任务级资产拦截/允许规则(创建时录入,存 task_intercept_rules,不进全局表)。
 	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
+	// ReportTemplate 报告输出模板（praetor/butian/edusrc）；省略/空=praetor。
+	// 任务级持久化，导出时可用 ?template= 临时覆盖（不落库）。
+	ReportTemplate string `json:"report_template,omitempty"`
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -1621,13 +1624,19 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, fmt.Sprintf("未知领域 %q（可用：%s）", domainKey, strings.Join(domainKeys(), ", ")))
 		return
 	}
+	// 模板名严格校验：拼错要 400，而不是悄悄写成 praetor 让用户在导出时才发现。
+	reportTemplate, err := report.ParseTemplate(req.ReportTemplate)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
 		Domain: domainKey,
 		Name:   strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
-		CoverageEnabled: req.CoverageEnabled,
-		InterceptRules:  interceptRules,
+		CoverageEnabled: req.CoverageEnabled, ReportTemplate: string(reportTemplate),
+		InterceptRules: interceptRules,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrTaskCategoryInvalid) || errors.Is(err, db.ErrTaskCategoryNotFound) {
@@ -2254,6 +2263,12 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	scope := q.Get("scope")
 	format := q.Get("format")
+	// 导出对话框可临时切换模板（不落库）。拼错的模板名直接 400，不静默回落。
+	tpl, hasOverride, tplErr := resolveReportTemplate(q, nil)
+	if tplErr != nil {
+		writeErr(w, 400, tplErr.Error())
+		return
+	}
 
 	var ids []int64
 	var filter db.FindingFilter
@@ -2302,6 +2317,9 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	stamp := now.Format("20060102-150405")
+	// 每份 finding 按「显式覆盖 > 所属任务 report_template > praetor」取模板。
+	views := s.reportViewsForFindings(fs, now, tpl, hasOverride)
+	legacy := allPraetor(views, tpl) // 全 praetor 时走原渲染，字节级兼容
 	setDownload := func(contentType, filename string) {
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
@@ -2310,10 +2328,14 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 	switch format {
 	case "md-single":
 		setDownload("text/markdown; charset=utf-8", "findings-"+stamp+".md")
-		_, _ = w.Write([]byte(report.FindingsMarkdown(fs, now)))
+		if legacy {
+			_, _ = w.Write([]byte(report.FindingsMarkdown(fs, now)))
+		} else {
+			_, _ = w.Write([]byte(report.RenderMany(views, tpl, "漏洞发现汇总报告")))
+		}
 	case "md-zip":
 		path := filepath.Join(stage, "findings.zip")
-		if err := buildFindingsEvidenceZip(path, fs, stage, now); err != nil {
+		if err := buildFindingsEvidenceZipWithTemplates(path, fs, views, stage, now); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
@@ -4006,6 +4028,11 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "no active task")
 		return
 	}
+	tpl, _, err := resolveReportTemplate(r.URL.Query(), t)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	findings, _ := t.Store.ListByKind(db.KindFinding, 1000) // 纯漏洞（事实是独立的 KindFact，不进报告）
 	counts := map[string]int{}
 	for _, ty := range []string{"root_domain", "ip", "subdomain", "app", "service", "endpoint"} {
@@ -4014,10 +4041,18 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 			counts[ty] = len(ns)
 		}
 	}
-	md := report.Markdown(report.Input{
-		Title: t.Description, Goal: t.Goal, GeneratedAt: time.Now(),
-		AssetCounts: counts, Findings: findings,
-	})
+	now := time.Now()
+	var md string
+	if tpl == report.TemplatePraetor {
+		// 原模板零改动，存量任务/未选模板的客户端输出字节级不变。
+		md = report.Markdown(report.Input{
+			Title: t.Description, Goal: t.Goal, GeneratedAt: now,
+			AssetCounts: counts, Findings: findings,
+		})
+	} else {
+		views := s.reportViewsForNodes(findings, t, now, tpl)
+		md = report.RenderMany(views, tpl, "渗透测试报告 — "+t.Description)
+	}
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.WriteHeader(200)
 	_, _ = w.Write([]byte(md))

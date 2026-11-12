@@ -48,8 +48,10 @@ import type {
   FindingGroup,
   FindingStats,
   FindingStatus,
+  ReportTemplate,
   Severity,
 } from "@/lib/types";
+import { REPORT_TEMPLATES } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { AssetTree, assetPathOf } from "./_components/asset-tree";
@@ -252,6 +254,8 @@ export default function FindingsPage() {
   const [exportOpen, setExportOpen] = React.useState(false);
   const [exportScope, setExportScope] = React.useState<"filtered" | "all" | "selected">("filtered");
   const [exportFormat, setExportFormat] = React.useState<"md-single" | "md-zip" | "csv" | "json">("md-single");
+  // 临时模板覆盖:"task" = 按每个 finding 所属任务的 report_template,不落库。
+  const [exportTemplate, setExportTemplate] = React.useState<ReportTemplate | "task">("task");
   const [exporting, setExporting] = React.useState(false);
 
   const toggleSelected = React.useCallback((id: string, checked: boolean) => {
@@ -288,6 +292,7 @@ export default function FindingsPage() {
         scope: exportScope,
         filters: { severity, status, vulnclass, task, query, sort },
         ids: [...selectedIds],
+        template: exportTemplate === "task" ? undefined : exportTemplate,
       });
       setExportOpen(false);
       toast.success("已开始下载导出文件");
@@ -1245,6 +1250,26 @@ export default function FindingsPage() {
                   <RadioGroupItem id="export-format-json" value="json" /> JSON（.json）
                 </label>
               </RadioGroup>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <span className="text-xs text-muted-foreground">报告输出模板（临时，不写入任务）</span>
+              <Select value={exportTemplate} onValueChange={(v) => setExportTemplate(v as ReportTemplate | "task")}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="task">沿用各任务模板（默认）</SelectItem>
+                  {REPORT_TEMPLATES.map((t) => (
+                    <SelectItem key={t.value} value={t.value}>
+                      {t.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-muted-foreground text-xs">
+                补天 / edusrc 为一漏洞一提交；md-zip 会额外附「_提交清单.md」。模板仅影响 Markdown，CSV / JSON 不变。
+              </p>
             </div>
           </div>
 
