@@ -467,6 +467,9 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     -- 自定义会话头：非空时每次请求带一个该名字的 HTTP 头，头值=当前运行的 session id
     -- (chat 会话/worker 意图)。用于某些按 session-id 头做提示缓存/粘性路由的网关。''=不发送。
     session_header_key TEXT NOT NULL DEFAULT '',
+    -- local_only=true 表示该配置只调用本地/私有部署模型。逆向等 LocalOnly 领域
+    -- 只允许使用此类配置，生产模型选择会 fail-closed。
+    local_only       BOOLEAN NOT NULL DEFAULT false,
     -- 重试覆盖：次数 0=用全局默认/-1=关闭/>0=该值；间隔 0=用默认指数退避/>0=固定毫秒。
     -- 三组分别对应建连重试、空响应重试、同 provider 安全窗口重试，详见下方 ALTER 处注释。
     retry_connect_attempts    INTEGER NOT NULL DEFAULT 0,
@@ -506,6 +509,9 @@ ALTER TABLE llm_profiles ADD  CONSTRAINT llm_profiles_max_tokens_check
     CHECK (max_tokens >= 0);
 -- 自定义会话头名；补旧库。默认 '' = 不发送，旧配置行为不变。
 ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS session_header_key TEXT NOT NULL DEFAULT '';
+-- 本地部署标记；补旧库。默认 false 保持既有云配置行为，只有显式勾选才允许
+-- 承载 LocalOnly 领域的请求。
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS local_only BOOLEAN NOT NULL DEFAULT false;
 
 -- 单配置的重试覆盖（见 docs/LLM重试设计.md）。三组各自一对「次数 + 固定间隔」，
 -- 语义统一：次数 0=沿用全局默认、-1=关闭该层重试、>0=用该值；间隔 0=沿用该层的
@@ -1230,6 +1236,64 @@ ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_note TEXT NOT NULL DE
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_similarity DOUBLE PRECISION;
 CREATE INDEX IF NOT EXISTS idx_findings_verification ON findings(verification_state, created_at DESC);
 
+-- =====================================================================
+-- L2. 漏洞知识库：只沉淀经过确定性验证的可复用模式
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS vuln_kb (
+    id                    BIGSERIAL PRIMARY KEY,
+    fingerprint           TEXT NOT NULL UNIQUE,
+    kind                  TEXT NOT NULL DEFAULT 'pattern',
+    title                 TEXT NOT NULL,
+    summary               TEXT NOT NULL DEFAULT '',
+    vuln_class            TEXT NOT NULL DEFAULT '',
+    cwe                   TEXT NOT NULL DEFAULT '',
+    severity              TEXT NOT NULL DEFAULT '',
+    technology            JSONB NOT NULL DEFAULT '[]',
+    preconditions         TEXT NOT NULL DEFAULT '',
+    test_steps            TEXT NOT NULL DEFAULT '',
+    expected_signals      TEXT NOT NULL DEFAULT '',
+    false_positive_checks TEXT NOT NULL DEFAULT '',
+    source_kind           TEXT NOT NULL DEFAULT 'internal_finding',
+    source_ref            TEXT NOT NULL DEFAULT '',
+    license               TEXT NOT NULL DEFAULT '',
+    confidence            INTEGER NOT NULL DEFAULT 50,
+    status                TEXT NOT NULL DEFAULT 'candidate',
+    version               INTEGER NOT NULL DEFAULT 1,
+    usage_count           INTEGER NOT NULL DEFAULT 0,
+    success_count         INTEGER NOT NULL DEFAULT 0,
+    false_positive_count  INTEGER NOT NULL DEFAULT 0,
+    last_verified_at      TIMESTAMPTZ,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ck_vuln_kb_kind CHECK (kind IN ('pattern','technique','negative')),
+    CONSTRAINT ck_vuln_kb_status CHECK (status IN ('candidate','active','deprecated')),
+    CONSTRAINT ck_vuln_kb_confidence CHECK (confidence BETWEEN 0 AND 100)
+);
+CREATE INDEX IF NOT EXISTS idx_vuln_kb_status ON vuln_kb(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_vuln_kb_class ON vuln_kb(vuln_class, status);
+DROP TRIGGER IF EXISTS trg_vuln_kb_upd ON vuln_kb;
+CREATE TRIGGER trg_vuln_kb_upd BEFORE UPDATE ON vuln_kb
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS vuln_kb_sources (
+    kb_id      BIGINT NOT NULL REFERENCES vuln_kb(id) ON DELETE CASCADE,
+    finding_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (kb_id, finding_id)
+);
+CREATE INDEX IF NOT EXISTS idx_vuln_kb_sources_finding ON vuln_kb_sources(finding_id);
+
+CREATE TABLE IF NOT EXISTS vuln_kb_usage (
+    id         BIGSERIAL PRIMARY KEY,
+    kb_id      BIGINT NOT NULL REFERENCES vuln_kb(id) ON DELETE CASCADE,
+    task_id    BIGINT,
+    intent_id  BIGINT,
+    outcome    TEXT NOT NULL DEFAULT '',
+    detail     TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_vuln_kb_usage_kb ON vuln_kb_usage(kb_id, created_at DESC);
+
 -- 手动复测属于独立会话；结论与原漏洞处置状态分开保存。
 CREATE TABLE IF NOT EXISTS finding_retests (
     id BIGSERIAL PRIMARY KEY,
@@ -1294,6 +1358,31 @@ CREATE TABLE IF NOT EXISTS finding_traffic_bindings (
 );
 CREATE INDEX IF NOT EXISTS idx_finding_traffic_order ON finding_traffic_bindings(finding_id, position, id);
 CREATE INDEX IF NOT EXISTS idx_finding_traffic_snapshot ON finding_traffic_bindings(snapshot_id);
+
+-- Screenshot/evidence attachments persist independently of the disposable task
+-- work directory. The binary is content-addressed in evidence/blobs; this row
+-- only stores metadata and the SHA-256 handle.
+CREATE TABLE IF NOT EXISTS finding_attachments (
+    id          BIGSERIAL PRIMARY KEY,
+    finding_id  BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL DEFAULT 'screenshot',
+    source      TEXT NOT NULL DEFAULT 'manual_upload',
+    source_ref  TEXT NOT NULL DEFAULT '',
+    filename    TEXT NOT NULL,
+    mime_type   TEXT NOT NULL,
+    size        BIGINT NOT NULL,
+    sha256      TEXT NOT NULL,
+    role        TEXT NOT NULL DEFAULT 'supporting',
+    caption     TEXT NOT NULL DEFAULT '',
+    position    INTEGER NOT NULL DEFAULT 0,
+    metadata    JSONB NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(finding_id, sha256)
+);
+CREATE INDEX IF NOT EXISTS idx_finding_attachments_order
+    ON finding_attachments(finding_id, position, id);
+CREATE INDEX IF NOT EXISTS idx_finding_attachments_hash
+    ON finding_attachments(sha256);
 
 -- =====================================================================
 -- M. 后端日志持久化

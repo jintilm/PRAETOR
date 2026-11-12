@@ -102,6 +102,8 @@ func renderEdusrc(v View) string {
 	fmt.Fprintf(&b, "- 漏洞名称：%s\n", v.Title())
 	fmt.Fprintf(&b, "- 发现时间：%s\n\n", stampOrTodo(v.CreatedAt))
 
+	b.WriteString(v.Mobile.SubMarkdown())
+
 	b.WriteString("### 复现步骤 / 数据包\n\n")
 	repro := v.Section("复现", "重现", "利用过程", "验证过程", "PoC", "POC", "漏洞证明")
 	poc := v.Section("PoC", "POC", "EXP", "Exploit", "利用", "Payload", "数据包")
@@ -119,6 +121,7 @@ func renderEdusrc(v View) string {
 		b.WriteString("**原始证据：**\n\n" + codeBlock(e))
 	}
 	b.WriteString(v.TrafficMarkdown)
+	b.WriteString(renderAttachmentMarkdown(v))
 
 	b.WriteString("### 复测账号与数据包（允许输出）\n\n")
 	b.WriteString("- 本项目不做证据脱敏：复测账号、密码、请求参数可原样填写，便于审核员复现。\n")
@@ -149,6 +152,9 @@ func renderEdusrc(v View) string {
 	fmt.Fprintf(&b, "- 单位：%s\n", edusrcTitle(v))
 	if roots := v.RootDomains(); len(roots) > 0 {
 		fmt.Fprintf(&b, "- 系统 / 资产：%s\n", strings.Join(roots, " / "))
+	}
+	if v.Mobile.Any() {
+		fmt.Fprintf(&b, "- 移动端目标：%s %s（%s）\n", v.Mobile.Platform, v.Mobile.Package, nz(v.Mobile.Version, "版本待补"))
 	}
 	b.WriteString("- 官方规范要求「同单位同系统多漏洞点打包一个」；本项目按用户决策一漏洞点一份，\n")
 	b.WriteString("  上面两项仅供人工判断是否需要合并，模板不会自动合并。\n\n")
@@ -199,6 +205,14 @@ func edusrcMissing(v View) []string {
 	}
 	if v.SeverityLabel() == "待定" {
 		out = append(out, "等级：项目未评级，需人工初选")
+	}
+	if v.Mobile.Any() {
+		if v.Mobile.Package == "" {
+			out = append(out, "内容：移动端应用包名 / Bundle ID")
+		}
+		if v.Mobile.Version == "" {
+			out = append(out, "内容：移动端应用版本")
+		}
 	}
 	return out
 }

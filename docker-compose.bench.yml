@@ -18,7 +18,7 @@ services:
     env_file:
       - bench/.env
     # 与物理机共享网络：容器直接用宿主网络栈，可直连宿主/VPN 上的靶机网络。
-    # host 模式下不用 ports 映射，容器直接绑宿主端口：8787(UI/API)、8788(代理)、
+    # host 模式下不用 ports 映射，容器直接绑宿主端口：8787(UI/API)、8798(代理)、
     # 以及内部 PostgreSQL 5432 —— 请确保宿主这三个端口空闲（本地测前先停掉占用它们的服务）。
     network_mode: host
     restart: "no"

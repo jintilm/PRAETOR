@@ -34,6 +34,7 @@ import type {
   TrafficEvidenceSnapshot,
 } from "../types";
 import * as D from "./data";
+import * as VK from "./vuln-kb";
 
 const delay = (ms = 120) => new Promise((r) => setTimeout(r, ms));
 
@@ -50,6 +51,7 @@ const mockTaskCategories = structuredClone(D.taskCategories);
 const mockConversations = structuredClone(D.conversations);
 const mockRetests: FindingRetest[] = [];
 const mockRetestMessages: Record<number, Activity[]> = {};
+const mockVulnKnowledge = structuredClone(VK.vulnKnowledge);
 
 // ── 关联流量证据(finding traffic) ─────────────────────────────────────────────
 // 后端把请求/响应快照独立存到 evidence 表,前端详情页用 FindingTrafficPanel 展示。
@@ -2473,6 +2475,57 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       cache_write_tokens: 0,
       daily: [],
     };
+
+  // ── 漏洞知识库 ──
+  if (path === "/vuln-kb/stats" && m === "GET") {
+    return {
+      total: mockVulnKnowledge.length,
+      candidate: mockVulnKnowledge.filter((item) => item.status === "candidate").length,
+      active: mockVulnKnowledge.filter((item) => item.status === "active").length,
+      deprecated: mockVulnKnowledge.filter((item) => item.status === "deprecated").length,
+      verified_sources: mockVulnKnowledge.reduce((sum, item) => sum + item.sources.length, 0),
+      search_uses: mockVulnKnowledge.reduce((sum, item) => sum + item.usage_count, 0),
+      successful_uses: mockVulnKnowledge.reduce((sum, item) => sum + item.success_count, 0),
+      false_positive_uses: mockVulnKnowledge.reduce((sum, item) => sum + item.false_positive_count, 0),
+    };
+  }
+  if (path === "/vuln-kb/backfill" && m === "POST") {
+    return { processed: mockVulnKnowledge.reduce((sum, item) => sum + item.sources.length, 0) };
+  }
+  if (path === "/vuln-kb" && m === "GET") {
+    const status = q.get("status") || "";
+    const kind = q.get("kind") || "";
+    const query = (q.get("q") || "").trim().toLowerCase();
+    const filtered = mockVulnKnowledge.filter(
+      (item) =>
+        (!status || item.status === status) &&
+        (!kind || item.kind === kind) &&
+        (!query ||
+          `${item.title} ${item.summary} ${item.vuln_class} ${item.cwe} ${item.test_steps}`
+            .toLowerCase()
+            .includes(query)),
+    );
+    const page = Math.max(1, Number(q.get("page")) || 1);
+    const pageSize = Math.min(100, Math.max(1, Number(q.get("page_size")) || 20));
+    const offset = (page - 1) * pageSize;
+    return {
+      items: filtered.slice(offset, offset + pageSize),
+      total: filtered.length,
+      page,
+      page_size: pageSize,
+    };
+  }
+  if (seg[0] === "vuln-kb" && seg.length === 2 && m === "GET") {
+    const item = mockVulnKnowledge.find((row) => row.id === Number(seg[1]));
+    if (!item) throw new Error("漏洞知识条目不存在");
+    return item;
+  }
+  if (seg[0] === "vuln-kb" && seg.length === 2 && m === "PATCH") {
+    const item = mockVulnKnowledge.find((row) => row.id === Number(seg[1]));
+    if (!item) throw new Error("漏洞知识条目不存在");
+    Object.assign(item, b, { id: item.id, version: item.version + 1, updated_at: new Date().toISOString() });
+    return item;
+  }
 
   // ── 旁路提问(/btw)：demo 无旁路会话 ──
   // 必须显式命中：路径以 s 结尾会被下面的读兜底判成集合返回 []，items 就成了 undefined。

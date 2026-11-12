@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jintilm/praetor/config"
 	pgdb "github.com/jintilm/praetor/db"
 )
 
@@ -83,12 +84,17 @@ func buildDynamicGrantInput(req *dynamicGrantReq) (*pgdb.DynamicGrantInput, erro
 }
 
 func (s *Server) dynamicOpsCatalog(w http.ResponseWriter, _ *http.Request) {
+	// device_mode / adb_addr 是只读的运行时前置，供 UI 明确告知「签发授权 ≠ 工具会注入」。
+	// 没有这两个字段时用户签完授权只会看到任务静默降级，无从排查。
 	writeJSON(w, 200, map[string]any{
 		"ops":           pgdb.DynamicOpNames(),
 		"descriptions":  pgdb.DynamicOps,
 		"min_hours":     dynamicGrantMinHours,
 		"max_hours":     dynamicGrantMaxHours,
 		"default_hours": 8,
+		"device_mode":   config.Env("MOBILE_DEVICE_MODE") == "1",
+		"adb_addr":      mobileADBAddr(),
+		"traffic_addr":  config.Env("TRAFFIC_ADDR"),
 	})
 }
 

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 
@@ -18,6 +19,10 @@ type findingEvidence interface {
 	GetFindingTraffic(ctx context.Context, findingID int64) (*db.FindingTraffic, error)
 	OpenBody(snapshot db.TrafficEvidenceSnapshot, side string) (*os.File, int64, error)
 	SetFindingVerification(ctx context.Context, findingID int64, state string, similarity float64, note string) (int64, error)
+}
+
+type vulnKnowledgeIngestor interface {
+	UpsertVulnKnowledgeFromFinding(ctx context.Context, findingID int64) (int64, error)
 }
 
 // replayVerifier 是 agent.FindingVerifier 的生产实现：重放绑定的证据并落库结论。
@@ -82,6 +87,15 @@ func (v *replayVerifier) VerifyFinding(ctx context.Context, findingID, bindingID
 	if _, err := v.ev.SetFindingVerification(ctx, findingID, state, verdict.Similarity, note); err != nil {
 		return nil, fmt.Errorf("写入验证结论失败: %w", err)
 	}
+	if state == db.VerificationVerified {
+		if ing, ok := v.ev.(vulnKnowledgeIngestor); ok {
+			if _, ingestErr := ing.UpsertVulnKnowledgeFromFinding(ctx, findingID); ingestErr != nil {
+				// Verification is already persisted; knowledge extraction is best-effort
+				// and must not turn a successful replay into a failed verification.
+				log.Printf("[vuln-kb] finding %d 生成候选知识失败: %v", findingID, ingestErr)
+			}
+		}
+	}
 	return res, nil
 }
 
@@ -133,6 +147,10 @@ func (a evidenceAdapter) OpenBody(snapshot db.TrafficEvidenceSnapshot, side stri
 
 func (a evidenceAdapter) SetFindingVerification(ctx context.Context, findingID int64, state string, similarity float64, note string) (int64, error) {
 	return a.s.DB.SetFindingVerification(ctx, findingID, state, similarity, note)
+}
+
+func (a evidenceAdapter) UpsertVulnKnowledgeFromFinding(ctx context.Context, findingID int64) (int64, error) {
+	return a.s.DB.UpsertVulnKnowledgeFromFinding(ctx, findingID)
 }
 
 // NewEvidenceVerifier 用 evidence.Store 构造验证器（生产入口）。

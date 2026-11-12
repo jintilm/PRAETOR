@@ -2,7 +2,7 @@
 # 开发模式：后端(:8797) + 流量代理(:8798) 与 前端 next dev(:5173) 一起跑。
 # 前端 /api 反代到后端；Ctrl-C 一并退出。
 #
-# 端口刻意用 8797/8798（不是 8787/8788），避免和同机旧 ARTEX 栈抢端口。
+# 端口统一用 8797/8798，避开同机其它服务常用的 8787/8788。
 # 单二进制（前端内嵌）方式见 README「单二进制」一节，不走这个脚本。
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -15,7 +15,7 @@ if [ -f .env ]; then
   set +a
 fi
 
-# 组装本项目自己的数据库 DSN：指向 praetor-pg（宿主 55433），与旧 ARTEX 的 5432 无关。
+# 组装本项目自己的数据库 DSN：指向 praetor-pg（宿主 55433），与宿主机上其它 PostgreSQL 实例无关。
 # 已显式设置 PRAETOR_PG_DSN 时不覆盖。
 if [ -z "${PRAETOR_PG_DSN:-}" ] && [ -n "${POSTGRES_PASSWORD:-}" ]; then
   PRAETOR_PG_DSN="postgres://${POSTGRES_USER:-praetor}:${POSTGRES_PASSWORD}@127.0.0.1:${PRAETOR_PG_PORT:-55433}/${POSTGRES_DB:-praetor}?sslmode=disable"

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jintilm/praetor/agent"
+	"github.com/jintilm/praetor/agent/domain"
 	"github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/internal/norma/permission"
 	actool "github.com/jintilm/praetor/internal/norma/tool"
@@ -231,7 +232,8 @@ func (s *Server) toolListLLMProfiles() actool.CoreTool {
 			out := make([]map[string]any, 0, len(profs))
 			for _, p := range profs {
 				out = append(out, map[string]any{
-					"id": p.ID, "name": p.Name, "model": p.Model, "format": p.Format, "is_active": p.IsDefault,
+					"id": p.ID, "name": p.Name, "model": p.Model, "format": p.Format,
+					"is_active": p.IsDefault, "local_only": p.LocalOnly,
 				})
 			}
 			return jsonResult(map[string]any{"profiles": out})
@@ -268,6 +270,9 @@ func (s *Server) toolSpawnTask() actool.CoreTool {
 			}
 			if strings.TrimSpace(a.Goal) == "" {
 				return actool.Errorf("goal 为必填"), nil
+			}
+			if err := validateTaskScopePolicy(string(domain.Pentest), nil, a.Description+" "+a.Goal); err != nil {
+				return actool.Errorf(err.Error()), nil
 			}
 			if a.TimeoutSeconds < 0 {
 				a.TimeoutSeconds = 0

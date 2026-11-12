@@ -267,6 +267,11 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		seedDomainAgents(m.pg)                           // 领域角色（ctf_lead/solver_*/re_lead/re_analyst）播种成一等 agent：可见/可编辑/可绑模型
 		warnSubagentBudgets(s.agentRunSeconds("worker")) // 角色墙钟 vs worker 预算：不匹配会让子 agent 静默全废
 		s.seedOrchestrationTools()                       // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
+		if n, err := m.pg.BackfillVulnKnowledgeCandidates(s.ctx); err != nil {
+			log.Printf("[vuln-kb] 启动补扫已验证漏洞失败: %v", err)
+		} else if n > 0 {
+			log.Printf("[vuln-kb] 启动补扫已验证漏洞：处理 %d 条来源", n)
+		}
 		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)
 		}
@@ -432,6 +437,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg.Stream = p.Streaming
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	cfg.SessionHeaderKey = p.SessionHeaderKey
+	cfg.LocalOnly = p.LocalOnly
 	s.applyProfileRetry(&cfg, p)
 	if cfg.APIKey == "" {
 		return cfg, false
@@ -457,6 +463,7 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 	var maxTokens int
 	var maxTokensField string
 	var sessionHeaderKey string
+	localOnly := cfg.LocalOnly
 	var retry db.RetryOverride
 	if profs, _ := s.m.pg.ListProfiles(); profs != nil {
 		for _, p := range profs {
@@ -464,6 +471,7 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 				id, priority, poolExclude, streaming = p.ID, p.Priority, p.PoolExclude, p.Streaming
 				maxTokens, maxTokensField = p.MaxTokens, p.MaxTokensField
 				sessionHeaderKey = p.SessionHeaderKey
+				localOnly = p.LocalOnly
 				retry = p.Retry
 				break
 			}
@@ -475,7 +483,8 @@ func (s *Server) saveLLMConfig(cfg agent.Config) error {
 		ContextWindowK: cfg.ContextWindowK, ThinkingType: cfg.ThinkingType, ReasoningEffort: cfg.ReasoningEffort, IsDefault: true,
 		Priority: priority, PoolExclude: poolExclude, Streaming: streaming,
 		MaxTokens: maxTokens, MaxTokensField: maxTokensField, SessionHeaderKey: sessionHeaderKey,
-		Retry: retry,
+		LocalOnly: localOnly,
+		Retry:     retry,
 	})
 	if err != nil {
 		return err
@@ -603,6 +612,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg.Stream = p.Streaming
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	cfg.SessionHeaderKey = p.SessionHeaderKey
+	cfg.LocalOnly = p.LocalOnly
 	s.applyProfileRetry(&cfg, p)
 	if cfg.APIKey == "" {
 		return cfg, false
@@ -797,6 +807,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/tasks/{id}/dynamic-grant", s.taskDynamicGrant)
 	mux.HandleFunc("GET /api/tasks/{id}/dynamic-grant/audits", s.taskDynamicGrantAudits)
 	mux.HandleFunc("POST /api/tasks/{id}/dynamic-grant/revoke", s.taskDynamicGrantRevoke)
+	// 报告页的移动端目标信息（与导出模板同一取数函数，只读）。
+	mux.HandleFunc("GET /api/tasks/{id}/mobile-meta", s.taskMobileMeta)
 	mux.HandleFunc("POST /api/tasks/control/batch", s.controlTasksBatch)
 	mux.HandleFunc("GET /api/task-archives", s.listTaskArchives)
 	mux.HandleFunc("GET /api/task-archives/{id}", s.getTaskArchive)
@@ -866,6 +878,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/exploration/findings/stats", s.findingStats)
 	mux.HandleFunc("GET /api/exploration/findings/export", s.findingsExport)
 	s.registerFindingTraffic(mux)
+	s.registerFindingAttachments(mux)
 	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
 	mux.HandleFunc("GET /api/exploration/findings/{id}/lineage", s.findingLineage)
 	mux.HandleFunc("POST /api/exploration/findings/{id}/deepen", s.deepenFinding)
@@ -874,6 +887,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/exploration/findings/{id}/retests", s.startFindingRetest)
 	mux.HandleFunc("PATCH /api/exploration/findings/{id}", s.patchFinding)
 	mux.HandleFunc("DELETE /api/exploration/findings/{id}", s.deleteFinding)
+	mux.HandleFunc("GET /api/vuln-kb", s.listVulnKnowledge)
+	mux.HandleFunc("GET /api/vuln-kb/stats", s.vulnKnowledgeStats)
+	mux.HandleFunc("POST /api/vuln-kb/backfill", s.backfillVulnKnowledge)
+	mux.HandleFunc("GET /api/vuln-kb/{id}", s.getVulnKnowledge)
+	mux.HandleFunc("PATCH /api/vuln-kb/{id}", s.updateVulnKnowledge)
 	mux.HandleFunc("GET /api/exploration/intents", s.intents)
 	mux.HandleFunc("GET /api/exploration/graph", s.explorationGraph)
 	mux.HandleFunc("GET /api/exploration/nodes", s.explorationNodes)
@@ -1638,6 +1656,10 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, fmt.Sprintf("未知领域 %q（可用：%s）", domainKey, strings.Join(domainKeys(), ", ")))
 		return
 	}
+	if err := validateTaskScopePolicy(domainKey, req.CompanyIDs, req.Description+" "+req.Goal); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	// 模板名严格校验：拼错要 400，而不是悄悄写成 praetor 让用户在导出时才发现。
 	reportTemplate, err := report.ParseTemplate(req.ReportTemplate)
 	if err != nil {
@@ -1774,12 +1796,6 @@ func parseTarget(text string) (scheme, host string, port int, ok bool) {
 		port = portOr(m[2], 80)
 		return schemeForPort(port), host, port, true
 	}
-	// 单标签主机名 + 端口（docker 服务名）。放在 domain 之前：`delulu:1337` 只有这条能认。
-	if m := reHostPort.FindStringSubmatch(text); m != nil {
-		host = strings.ToLower(m[1])
-		port = portOr(m[2], 80)
-		return schemeForPort(port), host, port, true
-	}
 	if m := reDomain.FindStringSubmatch(text); m != nil {
 		host = strings.ToLower(m[1])
 		// 文件名不是域名：`script.sh` / `main.py` / `README.md` 都会被 reDomain 当成
@@ -1795,6 +1811,13 @@ func parseTarget(text string) (scheme, host string, port int, ok bool) {
 			return "https", host, 443, true
 		}
 		port = portOr(m[2], 443)
+		return schemeForPort(port), host, port, true
+	}
+	// 单标签主机名 + 端口（docker 服务名）。必须放在 domain 之后：
+	// `app.example.com:8443` 里的 `com:8443` 也满足 host:port，先匹配会把它截成 com。
+	if m := reHostPort.FindStringSubmatch(text); m != nil {
+		host = strings.ToLower(m[1])
+		port = portOr(m[2], 80)
 		return schemeForPort(port), host, port, true
 	}
 	return "", "", 0, false
@@ -2254,6 +2277,13 @@ func (s *Server) getFinding(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "finding not found")
 		return
 	}
+	attachments, err := s.m.pg.ListFindingAttachments(r.Context(), id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	f.Attachments = attachments
+	f.AttachmentCount = len(attachments)
 	assets := s.resolveAssetIDs(f.AssetIDs)
 	dto := findingFromDB(f, assets)
 	if contextTaskID := strings.TrimSpace(r.URL.Query().Get("context_task")); contextTaskID != "" {
@@ -2336,11 +2366,28 @@ func (s *Server) findingsExport(w http.ResponseWriter, r *http.Request) {
 		evidenceError(w, err)
 		return
 	}
+	attachmentHashes, err := s.loadFindingAttachments(r.Context(), fs)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if format == "md-zip" && len(attachmentHashes) > 0 {
+		if err := s.evidenceStore().CopyAttachmentHashes(attachmentHashes, stage); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
 	now := time.Now()
 	stamp := now.Format("20060102-150405")
 	// 每份 finding 按「显式覆盖 > 所属任务 report_template > praetor」取模板。
 	views := s.reportViewsForFindings(fs, now, tpl, hasOverride)
-	legacy := allPraetor(views, tpl) // 全 praetor 时走原渲染，字节级兼容
+	legacy := allPraetor(views, tpl) && len(attachmentHashes) == 0 // 有附件时必须走附件感知的 View 渲染
+	if format == "md-single" && len(attachmentHashes) > 0 {
+		if err := s.inlineReportAttachments(r.Context(), views); err != nil {
+			writeErr(w, http.StatusRequestEntityTooLarge, err.Error())
+			return
+		}
+	}
 	setDownload := func(contentType, filename string) {
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
@@ -4063,15 +4110,29 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	now := time.Now()
+	views := s.reportViewsForNodes(findings, t, now, tpl)
 	var md string
 	if tpl == report.TemplatePraetor {
-		// 原模板零改动，存量任务/未选模板的客户端输出字节级不变。
-		md = report.Markdown(report.Input{
-			Title: t.Description, Goal: t.Goal, GeneratedAt: now,
-			AssetCounts: counts, Findings: findings,
-		})
+		if !reportViewsHaveAttachments(views) {
+			// 原模板零改动，存量任务/未选模板且无附件时输出字节级不变。
+			md = report.Markdown(report.Input{
+				Title: t.Description, Goal: t.Goal, GeneratedAt: now,
+				AssetCounts: counts, Findings: findings,
+			})
+		} else {
+			if err := s.inlineReportAttachments(r.Context(), views); err != nil {
+				writeErr(w, http.StatusRequestEntityTooLarge, err.Error())
+				return
+			}
+			md = report.RenderMany(views, tpl, "渗透测试报告 — "+t.Description)
+		}
 	} else {
-		views := s.reportViewsForNodes(findings, t, now, tpl)
+		if reportViewsHaveAttachments(views) {
+			if err := s.inlineReportAttachments(r.Context(), views); err != nil {
+				writeErr(w, http.StatusRequestEntityTooLarge, err.Error())
+				return
+			}
+		}
 		md = report.RenderMany(views, tpl, "渗透测试报告 — "+t.Description)
 	}
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")

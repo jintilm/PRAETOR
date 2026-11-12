@@ -74,9 +74,22 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **逆向分析** | 1 planner + 1 worker（**证据串行**） | `re_triage` 定性 → `re_recipe` 8 条静态/动态配方（rizin / Ghidra headless / FLOSS / capa / DIE / gdb / apktool）→ `re_evidence` 证据链落图（claim/ref 硬校验，判据不通过也落库但标记 `inferred`） |
 | **红队战役** | 1 planner + 1 worker（串行） | 意图携带 ATT&CK 阶段（`phase`），**前置未完成不下发**；做过持久化/外传而 cleanup 未完成时**禁止收尾**（`prove_goal` / `goal_met` 均被拦）；可接 Caldera（`caldera_operation` 列 ability / 下发 / 回收，未配置时明确报「未配置」） |
 
+渗透与红队任务下发前必须有可解析的测试范围：目标 URL、域名、IP/CIDR，或已关联企业。范围缺失会直接返回 400；CTF 与逆向不受此限制。操作者不需要写命令级步骤，只需把授权边界、目标、成功标准和硬约束说清楚。
+
 ### 子 agent 派生（灰度开关）
 
-CTF 与逆向域的 worker 即领域 lead，可通过 `Agent` 工具把「解一道题」「验证一条假设」派给**独立上下文**的子 agent（CTF：web/pwn/rev/crypto/forensics 五个 solver；逆向：re-analyst）。子 agent 继承父的沙箱视角（容器路径映射、写白名单）与输出目录，产物经共享工具集归口回本意图；中间过程镜像进 activity 流（UI 可见，带 `agentType:` 前缀）。这些角色在 **Agent 管理**页可见为一等 agent（role=specialist）：提示词可编辑（DB 权威，代码默认兜底）、可单独绑定 LLM 配置（如逆向 analyst 走本地模型）。逆向域的结论经 `re_evidence` 以**证据节点**落探索图（claim/ref 硬校验），任务详情的探索链路图对 evidence 类型有专属渲染。默认关闭，`PRAETOR_SUBAGENTS=ctf,reverse` 按域灰度开启。
+CTF 与逆向域的 worker 即领域 lead，可通过 `Agent` 工具把「解一道题」「验证一条假设」派给**独立上下文**的子 agent（CTF：web/pwn/rev/crypto/forensics 五个 solver；逆向：re-analyst）。子 agent 继承父的沙箱视角（容器路径映射、写白名单）、任务级 guard 策略、输出目录与独立 sidechain transcript，产物经共享工具集归口回本意图；中间过程镜像进 activity 流（UI 可见，带 `agentType:` 前缀）。这些角色在 **Agent 管理**页可见为一等 agent（role=specialist）：提示词可编辑（DB 权威，代码默认兜底）、可单独绑定 LLM 配置（如逆向 analyst 走本地模型）。逆向域的结论经 `re_evidence` 以**证据节点**落探索图（claim/ref 硬校验），任务详情的探索链路图对 evidence 类型有专属渲染。默认关闭，`PRAETOR_SUBAGENTS=ctf,reverse` 按域灰度开启。
+
+### 漏洞知识库
+
+「功能 → 漏洞知识库」把**已验证 finding** 自动沉淀为候选漏洞模式。候选不会直接进入模型上下文，必须在 UI 中补齐测试步骤、预期信号和误报检查并审核启用；启用后 planner/worker 可通过只读 `search_vuln_knowledge` 工具按技术栈、漏洞类别或关键词检索最多 5 条。
+
+- 只从 `verification_state=verified` 且不是误报/重复/忽略的 finding 生成候选。
+- 知识条目保留来源 finding、任务、CWE、技术栈、置信度、版本和使用计数，不复制完整请求体、凭据或样本。
+- 启动时会幂等补扫历史 verified findings；也可在页面点「补扫已验证漏洞」。
+- 当前不导入 CVE/nuclei/第三方 exploit 仓库；后续导入也必须带许可证、来源、预期信号和误报检查。
+- 候选、停用条目永远不会被 agent 检索。模型只能读取，不能修改或晋升全局知识。
+- 评测或基准任务应设 `PRAETOR_VULN_KB=off`，避免历史知识抬高分数或形成跨题泄漏。
 
 ### 每任务沙箱
 
@@ -127,7 +140,7 @@ cd PRAETOR
 
 装好后打开 **http://localhost:8797**（方式①）或 **http://localhost:8787**（方式②，二进制默认端口）进入 `/setup` 设置管理员密码。
 
-> 端口不是笔误：容器内固定监听 8787，宿主映射由 `PRAETOR_HTTP_PORT` 决定（默认 **8797**，避开旧栈常用的 8787/8788）；直接跑二进制时监听 **8787**。
+> 端口不是笔误：容器内固定监听 8787，宿主映射由 `PRAETOR_HTTP_PORT` 决定（默认 **8797**）；直接跑二进制时监听 **8787**。
 
 #### 安装完成后：密码在哪、还要做什么
 
@@ -250,10 +263,30 @@ bind mount 宿主源读回来，再拼上 `work/<taskID>` 作为 `-v` 的源。�
 想改用现成的发布镜像（而不是自己构建）：在 `.env` 设
 `PRAETOR_IMAGE=<registry>/<repo>:<tag>`，然后 `docker compose pull praetor && docker compose up -d`。
 
-远程 MCP 可在系统设置中选择 `http`（Streamable HTTP）或 `sse`（旧版 SSE）。
-旧版 SSE 服务通常使用 `GET /sse` 建立事件流，再通过服务返回的
-`/message?sessionId=...` 接收 JSON-RPC 请求；配置时将 URL 填为 `/sse`，请求头按
-`Authorization=Bearer <token>` 填写。
+#### MCP 连接方式
+
+「系统 → MCP」支持三种传输：
+
+- `stdio`：配置命令和参数，由应用进程启动子进程。
+- `http`：Streamable HTTP，适合远程 MCP 或带鉴权的网关。
+- `sse`：旧版 SSE，先 `GET` 建立事件流，再通过服务返回的
+  `?sessionId=...` 或 `/message` 端点发送 JSON-RPC。
+
+远程服务需要鉴权时，把请求头写进 MCP 的 `env`，例如
+`{"Authorization":"Bearer <token>"}`。全 Docker 部署不要把宿主机地址写成
+`127.0.0.1`，那指向应用容器自身；使用 `host.docker.internal`。
+
+Burp 官方 MCP 扩展当前使用 **legacy SSE 根路径**，不是 `/sse`。宿主机确认端口后，
+在 MCP 页面配置：
+
+```text
+transport: sse
+url:       http://host.docker.internal:9876/
+env:       {"Host":"localhost:9876"}
+```
+
+Burp 会校验 Host 头；没有 `Host` 覆盖时可能需要 403。宿主机可先用
+`curl -i http://127.0.0.1:9876/` 验证 SSE，再刷新 MCP 工具列表。
 
 ### 方式三：下载预编译二进制（Releases）
 
@@ -346,6 +379,8 @@ export ANTHROPIC_API_KEY='sk-...'                 # 或 OPENAI_API_KEY / 留空�
 | `PRAETOR_SANDBOX_IMAGE` | 沙箱容器镜像 | `praetor/sandbox:latest` |
 | `PRAETOR_SANDBOX_NETWORK` | 打靶机时要接入的 docker 网络 | 空（默认 bridge） |
 | `PRAETOR_LLM_PROVIDER/MODEL/BASE_URL/PROXY` | 覆盖 LLM 提供方、模型、网关、代理 | 空 |
+| `PRAETOR_LLM_LOCAL_ONLY` | 环境变量直连的模型是否为本地/私有部署；LocalOnly 领域只接受已标记配置 | `0` |
+| `PRAETOR_VULN_KB` | 漏洞知识检索总开关；`0/off` 关闭（评测建议关闭） | `1` |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | 模型 API Key（也可在 UI 里配） | 空 |
 | `PRAETOR_DOMAINS` | 启用的域，逗号分隔 | `pentest` |
 | `PRAETOR_SUBAGENTS` | 允许派生 subagent 的域（`ctf,reverse` 或 `all`） | 关 |
@@ -488,6 +523,8 @@ removed/             # 档位 2/3 移出的文件，按原相对路径存放
 **LLM**：`export ANTHROPIC_API_KEY=sk-...`（或 `OPENAI_API_KEY`），也可在 UI 的「LLM 配置」页填写。
 可选：`PRAETOR_LLM_PROVIDER` / `PRAETOR_LLM_MODEL` / `PRAETOR_LLM_BASE_URL` / `PRAETOR_LLM_PROXY`。
 
+本地/私有部署的模型要在 UI 的 LLM 配置里勾选「本地部署 · LocalOnly」；环境变量直连时用 `PRAETOR_LLM_LOCAL_ONLY=1`。逆向域要求 LocalOnly 模型，绑定云配置会被拒绝，故障转移也不会切到云端。
+
 ### 修改已部署实例的数据库密码
 
 > ⚠️ 数据卷 `praetor-pgdata` 一旦初始化，postgres 官方镜像**只在首次初始化时读** `POSTGRES_PASSWORD`。只改 `.env` 不会改库里的密码，重启后应用会报密码认证失败 —— 别被「改完重启生效」这种说法带偏。
@@ -523,7 +560,7 @@ docker compose up -d --force-recreate praetor
 
 **并发**：每个任务的 work agent 数在「系统设置」里配置（默认 3）。
 
-**常用参数**：`./start.sh -addr :8787 -proxy :8788`（`-addr` 前端+API，`-proxy` 流量录制代理）。启动脚本会把参数原样透传给 `praetor`。
+**常用参数**：`./start.sh -addr :8787 -proxy :8798`（`-addr` 前端+API，`-proxy` 流量录制代理）。启动脚本会把参数原样透传给 `praetor`。
 
 > ⚠️ 监听地址是 `-addr` **参数**，不是 `.env` 里的端口变量。用 `-addr :8797` 启动就必须访问 `:8797`；默认是 `:8787`。
 
@@ -598,7 +635,25 @@ server {
 
 补天字段按提交页截图固化：厂商名称\*、域名或IP\*、漏洞类别（Web漏洞 / IOT漏洞）、漏洞标题、漏洞URL\*、漏洞类型（事件型 / 通用型）、细分类型联动下拉（XSS / 配置错误 / 弱口令 / 入侵事件 / 疑似被黑 / 文件上传 / 信息泄露 / 存在后门 / 逻辑漏洞 / 代码执行 / 命令执行 / SQL注入 / 解析漏洞）、漏洞等级、参与活动/任务、简要描述\*、详细填写\*、附件、修复方案、行业所属（国民经济行业门类）、所属地区（省 / 市 / 区三级）。edusrc 按官方 10 字段输出：标题 / 分类 / 等级 / 漏洞单位 / 开发方 / 资产所在网段 / 是否需要账号认证 / 漏洞URL / 内容 / 附件。
 
-模板只做「字段映射 + 章节布局 + 待补项清单」，不编造数据。项目已有的：名称、类别、等级、描述、证据、单位名（`tasks.company_ids → companies.name`）、资产主域名、漏洞 URL；从 `report` 自由文本里按标题切出复现步骤 / 影响 / PoC / 修复建议。平台要但项目没有结构化的：归属证明截图、首页截图、复现视频、开发方、资产网段、行业所属、省市区、复测账号、平台分类/权重/活动 —— 一律输出「待补充」占位，不自动代选下拉项。`md-zip` 会额外附一份 `_提交清单.md`，逐份列待补项。补天「简要描述」有表单硬约束「请勿在此填写漏洞URL等其他漏洞信息」，模板会主动剔除摘要里的 URL。
+模板只做「字段映射 + 章节布局 + 待补项清单」，不编造数据。项目已有的：名称、类别、等级、描述、证据、单位名（`tasks.company_ids → companies.name`）、资产主域名、漏洞 URL、截图附件；从 `report` 自由文本里按标题切出复现步骤 / 影响 / PoC / 修复建议。平台要求但项目不自动生成或自动判定的：归属证明截图、首页截图、复现视频、开发方、资产网段、行业所属、省市区、复测账号、平台分类/权重/活动 —— 仍输出「待补充」占位，不自动代选下拉项。`md-zip` 会额外附一份 `_提交清单.md`，逐份列待补项。补天「简要描述」有表单硬约束「请勿在此填写漏洞URL等其他漏洞信息」，模板会主动剔除摘要里的 URL。
+
+### 漏洞截图附件
+
+漏洞详情页的「证据附件」支持上传 PNG / JPEG，并按 finding 持久化：
+
+- 单张上限 20 MiB，单个 finding 总量上限 100 MiB。
+- 可标记为「页面截图」或「Burp 截图」，填写用途（正常对照 / 漏洞证明 / 补充验证 / 辅助证据）和说明。
+- 支持缩略图、原图预览、下载、排序、编辑和删除；继承出来的 finding 只读。
+- Agent 可通过 `attach_finding_attachment` 绑定当前任务工作区中的截图。
+- Playwright MCP 返回的图片内容会落到任务 `evidence/`，只把路径交给模型，不把 base64 塞进上下文。
+
+导出行为：
+
+- `md-zip`：图片写入 `evidence/<finding-id>/attachments/`，报告中的图片链接使用包内相对路径。
+- `md-single`：图片内嵌为 data URI，适合单文件交付；附件总量超过 32 MiB 时请改用 `md-zip`。
+- 截图附件随 finding 持久化，并纳入证据 GC 和任务归档 / 恢复。
+
+Burp GUI 截图仍需在宿主机截屏后上传。Burp MCP 当前没有截图工具；请求/响应证据继续通过「关联流量」绑定，不要用截图替代可验证的原始报文。
 
 ### 两项明确决策
 
@@ -607,12 +662,20 @@ server {
 
 ### 兼容性与影响范围
 
-- 只影响 Markdown 输出（`GET /api/report`、`md-single`、`md-zip`）；CSV / JSON 导出不变。
-- 存量任务 `report_template` 默认 `praetor`。全 praetor 时继续调用原 `report.Markdown` / `FindingsMarkdown` / `SingleFindingMarkdown`，**输出字节级不变**。
+- `GET /api/report`、`md-single`、`md-zip` 支持截图附件；CSV 增加附件数量和文件名列，JSON 包含附件元数据，不包含图片正文。
+- 存量任务 `report_template` 默认 `praetor`。全 praetor **且没有附件** 时继续调用原 `report.Markdown` / `FindingsMarkdown` / `SingleFindingMarkdown`，输出字节级不变；有附件时走附件感知的渲染器。
 - 跨任务导出时每条 finding 按自己所属任务取模板，一份 zip 里可以混用不同平台版式；`?template=butian` 可强制本次导出统一用补天模板。
 - 模板是内置常量（`report/template_butian.go` / `report/template_edusrc.go`），不提供用户自定义编辑器；平台改版时改选项常量并发版。
 - 命名避让：项目已有 `task_templates`（任务描述预设），新功能一律用 `report_template` / `ReportTemplate`。
 - 未知模板名在创建任务或导出时返回 400，不会静默回落；读旧库脏值时回落 `praetor`。
+
+### 移动端任务的目标信息
+
+移动端（APK / IPA / 真机）报告额外带一份**结构化移动端目标**，三套模板共用同一个 `report.View.Mobile`：平台、应用包名 / Bundle ID、版本、授权设备序列号、授权 APK SHA256、字段来源。设备序列号与 APK 指纹取自 `task_dynamic_grants`（撤销或过期后仍是事实，供溯源），包名 / 版本由发现正文正则解析，**可能为空** —— 缺的字段列进「待补充」，不编造，也不会平白改掉 Web 任务的版式。
+
+判定刻意保守：只认明确的 Android / iOS 特征词，不因为正文里出现 "app" 就把 Web 漏洞误判成移动端。补天沿用平台已有的「IOT漏洞」类别，不新增类别与细分类型联动下拉；edusrc 在「内容」里用三级小节避免标题跳级，并在归档提示里附一行移动端目标。非移动端任务不输出这一段，存量 praetor 报告**字节不变**。
+
+报告页在模板控件下展示同一份数据（`GET /api/tasks/{id}/mobile-meta`），与导出共用同一个后端取数函数，避免「页面显示一份、提交材料写另一份」。
 
 ## 移动端静态分析（P0 / P2 扩展）
 
@@ -621,6 +684,8 @@ server {
 ### 安装
 
 「系统设置 → 可选组件」应用 **`mobile-static`** 预置，或手动勾选 `apktool`。这份预置只装 1 项（约 60MB），因为静态规则是纯 Go 读解包产物，不需要 androguard / MobSF 之类的服务与重依赖。`mobile-static` 是**独立预置**，不会像 `ctf-*` 增量预置那样并上 CTF 基础层。
+
+组件面板把后端预置渲染成「一键预置」按钮：后端返回的是 `PresetItems` **展开后**的完整 ID 集合（含增量预置的 `Base`），所以点 `ctf-crypto` 不会漏掉 CTF 基础层；按钮只负责勾选，仍需点「应用」才真正构建镜像，当前勾选与某预置完全一致时按钮高亮。分组新增「移动端 / App 安全」。
 
 `jadx` 故意不进组件清单：它需要下载 release 并做版本校验，且只影响「Java 源码还是 smali」的可读性。缺了它 `mobile` 配方会明确退回 smali，不阻断分析；需要 Java 源码时自行安装并加入 PATH。
 
@@ -646,7 +711,7 @@ server {
 
 - 配方表已满 10 条（`TestReverseRecipeCatalogIsLean` 上限）。后续加移动端能力优先合并进 `mobile_scan` 的 `select` 子动作，不要扩表 —— iOS 就是按文件形态分流进同一条配方，没有另占一条。
 - iOS **只做静态解析**，动态需 macOS + 越狱真机，平台不承诺自动化；APK / IPA 的动态运行都不在这条配方里。真机接入见 P1，Android 动态工具面见 P2。
-- 与报告模板无关：`report_template` 只影响 Markdown 导出，静态命中等 finding 后按任务所选模板输出。
+- 与模板选择无关：移动端目标信息由 server 从授权记录 + 发现正文补充，`report_template` 只决定用哪套版式渲染它；三套模板取的是同一份数据，报告页也读同一处。
 
 ## Android 真机动态授权与接入（P1）
 
@@ -672,7 +737,7 @@ server {
 
    ```dotenv
    PRAETOR_MOBILE_DEVICE_MODE=1
-   PRAETOR_TRAFFIC_ADDR=0.0.0.0:8788
+   PRAETOR_TRAFFIC_ADDR=0.0.0.0:8798
    PRAETOR_TRAFFIC_BIND=0.0.0.0
    PRAETOR_MOBILE_ADB_HOST=host.docker.internal   # 宿主二进制部署改 127.0.0.1
    PRAETOR_MOBILE_DEVICE_EXCLUDE=192.168.1.50,host.docker.internal:5037,host.docker.internal:27042
@@ -685,6 +750,8 @@ server {
 
 新建任务抽屉的「Android 真机动态授权（可选）」默认折叠且未启用。展开后可先点「探测设备」做只读自查。探测只报能从平台侧机读的事实：adb server 可达、设备在线、adb 已授权；`root` / `frida-server` 作为 advisory（无 root 仍可装包/启动/看日志），而**锁屏状态、系统 CA 安装、真机到代理的连通性一律标 `manual` 交签发人确认**，不假装「六项全绿」。探测失败会明确给出降级原因，不静默跳过。
 
+表单里的「目标 APK SHA256」可用「选 APK 自动算」在浏览器本地用 Web Crypto 计算（只在 https / localhost 可用，超过 300MB 会提示改用 `sha256sum`）：**只登记指纹，不上传文件**；APK 本体仍需放进工作空间 `/work` 由 `mobile_install` 按路径安装，安装前会再比一次哈希。允许操作集、有效期上下限与默认值都取自 `GET /api/dynamic-ops`，前端不再写死清单；后端新增 op 而前端未发版时，选项自动回落到后端描述，不会出现「勾不到」。该接口同时返回 `device_mode` / `adb_addr` / `traffic_addr` 三个只读运行时前置 —— 设备模式没开时表单直接黄色告警「签发授权也不会注入 `mobile_*` 工具」，不再让任务静默降级后无从排查。
+
 签发字段与 API：
 
 | 动作 | 接口 |
@@ -695,6 +762,7 @@ server {
 | 查看授权与状态 | `GET /api/tasks/{id}/dynamic-grant`（`none/active/revoked/expired`） |
 | 查看调用审计 | `GET /api/tasks/{id}/dynamic-grant/audits` |
 | 撤销 | `POST /api/tasks/{id}/dynamic-grant/revoke`（`reason`、`operator`） |
+| 报告页移动端目标 | `GET /api/tasks/{id}/mobile-meta` |
 
 审计是 append-only，记录每次 allow / block 的 op、工具、设备、令牌摘要（只存 SHA256，不存可重放票据）与原因；签发与撤销也各留一条。设备锁用 `device_leases` 的**数据库唯一约束 + 租约**实现，跨进程有效，任务异常退出不会永久占住手机；撤销会主动释放，未释放的靠 15 分钟租约自然过期。
 
@@ -736,7 +804,11 @@ server {
 
 ### 前端
 
-任务详情新增「**真机动态**」页签：展示授权状态（`none/active/revoked/expired`）、签发字段与 ops 闭集、设备探测结果（含 `manual` 项）、append-only 审计列表，并提供带原因与操作者的撤销对话框。未签发授权时明确说明工具不可用与「只能创建任务时签发一次」。
+任务详情新增「**真机动态**」页签：展示授权状态（`none/active/revoked/expired`）、签发字段与 ops 闭集、设备探测结果（含 `manual` 项）、append-only 审计列表，并提供带原因与操作者的撤销对话框。未签发授权时明确说明工具不可用与「只能创建任务时签发一次」。ops 标签取自 `/api/dynamic-ops`；后端未开设备模式时，页签（含未授权态）给出与创建表单一致的黄色告警和 adb 落点。
+
+「动态证据」卡片不再只写一段说明，而是列出**实际落盘的文件**（走工作空间只读接口，相对路径 `work/<taskID>/mobile`），可内联预览 / 下载，也可一键深链到工作空间对应目录；目录不存在时显示「暂无证据」而不是报错。容器内工具回写的路径仍是 `/work/mobile/<name>` —— per-task bind mount 把宿主 `data/work/<taskID>` 挂成容器内 `/work`，两种写法指向同一份文件，**不要写成 `/work/<taskID>/mobile/`**。
+
+报告页在模板控件下展示「移动端目标」卡片，字段与三套导出模板同源（见「报告输出模板 → 移动端任务的目标信息」）。
 
 ### 仍不做的事
 
@@ -761,7 +833,7 @@ server {
 ### 本地运行与测试
 
 ```bash
-./dev.sh    # 后端(:8787) + 流量代理(:8788) + 前端 next dev(:5173) → http://localhost:5173
+./dev.sh    # 后端(:8787) + 流量代理(:8798) + 前端 next dev(:5173) → http://localhost:5173
 ```
 
 - 后端：`go run ./cmd/praetor`（不带 `-tags embedui` 则不内嵌前端）
@@ -815,7 +887,9 @@ flowchart TB
   MA --> DB
   GO --> DB
   WK -->|"Bash / HTTP 全程留痕"| PROXY
+  PL --> GUARD
   WK --> GUARD
+  MA --> GUARD
   WK --> ENR
   PL -.-> EXT
   WK -.-> EXT

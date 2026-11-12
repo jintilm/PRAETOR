@@ -166,7 +166,7 @@ func run() int {
 // 且 PRAETOR_MOBILE_DEVICE_MODE=1。少一个就回落到回环并告警，不静默放开。
 // 命令行 -proxy 是管理员的显式指定，不受这条 env 约束。
 func trafficAddrDefault() string {
-	const loopback = "127.0.0.1:8788"
+	const loopback = "127.0.0.1:8798"
 	addr := strings.TrimSpace(config.Env("TRAFFIC_ADDR"))
 	if addr == "" {
 		return loopback

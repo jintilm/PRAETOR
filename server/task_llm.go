@@ -98,6 +98,33 @@ type taskLLMSelection struct {
 	retry agent.RetryConfig
 }
 
+func taskRequiresLocalOnly(t *Task) bool {
+	if t == nil {
+		return false
+	}
+	pack := DomainPackFor(t)
+	return pack != nil && pack.Model().LocalOnly
+}
+
+func localOnlyPolicyError(taskID string, t *Task, role, source string, profileID int64, cfg agent.Config) error {
+	domainKey := "unknown"
+	if t != nil && strings.TrimSpace(t.Domain) != "" {
+		domainKey = t.Domain
+	}
+	target := source
+	if profileID > 0 {
+		target += fmt.Sprintf(" #%d", profileID)
+	}
+	model := strings.TrimSpace(cfg.Model)
+	if model == "" {
+		model = "(unknown)"
+	}
+	return fmt.Errorf(
+		"领域 %s 要求 LocalOnly 模型，但任务 %s 的 %s 解析到非本地配置（来源=%s，model=%s）。"+
+			"请给该角色绑定或在任务链中选择标记为「本地部署」的 LLM 配置；系统不会回落到云模型",
+		domainKey, taskID, role, target, model)
+}
+
 type taskLLMStreamHooks struct {
 	// current 带 ctx：模型选择已经是**每 run** 的决策（竞速两路要跑不同模型，见
 	// llm_lane.go），而 run 身份只在 ctx 里。
@@ -127,7 +154,20 @@ func (r *taskLLMRuntime) current(ctx context.Context) (taskLLMSelection, error) 
 	r.s.syncTaskLLMState(pt)
 	t, _ := r.s.m.Task(r.taskID)
 	sel := taskLLMSelection{task: t, revision: pt.LLMChainRevision}
-	if prov, cfg, ok := r.s.agentBindingProvider(r.agentKey); ok {
+	requireLocal := taskRequiresLocalOnly(t)
+	if requireLocal {
+		// Binding has highest precedence. Resolve the bare profile provider here:
+		// poolForBinding may otherwise fall through to a cloud member.
+		if id := r.s.effectiveProfileForAgent(r.agentKey, nil); id != nil {
+			if prov, cfg, ok := r.s.providerForProfile(*id); ok {
+				if !cfg.LocalOnly {
+					return sel, localOnlyPolicyError(r.taskID, t, r.agentKey, "agent_binding", *id, cfg)
+				}
+				sel.provider, sel.retry = prov, cfg.Retry
+				return sel, nil
+			}
+		}
+	} else if prov, cfg, ok := r.s.agentBindingProvider(r.agentKey); ok {
 		sel.provider, sel.retry = prov, cfg.Retry
 		return sel, nil
 	}
@@ -137,6 +177,9 @@ func (r *taskLLMRuntime) current(ctx context.Context) (taskLLMSelection, error) 
 		// 不能因为它把原本能跑的任务搞挂。
 		if id, ok := r.laneProfileFor(ctx, t, taskNum); ok {
 			if prov, cfg, ok := r.s.providerForProfile(id); ok {
+				if requireLocal && !cfg.LocalOnly {
+					return sel, localOnlyPolicyError(r.taskID, t, r.agentKey, "task_chain_lane", id, cfg)
+				}
 				sel.profileID, sel.provider, sel.retry = id, prov, cfg.Retry
 				return sel, nil
 			}
@@ -150,6 +193,33 @@ func (r *taskLLMRuntime) current(ctx context.Context) (taskLLMSelection, error) 
 		prov, cfg, ok := r.s.providerForProfile(sel.profileID)
 		if !ok {
 			return sel, fmt.Errorf("LLM profile #%d is missing or invalid", sel.profileID)
+		}
+		if requireLocal && !cfg.LocalOnly {
+			return sel, localOnlyPolicyError(r.taskID, t, r.agentKey, "task_chain", sel.profileID, cfg)
+		}
+		sel.provider, sel.retry = prov, cfg.Retry
+		return sel, nil
+	}
+	if requireLocal {
+		// A persisted active profile is authoritative. If an operator chose a cloud
+		// profile there, fail instead of silently falling back to the environment.
+		if p, err := r.s.m.pg.ActiveProfile(); err == nil && p != nil {
+			prov, cfg, ok := r.s.providerForProfile(p.ID)
+			if !ok {
+				return sel, fmt.Errorf("active LLM profile #%d is invalid", p.ID)
+			}
+			if !cfg.LocalOnly {
+				return sel, localOnlyPolicyError(r.taskID, t, r.agentKey, "global_profile", p.ID, cfg)
+			}
+			sel.provider, sel.retry = prov, cfg.Retry
+			return sel, nil
+		}
+		prov, cfg, ok := r.s.globalProviderBare()
+		if !ok {
+			return sel, fmt.Errorf("task %s has no available fallback LLM provider", r.taskID)
+		}
+		if !cfg.LocalOnly {
+			return sel, localOnlyPolicyError(r.taskID, t, r.agentKey, "environment", 0, cfg)
 		}
 		sel.provider, sel.retry = prov, cfg.Retry
 		return sel, nil
@@ -531,6 +601,17 @@ func (s *Server) globalProvider() (llm.Provider, agent.Config, bool) {
 	return s.llmProv, s.llmCfg, true
 }
 
+// globalProviderBare bypasses the failover pool. It is required for LocalOnly
+// domains because the next pool member may be a cloud profile.
+func (s *Server) globalProviderBare() (llm.Provider, agent.Config, bool) {
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+	if !s.llmOn || s.llmDirect == nil {
+		return nil, agent.Config{}, false
+	}
+	return s.llmDirect, s.llmCfg, true
+}
+
 // taskRuntimeAvailable reports whether every listed role can resolve a provider
 // under the runtime precedence in current(): the role's own binding first, then
 // the task chain, then global. An exhausted chain is a hard stop for unbound
@@ -539,18 +620,35 @@ func (s *Server) taskRuntimeAvailable(t *Task, agentKeys ...string) bool {
 	if t == nil || len(agentKeys) == 0 {
 		return false
 	}
+	requireLocal := taskRequiresLocalOnly(t)
 	state := t.llmStateSnapshot()
 	unboundReady := false
 	if len(state.ProfileIDs) > 0 {
 		if state.ActiveID != nil {
-			_, _, unboundReady = s.providerForProfile(*state.ActiveID)
+			_, cfg, ok := s.providerForProfile(*state.ActiveID)
+			unboundReady = ok && (!requireLocal || cfg.LocalOnly)
+		}
+	} else if requireLocal {
+		if p, err := s.m.pg.ActiveProfile(); err == nil && p != nil {
+			_, cfg, ok := s.providerForProfile(p.ID)
+			unboundReady = ok && cfg.LocalOnly
+		} else {
+			_, cfg, ok := s.globalProviderBare()
+			unboundReady = ok && cfg.LocalOnly
 		}
 	} else {
 		_, _, unboundReady = s.globalProvider()
 	}
 	for _, key := range agentKeys {
-		if _, _, ok := s.agentBindingProvider(key); ok {
-			continue
+		id := s.effectiveProfileForAgent(key, nil)
+		if id != nil {
+			_, cfg, ok := s.providerForProfile(*id)
+			if ok {
+				if !requireLocal || cfg.LocalOnly {
+					continue
+				}
+				return false // explicit cloud binding violates LocalOnly
+			}
 		}
 		if !unboundReady {
 			return false
@@ -580,6 +678,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk := agent.NewWorker(workerRuntime, "task-router", s.m.dir, tx, window, s.agentMaxTurns("worker"))
 	// 任务领域决定 worker 的工具面（逆向/CTF 专属工具不进渗透任务）与判题后端。
 	wk.SetDomain(t.Domain)
+	wk.SetVulnKnowledge(s.vulnKnowledgeSearcher())
 	// Bash 跑在任务容器里时，提示词里的工作目录必须换成容器内路径。
 	// 宿主侧 runDir 是 <data>/tasks/<id>/i<id>，容器只挂了 <data>/work/<id> -> /work，
 	// 两棵树没有对应关系；给宿主路径换来的是模型开局一次必然失败的 cd。
@@ -626,11 +725,12 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 			if err != nil {
 				return nil, 0, err
 			}
-			s.applyAgentOverrides(defs)
+			s.applyAgentOverrides(defs, pack)
 			return defs, domain.BudgetFor(pack, domain.RoleSpec{}).MaxDepth, nil
 		})
 	}
 	wk.SetFindingRecorder(s.evidenceStore())
+	wk.SetAttachmentRecorder(s.evidenceStore())
 	wk.SetFindingVerifier(NewEvidenceVerifier(s.evidenceStore(), nil))
 	wk.SetCompactionWindowResolver(workerRuntime.CompactionWindow)
 	wk.SetNonStreaming(workerRuntime.nonStreaming) // 按任务当前激活 profile 的流式开关(每轮读)
@@ -642,9 +742,12 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
 	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetDomain(t.Domain) // planner 的工具面也按领域裁剪（Linux 域不给 Bash，见 agent/planner.go）
+	pl.SetVulnKnowledge(s.vulnKnowledgeSearcher())
+	pl.SetHooks(t.Guard.Hooks())
 	pl.SetCampaignGate(s.campaignGate(t))
 	pl.SetCleanupGuard(s.campaignCleanupGuard(t))
 	pl.SetFindingRecorder(s.evidenceStore())
+	pl.SetAttachmentRecorder(s.evidenceStore())
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
 	pl.SetNonStreaming(plannerRuntime.nonStreaming)
 	pl.SetMaxTokens(plannerRuntime.maxTokens)
@@ -659,7 +762,9 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	// 同模型,随任务 LLM 链解析),压缩用 Complete 一次性生成 body。
 	pl.SetCompactor(agent.NewCompactor(plannerRuntime, "task-router"))
 	main := agent.NewMainAgent(mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns("mainagent"))
+	main.SetHooks(t.Guard.Hooks())
 	main.SetFindingRecorder(s.evidenceStore())
+	main.SetAttachmentRecorder(s.evidenceStore())
 	main.SetCompactionWindowResolver(mainRuntime.CompactionWindow)
 	main.SetNonStreaming(mainRuntime.nonStreaming)
 	main.SetMaxTokens(mainRuntime.maxTokens)

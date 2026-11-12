@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -92,6 +93,20 @@ func normalizeHeaders(headers map[string]string) (map[string]string, error) {
 	return out, nil
 }
 
+// applyHeaders copies configured headers onto req. Go's HTTP client ignores
+// Header["Host"]; a Host override must be written to req.Host. This matters for
+// local MCP servers (notably Burp) that reject requests with a foreign Host
+// while being reached through Docker's host.docker.internal alias.
+func applyHeaders(req *http.Request, headers map[string]string) {
+	for key, value := range headers {
+		if strings.EqualFold(key, "Host") {
+			req.Host = value
+			continue
+		}
+		req.Header.Set(key, value)
+	}
+}
+
 // New connects to a remote MCP endpoint and performs the initialize handshake.
 // headers are sent on every request (Authorization, custom API keys, …).
 // When insecure is true, TLS certificate verification is skipped so servers that
@@ -137,9 +152,7 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 		return nil, err
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	for k, v := range cleanHeaders {
-		req.Header.Set(k, v)
-	}
+	applyHeaders(req, cleanHeaders)
 	resp, err := hc.Do(req)
 	if err != nil {
 		cancel()
@@ -303,8 +316,10 @@ func (c *Client) wrap(rt remoteTool) actool.CoreTool {
 			}
 			var res struct {
 				Content []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
+					Type     string `json:"type"`
+					Text     string `json:"text"`
+					Data     string `json:"data"`
+					MIMEType string `json:"mimeType"`
 				} `json:"content"`
 				IsError bool `json:"isError"`
 			}
@@ -313,7 +328,35 @@ func (c *Client) wrap(rt remoteTool) actool.CoreTool {
 			}
 			var text string
 			for _, blk := range res.Content {
-				text += blk.Text
+				switch blk.Type {
+				case "image":
+					if tc == nil || tc.ArtifactSink == nil {
+						text += "[image output omitted: no artifact sink]"
+						continue
+					}
+					data, err := base64.StdEncoding.DecodeString(blk.Data)
+					if err != nil {
+						text += "[image decode failed]"
+						continue
+					}
+					name := "screenshot"
+					if blk.MIMEType == "image/jpeg" {
+						name += ".jpg"
+					} else {
+						name += ".png"
+					}
+					path, err := tc.ArtifactSink(ctx, tc, name, blk.MIMEType, data)
+					if err != nil {
+						text += "[image save failed: " + err.Error() + "]"
+						continue
+					}
+					if text != "" {
+						text += "\n"
+					}
+					text += "[截图为二进制证据，已保存为 " + path + "；先调用 attach_finding_attachment 绑定 finding_id]"
+				default:
+					text += blk.Text
+				}
 			}
 			// 与内置/自定义工具一致：超长输出走 Capture——按会话 MaxOutputChars（默认
 			// 30000）截断，配了 ToolOutputDir 时全量溢写到磁盘只留 head + 指针，避免大
@@ -379,9 +422,7 @@ func (c *Client) Close() error {
 		return nil
 	}
 	req.Header.Set("Mcp-Session-Id", sid)
-	for k, v := range c.headers {
-		req.Header.Set(k, v)
-	}
+	applyHeaders(req, c.headers)
 	if resp, err := c.http.Do(req); err == nil {
 		resp.Body.Close()
 	}
@@ -435,9 +476,7 @@ func (c *Client) roundTrip(ctx context.Context, body rpcRequest, expectResp bool
 		version = protocolVersion
 	}
 	req.Header.Set("MCP-Protocol-Version", version)
-	for k, v := range c.headers {
-		req.Header.Set(k, v)
-	}
+	applyHeaders(req, c.headers)
 	c.mu.Lock()
 	sid := c.sessionID
 	c.mu.Unlock()
@@ -506,9 +545,7 @@ func (c *Client) legacyRoundTrip(ctx context.Context, body rpcRequest, expectRes
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	for k, v := range c.headers {
-		req.Header.Set(k, v)
-	}
+	applyHeaders(req, c.headers)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -534,7 +571,7 @@ func (c *Client) legacyRoundTrip(ctx context.Context, body rpcRequest, expectRes
 // response matching wantID (server-to-client requests/notifications are skipped).
 func parseSSE(r io.Reader, wantID int) (*rpcResponse, error) {
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), 32*1024*1024)
 	var dataBuf strings.Builder
 	flush := func() (*rpcResponse, bool) {
 		if dataBuf.Len() == 0 {

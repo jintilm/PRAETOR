@@ -29,6 +29,7 @@ func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
 	if !s.engine.beginTaskOperation(t.ID) {
 		return
 	}
+	s.recordTaskScopeSeeds(t, seedText)
 	s.seed(t, seedText)
 	if seedFirstIntent {
 		s.seedFirstIntent(t)

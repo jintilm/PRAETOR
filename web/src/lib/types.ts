@@ -34,6 +34,30 @@ export const DYNAMIC_OPS: { value: string; label: string }[] = [
   { value: "cleanup", label: "收尾清理" },
 ];
 
+// 后端 /api/dynamic-ops 的运行时目录。ops 闭集以服务端为唯一事实来源，
+// device_mode 决定 mobile_* 工具是否注入（签发授权并不等于后端开了设备模式）。
+export interface DynamicOpsCatalog {
+  ops: string[];
+  descriptions: Record<string, string>;
+  min_hours: number;
+  max_hours: number;
+  default_hours: number;
+  device_mode: boolean;
+  adb_addr: string;
+  traffic_addr: string;
+}
+
+// dynamicOpOptions：ops 顺序与取值跟随后端，标签优先用本地短标签；
+// 后端新增 op 而前端还没发版时，自动回落成后端描述，不会出现"勾不到"的选项。
+export function dynamicOpOptions(catalog?: DynamicOpsCatalog | null): { value: string; label: string }[] {
+  const values = catalog?.ops.length ? catalog.ops : DYNAMIC_OPS.map((o) => o.value);
+  const descriptions = catalog?.descriptions;
+  return values.map((value) => ({
+    value,
+    label: DYNAMIC_OPS.find((o) => o.value === value)?.label ?? descriptions?.[value] ?? value,
+  }));
+}
+
 export interface DynamicGrantInput {
   enabled: boolean;
   written_authorization: boolean;
@@ -85,6 +109,18 @@ export interface DynamicGrantAudit {
   reason: string;
   operator: string;
   created_at: string;
+}
+
+// 报告模板使用的移动端目标信息。来源：任务动态授权记录 + 发现正文解析，
+// 三套模板共用同一份数据，报告页与导出内容因此不会给出不同结论。
+export interface MobileMeta {
+  platform: string;
+  package: string;
+  version: string;
+  device_serial: string;
+  apk_sha256: string;
+  source: string;
+  present: boolean;
 }
 
 export interface DeviceProbeResult {
@@ -588,6 +624,7 @@ export interface FindingAsset {
 
 export interface Finding {
   traffic_count?: number;
+  attachment_count?: number;
   evidence_version?: number;
   report_evidence_version?: number;
   report_stale?: boolean;
@@ -607,7 +644,28 @@ export interface Finding {
   source_task_id?: string;
   inherited?: boolean;
   assets?: FindingAsset[];
+  attachments?: FindingAttachment[];
   ts: string;
+}
+
+export type FindingAttachmentKind = "screenshot" | "burp_screenshot" | "http_capture" | "file";
+export type FindingAttachmentSource = "manual_upload" | "browser_mcp" | "burp_mcp" | "host_capture" | "workspace";
+
+export interface FindingAttachment {
+  id: number;
+  finding_id: number;
+  kind: FindingAttachmentKind;
+  source: FindingAttachmentSource;
+  source_ref?: string;
+  filename: string;
+  mime_type: string;
+  size: number;
+  sha256: string;
+  role: TrafficEvidenceRole;
+  caption: string;
+  position: number;
+  metadata?: Record<string, unknown>;
+  created_at: string;
 }
 
 // FindingsPage 是发现列表的服务端分页响应。
@@ -665,6 +723,69 @@ export interface FindingTaskOption {
   name?: string; // 可选任务名称;空/缺省=未命名
   description: string;
   count: number;
+}
+
+export type VulnKnowledgeStatus = "candidate" | "active" | "deprecated";
+export type VulnKnowledgeKind = "pattern" | "technique" | "negative";
+
+export interface VulnKnowledgeItem {
+  id: number;
+  kind: VulnKnowledgeKind;
+  title: string;
+  summary: string;
+  vuln_class: string;
+  cwe: string;
+  severity: string;
+  technology: string[];
+  preconditions: string;
+  test_steps: string;
+  expected_signals: string;
+  false_positive_checks: string;
+  source_kind: string;
+  source_ref: string;
+  license: string;
+  confidence: number;
+  status: VulnKnowledgeStatus;
+  version: number;
+  usage_count: number;
+  success_count: number;
+  false_positive_count: number;
+  last_verified_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VulnKnowledgeSource {
+  finding_id: number;
+  task_id?: number;
+  task_name?: string;
+  task_description?: string;
+  finding_name?: string;
+  vuln_class?: string;
+  severity?: string;
+  created_at: string;
+}
+
+export interface VulnKnowledgeDetail extends VulnKnowledgeItem {
+  sources: VulnKnowledgeSource[];
+}
+
+export interface VulnKnowledgePage {
+  items: VulnKnowledgeItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface VulnKnowledgeStats {
+  total: number;
+  candidate: number;
+  active: number;
+  deprecated: number;
+  verified_sources: number;
+  search_uses: number;
+  successful_uses: number;
+  false_positive_uses: number;
 }
 
 // FindingQuery 是发现列表分页/筛选/排序参数。
@@ -1178,6 +1299,8 @@ export interface LLMProfile {
   // 自定义会话头名：非空时每次请求带该 HTTP 头，头值=当前会话/意图的 session id。
   // ""=不发送。用于按 session-id 头做提示缓存/粘性路由的网关。
   session_header_key?: string;
+  // true = 本地/私有部署。LocalOnly 领域（如逆向）只能使用此类配置。
+  local_only?: boolean;
   // 本配置对重试的覆盖（建连/空响应/同 provider 安全窗口）。留空/全 0 = 跟随全局策略。
   retry?: LLMRetryOverride;
 }
@@ -1780,8 +1903,20 @@ export interface ComponentJob {
   finished_at: string;
 }
 
+// 组件预置：后端按 PresetItems 展开后的完整 ID 集合（含 Base），
+// 点一下只是"一键勾选"，仍需点「应用」才真正构建镜像。
+export interface ComponentPreset {
+  id: string;
+  title: string;
+  why: string;
+  ids: string[];
+  image: string;
+  total_mb: number;
+}
+
 export interface ComponentsResp {
   items: ComponentItem[];
+  presets: ComponentPreset[];
   selected: string[] | null;
   image: string;
   base_image: string;

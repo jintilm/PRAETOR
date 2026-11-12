@@ -245,7 +245,7 @@ type LeadRunner interface {
 // 工具名会加 mcp__<Name>__ 前缀（与 norma/mcp 约定一致）。
 type MCPRef struct {
 	Name      string            // 命名空间，如 ghidra / rea / hexstrike
-	Transport string            // "stdio" | "http"
+	Transport string            // "stdio" | "http" | "sse"
 	Command   string            // stdio 时的可执行
 	Args      []string          // stdio 参数
 	URL       string            // http 时的地址

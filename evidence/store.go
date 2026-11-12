@@ -373,7 +373,9 @@ WHERE unreferenced_at IS NULL AND NOT EXISTS(SELECT 1 FROM finding_traffic_bindi
 AND NOT EXISTS(SELECT 1 FROM finding_traffic_bindings b WHERE b.snapshot_id=s.id)`, now.Add(-24*time.Hour)); err != nil {
 			return err
 		}
-		rows, err := tx.Query(`SELECT req_hash FROM traffic_evidence_snapshots UNION SELECT resp_hash FROM traffic_evidence_snapshots`)
+		rows, err := tx.Query(`SELECT req_hash FROM traffic_evidence_snapshots
+UNION SELECT resp_hash FROM traffic_evidence_snapshots
+UNION SELECT sha256 FROM finding_attachments`)
 		if err != nil {
 			return err
 		}

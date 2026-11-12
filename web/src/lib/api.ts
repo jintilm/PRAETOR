@@ -24,8 +24,6 @@ import type {
   CommandRecord,
   Company,
   CompanyScopeMutation,
-  ComponentItem,
-  ComponentJob,
   ComponentProbe,
   ComponentsResp,
   PersonaAudit,
@@ -40,6 +38,8 @@ import type {
   DynamicGrantInput,
   DynamicGrantRecord,
   DynamicGrantAudit,
+  DynamicOpsCatalog,
+  MobileMeta,
   UsageSummary,
   CtfBoard,
   DeleteTaskOptions,
@@ -51,6 +51,7 @@ import type {
   ExplorationNodeQuery,
   Finding,
   FindingAssetTree,
+  FindingAttachment,
   FindingDeepenResponse,
   FindingGroupsPage,
   FindingQuery,
@@ -118,6 +119,9 @@ import type {
   TrafficResp,
   UpdateCheck,
   UsageStats,
+  VulnKnowledgeDetail,
+  VulnKnowledgePage,
+  VulnKnowledgeStats,
   WorkspaceFile,
   WorkspaceListing,
 } from "@/lib/types";
@@ -305,10 +309,9 @@ export const api = {
     }),
   // ---- Android 真机动态授权 ----
   // 授权只能随任务创建签发一次；下面只有只读探测/查询与撤销，没有创建/修改入口。
-  dynamicOps: () =>
-    get<{ ops: string[]; descriptions: Record<string, string>; min_hours: number; max_hours: number; default_hours: number }>(
-      "/dynamic-ops",
-    ),
+  dynamicOps: () => get<DynamicOpsCatalog>("/dynamic-ops"),
+  // 报告页展示的移动端目标信息（与导出模板取自同一后端函数）。
+  taskMobileMeta: (id: string) => get<MobileMeta>(`/tasks/${encodeURIComponent(id)}/mobile-meta`),
   mobileDevices: (serial?: string) =>
     get<DeviceProbeResult>(`/mobile/devices${serial ? `?serial=${encodeURIComponent(serial)}` : ""}`),
   taskDynamicGrant: (id: string) =>
@@ -628,6 +631,26 @@ export const api = {
   findingAssetTree: (q: Omit<FindingQuery, "page" | "pageSize">) =>
     get<FindingAssetTree>(`/exploration/findings/asset-tree?${findingFilterParams(q).toString()}`),
   findingStats: () => get<FindingStats>("/exploration/findings/stats"),
+  vulnKnowledgePage: (params: {
+    page?: number;
+    pageSize?: number;
+    status?: string;
+    kind?: string;
+    q?: string;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params.page) qs.set("page", String(params.page));
+    if (params.pageSize) qs.set("page_size", String(params.pageSize));
+    if (params.status && params.status !== "all") qs.set("status", params.status);
+    if (params.kind && params.kind !== "all") qs.set("kind", params.kind);
+    if (params.q?.trim()) qs.set("q", params.q.trim());
+    return get<VulnKnowledgePage>(`/vuln-kb?${qs.toString()}`);
+  },
+  vulnKnowledgeStats: () => get<VulnKnowledgeStats>("/vuln-kb/stats"),
+  vulnKnowledgeDetail: (id: number) => get<VulnKnowledgeDetail>(`/vuln-kb/${id}`),
+  updateVulnKnowledge: (id: number, body: Partial<VulnKnowledgeDetail> & { version: number }) =>
+    patch<VulnKnowledgeDetail>(`/vuln-kb/${id}`, body),
+  backfillVulnKnowledge: () => post<{ processed: number }>("/vuln-kb/backfill", {}),
   // exportFindings 触发发现页导出并下载文件。scope=selected 时传 ids(finding_id 列表);
   // scope=filtered 时传当前筛选(沿用 FindingQuery 的筛选字段);scope=all 忽略筛选。
   exportFindings: async (opts: {
@@ -666,6 +689,72 @@ export const api = {
   getFinding: (id: string, contextTaskId?: string) =>
     get<Finding>(
       `/exploration/findings/${id}${contextTaskId ? `?context_task=${encodeURIComponent(contextTaskId)}` : ""}`,
+    ),
+  findingAttachments: (id: string, contextTask?: string) =>
+    get<{ attachments: FindingAttachment[] }>(
+      `/exploration/findings/${id}/attachments${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+    ).then((r) => arr(r.attachments)),
+  uploadFindingAttachment: async (
+    id: string,
+    file: File,
+    fields: { kind: string; source?: string; role?: string; caption?: string },
+    contextTask?: string,
+  ) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("kind", fields.kind);
+    fd.append("source", fields.source ?? "manual_upload");
+    fd.append("role", fields.role ?? "proof");
+    fd.append("caption", fields.caption ?? "");
+    const token = getToken();
+    const r = await fetch(
+      `/api/exploration/findings/${id}/attachments${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: fd,
+      },
+    );
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `上传失败: ${r.status}`);
+    return (await r.json()) as FindingAttachment;
+  },
+  importFindingAttachmentFromWorkspace: (
+    id: string,
+    body: { path: string; kind?: string; role?: string; caption?: string },
+    contextTask?: string,
+  ) =>
+    post<FindingAttachment>(
+      `/exploration/findings/${id}/attachments/from-workspace${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      body,
+    ),
+  findingAttachmentBlob: async (id: string, attachmentId: number, contextTask?: string) => {
+    const token = getToken();
+    const r = await fetch(
+      `/api/exploration/findings/${id}/attachments/${attachmentId}/content${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    );
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `读取附件失败: ${r.status}`);
+    return r.blob();
+  },
+  updateFindingAttachment: (
+    id: string,
+    attachmentId: number,
+    body: { version?: number; kind?: string; role?: string; caption?: string; filename?: string },
+    contextTask?: string,
+  ) =>
+    patch<FindingAttachment>(
+      `/exploration/findings/${id}/attachments/${attachmentId}${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      body,
+    ),
+  deleteFindingAttachment: (id: string, attachmentId: number, version?: number, contextTask?: string) =>
+    del<{ deleted: boolean; id: number }>(
+      `/exploration/findings/${id}/attachments/${attachmentId}${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { version },
+    ),
+  reorderFindingAttachments: (id: string, attachment_ids: number[], version?: number, contextTask?: string) =>
+    http<{ attachments: FindingAttachment[] }>(
+      `/exploration/findings/${id}/attachments/order${contextTask ? `?context_task=${encodeURIComponent(contextTask)}` : ""}`,
+      { method: "PUT", body: JSON.stringify({ attachment_ids, version }) },
     ),
   findingTraffic: (id: string, contextTask?: string) =>
     get<FindingTraffic>(
@@ -1072,6 +1161,7 @@ export const api = {
     max_tokens?: number; // 单次回复输出上限；0=不发送，由服务端默认值决定
     max_tokens_field?: string; // ""=max_tokens(默认) | "max_completion_tokens"（仅 openai 格式）
     session_header_key?: string; // 非空=每次请求带该 HTTP 头，头值=当前会话 session id；""=不发送
+    local_only?: boolean; // true=本地/私有部署；LocalOnly 领域只允许绑定此类配置
     retry?: LLMRetryOverride; // 本配置的重试覆盖；各项留 0 = 跟随全局重试策略
   }) => post<{ id: number }>("/llm/profiles", p),
   deleteLLMProfile: (id: string) => del<{ deleted: number }>(`/llm/profiles/${id}`),

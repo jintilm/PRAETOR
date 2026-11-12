@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { api } from "@/lib/api";
-import { REPORT_TEMPLATES, reportTemplateLabel, type ReportTemplate } from "@/lib/types";
+import { REPORT_TEMPLATES, reportTemplateLabel, type MobileMeta, type ReportTemplate } from "@/lib/types";
 import { copyText } from "@/lib/utils";
 
 export function ReportTab({ taskId }: { taskId: string }) {
@@ -21,6 +21,8 @@ export function ReportTab({ taskId }: { taskId: string }) {
   const [taskTemplate, setTaskTemplate] = React.useState<ReportTemplate>("praetor");
   const [override, setOverride] = React.useState<ReportTemplate | "task">("task");
   const effective = override === "task" ? taskTemplate : override;
+  // 与导出模板取自同一个后端函数，避免页面与提交材料给出不同结论。
+  const [mobile, setMobile] = React.useState<MobileMeta | null>(null);
 
   React.useEffect(() => {
     let active = true;
@@ -35,6 +37,13 @@ export function ReportTab({ taskId }: { taskId: string }) {
     return () => {
       active = false;
     };
+  }, [taskId]);
+
+  React.useEffect(() => {
+    api
+      .taskMobileMeta(taskId)
+      .then(setMobile)
+      .catch(() => setMobile(null));
   }, [taskId]);
 
   React.useEffect(() => {
@@ -127,6 +136,22 @@ export function ReportTab({ taskId }: { taskId: string }) {
           {override !== "task" && "（临时切换，不写入任务；发现页导出时可再次选择）"}。补天 / edusrc 为一漏洞一提交，
           带「待补充」的字段需在平台表单人工确认。
         </p>
+        {mobile?.present && (
+          <div className="rounded-md border p-3 text-xs">
+            <p className="mb-2 font-medium">移动端目标（报告模板会把同一份信息写进提交材料）</p>
+            <div className="grid gap-1.5 sm:grid-cols-2">
+              <span>平台：{mobile.platform || "待补"}</span>
+              <span>应用包名 / Bundle ID：<code>{mobile.package || "待补"}</code></span>
+              <span>应用版本：{mobile.version || "待补"}</span>
+              <span>授权设备序列号：<code>{mobile.device_serial || "—"}</code></span>
+              <span className="sm:col-span-2">授权 APK SHA256：<code className="break-all">{mobile.apk_sha256 || "—"}</code></span>
+              <span className="text-muted-foreground sm:col-span-2">来源：{mobile.source || "—"}</span>
+            </div>
+            <p className="text-muted-foreground mt-2">
+              包名 / 版本由发现正文解析，可能为空；缺失项会同时出现在模板的「待补充清单」。补天沿用已有 IOT 类别。
+            </p>
+          </div>
+        )}
         {content}
       </CardContent>
     </Card>

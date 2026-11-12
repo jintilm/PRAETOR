@@ -9,6 +9,7 @@ import { ArrowLeftIcon, ArrowUpRightIcon, ShieldAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
+import { FindingAttachmentsPanel } from "@/components/finding-attachments-panel";
 import { FindingRetestPanel } from "@/components/finding-retest-panel";
 import { FindingTrafficPanel } from "@/components/finding-traffic-panel";
 import { Markdown } from "@/components/markdown";
@@ -187,6 +188,14 @@ function FindingDetailInner() {
                   )}
                 </CardContent>
               </Card>
+              <FindingAttachmentsPanel
+                key={`attachments-${id}`}
+                findingId={id}
+                contextTask={contextTaskId || undefined}
+                readOnly={finding.inherited}
+                evidenceVersion={finding.evidence_version}
+                onChanged={load}
+              />
               <FindingTrafficPanel
                 key={id}
                 findingId={id}

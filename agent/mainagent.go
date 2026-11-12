@@ -7,6 +7,7 @@ import (
 	"github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/intercept"
 	"github.com/jintilm/praetor/internal/norma/agentcore"
+	"github.com/jintilm/praetor/internal/norma/harness"
 	"github.com/jintilm/praetor/internal/norma/llm"
 	"github.com/jintilm/praetor/internal/norma/permission"
 	actool "github.com/jintilm/praetor/internal/norma/tool"
@@ -18,22 +19,24 @@ import (
 // (→planner) or direct high-priority intents (→frontier). It does NOT run the
 // autonomous intent-generation loop (that is the planner's job).
 type MainAgent struct {
-	findingRecorder FindingRecorder
-	findingVerifier FindingVerifier // nil = 未启用确定性验证
-	prov            llm.Provider
-	model           string
-	tx              *transcript.Store                      // raw LLM conversation persistence (nil = off)
-	window          int                                    // context window in tokens (for compaction)
-	windowFn        func() int                             // optional dynamic task-chain minimum
-	maxTurns        int                                    // max agent turns per run (0 = unlimited)
-	proxyAddr       string                                 // recording proxy for WebFetch (empty = direct)
-	proxyCACert     string                                 // recording proxy's CA cert path (HTTPS verify)
-	webSearch       WebSearchOpts                          // web_search tool backend selection (off by default)
-	workDir         string                                 // shared work dir (surfaced in prompt as artifact-output target)
-	steerWork       func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
-	nonStreamingFn  func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
-	noaEnabledFn    func() bool                            // resolver: use experimental noa compaction? (nil = off)
-	maxTokensFn     func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	findingRecorder    FindingRecorder
+	attachmentRecorder FindingAttachmentRecorder
+	findingVerifier    FindingVerifier // nil = 未启用确定性验证
+	prov               llm.Provider
+	model              string
+	tx                 *transcript.Store                      // raw LLM conversation persistence (nil = off)
+	window             int                                    // context window in tokens (for compaction)
+	windowFn           func() int                             // optional dynamic task-chain minimum
+	maxTurns           int                                    // max agent turns per run (0 = unlimited)
+	proxyAddr          string                                 // recording proxy for WebFetch (empty = direct)
+	proxyCACert        string                                 // recording proxy's CA cert path (HTTPS verify)
+	webSearch          WebSearchOpts                          // web_search tool backend selection (off by default)
+	workDir            string                                 // shared work dir (surfaced in prompt as artifact-output target)
+	steerWork          func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
+	nonStreamingFn     func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
+	noaEnabledFn       func() bool                            // resolver: use experimental noa compaction? (nil = off)
+	maxTokensFn        func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	hooks              harness.HookRunner                     // shared task guard / lifecycle hooks (nil = none)
 }
 
 // SetNoaEnabled wires a resolver deciding whether runs use the experimental noa
@@ -82,6 +85,11 @@ func (m *MainAgent) SetWebSearch(o WebSearchOpts) { m.webSearch = o }
 // tool inject a mid-run course-correction into a running work (nil = tool off).
 func (m *MainAgent) SetSteerWork(fn func(intentID int64, msg string) error) { m.steerWork = fn }
 
+// SetHooks wires the task's guard into the human-facing task agent. The main
+// agent can use Bash and WebFetch, so leaving it outside the guard would allow
+// the same action that a worker is forbidden to perform.
+func (m *MainAgent) SetHooks(h harness.HookRunner) { m.hooks = h }
+
 // mainAgentDefaultTmpl is the built-in EDITABLE body (段 [A]) of the main agent
 // prompt, seeded into agent_prompts. Goal is a {{.Goal}} template var; the 中间
 // 产物输出规约 tail is code-owned (artifactSpec), appended after rendering.
@@ -113,6 +121,7 @@ func mainAgentSystem(goal, dataDir, workDir string) string {
 func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.AssetStore, ts *db.ExplorationStore, goal, message string, emit func(db.Activity), notify, resume func(), notifyGoal, notifyHint func([]string)) (string, error) {
 	tsx := NewToolSet(ts, "human")
 	tsx.SetFindingRecorder(m.findingRecorder)
+	tsx.SetAttachmentRecorder(m.attachmentRecorder)
 	tsx.SetFindingVerifier(m.findingVerifier)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
@@ -158,6 +167,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		BashEnv:               proxyEnv(m.proxyAddr, m.proxyCACert), // Bash 子命令默认走代理+信任 CA
 		WorkingDir:            mainDir,                              // 本任务工作目录 <workDir>/tasks/<taskID>
 		ToolOutputDir:         cmdOutDir(mainDir),
+		ArtifactSink:          saveAgentArtifact,
 		MaxTurns:              m.maxTurns,                             // 0 = unlimited (configurable in agent management)
 		Compaction:            compactionConfig(m.compactionWindow()), // long chats stay within the window
 		Todos:                 actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢
@@ -165,6 +175,9 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 		Settlement:   wrapupSettlement("mainagent", nil),
 		NonStreaming: m.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    m.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
+	}
+	if m.hooks != nil {
+		opts.Hooks = m.hooks
 	}
 	if m.tx != nil { // persist raw human↔AI conversation; one accumulating file per segment
 		opts.Transcript = m.tx

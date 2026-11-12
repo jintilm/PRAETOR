@@ -88,6 +88,11 @@ func butianSubType(v View) string {
 }
 
 func butianCategory(v View) string {
+	// 移动端目标沿用平台已有的「IOT漏洞」，不新增类别：补天表单是固化字段，
+	// 新增类别会动到 13 个细分类型与联动下拉，收益不抵维护成本（2026-11-11 决策）。
+	if v.Mobile.Any() {
+		return ButianCategoryIOT
+	}
 	hay := strings.ToLower(v.VulnClass + " " + v.Name)
 	for _, k := range []string{"iot", "物联网", "固件", "路由器", "摄像头", "工控", "智能设备", "硬件"} {
 		if strings.Contains(hay, k) {
@@ -143,6 +148,8 @@ func renderButian(v View) string {
 	// 漏洞类别
 	fmt.Fprintf(&b, "## 漏洞类别\n\n- 建议：%s（可选项：%s / %s，请按资产类型确认）\n\n",
 		butianCategory(v), ButianCategoryWeb, ButianCategoryIOT)
+
+	b.WriteString(v.Mobile.Markdown())
 
 	// 漏洞标题
 	fmt.Fprintf(&b, "## 漏洞标题\n\n%s\n\n", butianTitle(v))
@@ -213,6 +220,7 @@ func renderButian(v View) string {
 		b.WriteString("**已有证据：**\n\n" + codeBlock(e))
 	}
 	b.WriteString(v.TrafficMarkdown)
+	b.WriteString(renderAttachmentMarkdown(v))
 	b.WriteString("\n")
 
 	b.WriteString("### ② 复现过程截图 / 厂商归属证明截图\n\n")
@@ -286,6 +294,14 @@ func butianMissing(v View) []string {
 	}
 	if v.Section("复现", "重现", "利用过程", "验证过程", "PoC", "POC") == "" && strings.TrimSpace(v.Report) == "" {
 		out = append(out, "详细填写：复现过程与影响范围")
+	}
+	if v.Mobile.Any() {
+		if v.Mobile.Package == "" {
+			out = append(out, "移动端目标：应用包名 / Bundle ID")
+		}
+		if v.Mobile.Version == "" {
+			out = append(out, "移动端目标：应用版本")
+		}
 	}
 	out = append(out,
 		"复现过程截图（本地上传）",

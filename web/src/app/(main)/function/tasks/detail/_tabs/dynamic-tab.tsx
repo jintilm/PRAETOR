@@ -9,7 +9,14 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { api } from "@/lib/api";
-import { DYNAMIC_OPS, type DeviceProbeResult, type DynamicGrantAudit, type DynamicGrantRecord } from "@/lib/types";
+import {
+  dynamicOpOptions,
+  type DeviceProbeResult,
+  type DynamicGrantAudit,
+  type DynamicGrantRecord,
+  type DynamicOpsCatalog,
+  type WorkspaceEntry,
+} from "@/lib/types";
 import { toast } from "sonner";
 
 const STATE_LABEL: Record<string, string> = {
@@ -19,8 +26,8 @@ const STATE_LABEL: Record<string, string> = {
   expired: "已过期",
 };
 
-function opLabel(op: string): string {
-  return DYNAMIC_OPS.find((x) => x.value === op)?.label ?? op;
+function opLabel(op: string, catalog?: DynamicOpsCatalog | null): string {
+  return dynamicOpOptions(catalog).find((x) => x.value === op)?.label ?? op;
 }
 
 function ts(v?: string): string {
@@ -39,6 +46,10 @@ export function DynamicTab({ taskId }: { taskId: string }) {
   const [reason, setReason] = React.useState("");
   const [operator, setOperator] = React.useState("");
   const [revoking, setRevoking] = React.useState(false);
+  const [catalog, setCatalog] = React.useState<DynamicOpsCatalog | null>(null);
+  const [evidence, setEvidence] = React.useState<WorkspaceEntry[]>([]);
+  const [evidenceReady, setEvidenceReady] = React.useState(false);
+  const [preview, setPreview] = React.useState<{ name: string; content: string } | null>(null);
 
   const load = React.useCallback(() => {
     let alive = true;
@@ -68,6 +79,49 @@ export function DynamicTab({ taskId }: { taskId: string }) {
   }, [taskId]);
 
   React.useEffect(() => load(), [load]);
+
+  // 证据与运行时前置：目录不存在时 wsList 返回 404，这里当成"暂无证据"而不是错误。
+  React.useEffect(() => {
+    let alive = true;
+    api.dynamicOps()
+      .then((c) => { if (alive) setCatalog(c); })
+      .catch(() => { if (alive) setCatalog(null); });
+    // 工作空间文件浏览器的根是 data/，任务工作区是 data/work/<taskID>/，
+    // 容器内 /work 对应的正是后者，所以这里必须带 work/ 前缀。
+    api.workspaceList(`work/${taskId}/mobile`)
+      .then((r) => {
+        if (!alive) return;
+        setEvidence((r.entries ?? []).filter((e) => !e.dir));
+        setEvidenceReady(true);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setEvidence([]);
+        setEvidenceReady(true);
+      });
+    return () => { alive = false; };
+  }, [taskId]);
+
+  async function previewEvidence(entry: WorkspaceEntry) {
+    try {
+      const f = await api.workspaceRead(entry.path);
+      if (f.binary || f.too_large || f.content === undefined) {
+        toast.info("该文件不适合内联预览，请下载后查看");
+        return;
+      }
+      setPreview({ name: entry.name, content: f.content || "（空文件）" });
+    } catch (e) {
+      toast.error("读取证据失败：" + String(e));
+    }
+  }
+
+  async function downloadEvidence(entry: WorkspaceEntry) {
+    try {
+      await api.workspaceDownload(entry.path);
+    } catch (e) {
+      toast.error("下载失败：" + String(e));
+    }
+  }
 
   async function runProbe() {
     setProbing(true);
@@ -105,6 +159,13 @@ export function DynamicTab({ taskId }: { taskId: string }) {
     );
   }
 
+  const modeHint = catalog && catalog.device_mode === false ? (
+    <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-xs text-amber-700 dark:text-amber-400">
+      后端未开启 <code>PRAETOR_MOBILE_DEVICE_MODE=1</code>：授权记录可能有效，但 mobile_* 工具不会注入，任务会降级静态分析。
+      adb 落点 {catalog.adb_addr}；请在 .env 开启并重建容器。
+    </div>
+  ) : null;
+
   if (!grant) {
     return (
       <Card>
@@ -114,6 +175,7 @@ export function DynamicTab({ taskId }: { taskId: string }) {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 text-sm text-muted-foreground">
+          {modeHint}
           <p>该任务未签发动态授权，<code>mobile_*</code> 工具不会出现在 agent 工具面里；所有真机操作一律 fail-closed 降级为静态分析。</p>
           <p>授权只能由人在<strong>创建任务</strong>时显式签发一次，任务下发只传递与校验，不产生授权；创建后没有补签入口。</p>
           <Button variant="outline" size="sm" onClick={() => void runProbe()} disabled={probing}>
@@ -130,6 +192,7 @@ export function DynamicTab({ taskId }: { taskId: string }) {
 
   return (
     <div className="space-y-4">
+      {modeHint}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between space-y-0">
           <CardTitle className="text-base">Android 真机动态授权</CardTitle>
@@ -150,7 +213,7 @@ export function DynamicTab({ taskId }: { taskId: string }) {
             <p className="mb-1.5 text-xs font-medium text-muted-foreground">允许的操作集（闭集）</p>
             <div className="flex flex-wrap gap-1.5">
               {(grant.ops ?? []).map((op) => (
-                <Badge key={op} variant="outline">{opLabel(op)}</Badge>
+                <Badge key={op} variant="outline">{opLabel(op, catalog)}</Badge>
               ))}
             </div>
           </div>
@@ -210,11 +273,46 @@ export function DynamicTab({ taskId }: { taskId: string }) {
       </Card>
 
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
           <CardTitle className="text-base">动态证据</CardTitle>
+          <a
+            href={`/function/workspace?path=${encodeURIComponent(`work/${taskId}/mobile`)}`}
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+          >
+            在工作空间打开
+          </a>
         </CardHeader>
-        <CardContent className="space-y-2 text-sm text-muted-foreground">
+        <CardContent className="space-y-3 text-sm text-muted-foreground">
           <p>工具输出脱敏后落到容器可见的 <code>/work/mobile/</code>（宿主侧 <code>data/work/{taskId}/mobile/</code>，同一 bind mount，容器销毁后仍在）。</p>
+          {evidenceReady && evidence.length === 0 ? (
+            <p>暂无证据文件：任务尚未产生动态输出，或授权未生效。</p>
+          ) : (
+            <div className="divide-y rounded-md border text-xs">
+              {evidence.map((e) => (
+                <div key={e.path} className="flex flex-wrap items-center gap-2 px-3 py-2">
+                  <code className="min-w-0 flex-1 truncate" title={e.path}>{e.name}</code>
+                  <span className="text-muted-foreground">
+                    {(e.size / 1024).toFixed(1)} KB · {ts(new Date(e.mtime).toISOString())}
+                  </span>
+                  <Button variant="ghost" size="sm" onClick={() => void previewEvidence(e)}>预览</Button>
+                  <Button variant="ghost" size="sm" onClick={() => void downloadEvidence(e)}>下载</Button>
+                </div>
+              ))}
+            </div>
+          )}
+          {preview && (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-xs">
+                <code>{preview.name}</code>
+                <Button variant="ghost" size="sm" onClick={() => setPreview(null)}>关闭预览</Button>
+              </div>
+              <pre className="max-h-64 overflow-auto rounded-md border bg-muted/40 p-2 text-[11px] leading-relaxed">
+                {preview.content}
+              </pre>
+            </div>
+          )}
           <p><code>_index.jsonl</code> 是证据索引；Cookie / Token / Authorization / 完整 HTTP 报文在落盘前会被替换为哈希指纹，账号与口令按提交材料需要保留。</p>
           <p>任务落到终态时平台自动复位代理、清理临时 APK 并释放设备锁；frida-server 若由签发人手工启动，仍需自行停止。</p>
         </CardContent>
@@ -227,7 +325,7 @@ function Field({ label, value, mono }: { label: string; value?: string; mono?: b
   return (
     <div className="min-w-0">
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={`truncate ${mono ? "font-mono text-xs" : ""}`} title={value}>{value || "—"}</p>
+      <p className={`truncate ${mono ? "font-mono text-xs" : ""}`} title={value}>{value?.length ? value : "—"}</p>
     </div>
   );
 }

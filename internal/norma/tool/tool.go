@@ -60,6 +60,11 @@ type ToolContext struct {
 	//     等于绕开沙箱在宿主上写文件，比只读那个口子更严重。
 	// 所以沙箱模式下的写操作只允许落在已映射的可写挂载里（/work）。
 	SandboxWriteDeny func(string) string
+	// ArtifactSink captures binary tool output (for example a Playwright
+	// screenshot image block) without putting base64 into the model context.
+	// It returns a workspace-relative pointer that can be passed to an evidence
+	// attachment tool. Nil = binary blocks are omitted as text only.
+	ArtifactSink func(context.Context, *ToolContext, string, string, []byte) (string, error)
 }
 
 func (tc *ToolContext) progress(msg string) {

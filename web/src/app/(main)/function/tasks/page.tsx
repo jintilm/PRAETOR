@@ -129,6 +129,7 @@ import type {
   DeleteTaskResult,
   DeviceProbeResult,
   DynamicGrantInput,
+  DynamicOpsCatalog,
   LLMProfile,
   ReportTemplate,
   Task,
@@ -138,7 +139,7 @@ import type {
   TaskStatus,
   TaskDomain,
 } from "@/lib/types";
-import { DYNAMIC_OPS, REPORT_TEMPLATES, emptyDynamicGrant } from "@/lib/types";
+import { REPORT_TEMPLATES, dynamicOpOptions, emptyDynamicGrant } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // fmtBytes renders a human file size for the upload manifest.
@@ -3118,6 +3119,10 @@ function CreateTaskSheet({
   const [dynamicGrant, setDynamicGrant] = React.useState<DynamicGrantInput>(emptyDynamicGrant);
   const [deviceProbe, setDeviceProbe] = React.useState<DeviceProbeResult | null>(null);
   const [probingDevice, setProbingDevice] = React.useState(false);
+  // 运行时前置与 ops 闭集都来自后端，避免前端写死清单与后端漂移。
+  const [opsCatalog, setOpsCatalog] = React.useState<DynamicOpsCatalog | null>(null);
+  const [hashingAPK, setHashingAPK] = React.useState(false);
+  const apkFileRef = React.useRef<HTMLInputElement>(null);
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
   const [uploading, setUploading] = React.useState(false);
   const [uploadCount, setUploadCount] = React.useState(0);
@@ -3135,6 +3140,10 @@ function CreateTaskSheet({
       .companies()
       .then(setCompanies)
       .catch(() => setCompanies([]));
+    api
+      .dynamicOps()
+      .then(setOpsCatalog)
+      .catch(() => setOpsCatalog(null));
   }, []);
 
   // pickFiles uploads the chosen files into this draft's staging dir and appends their
@@ -3176,6 +3185,34 @@ function CreateTaskSheet({
       toast.error("设备探测失败：" + (e as Error).message);
     } finally {
       setProbingDevice(false);
+    }
+  }
+
+  // 选本地 APK 只算指纹并登记进授权，不上传文件：APK 本体仍需放进 /work
+  // 供 mobile_install 按路径安装。Web Crypto 只在安全上下文可用（https/localhost）。
+  async function hashAPK(file?: File) {
+    if (!file) return;
+    if (!globalThis.crypto?.subtle) {
+      toast.error("当前访问环境不支持 Web Crypto（需 https 或 localhost），请用 sha256sum 手动计算");
+      return;
+    }
+    if (file.size > 300 * 1024 * 1024) {
+      toast.error("APK 超过 300MB，请用 sha256sum 计算后手动填入，避免浏览器内存吃紧");
+      return;
+    }
+    setHashingAPK(true);
+    try {
+      const digest = await globalThis.crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+      const hex = Array.from(new Uint8Array(digest))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+      patchGrant({ apk_sha256: hex });
+      toast.success(`SHA256 已登记：${hex.slice(0, 12)}…`);
+    } catch (e) {
+      toast.error("计算 SHA256 失败：" + (e as Error).message);
+    } finally {
+      setHashingAPK(false);
+      if (apkFileRef.current) apkFileRef.current.value = "";
     }
   }
 
@@ -3435,6 +3472,18 @@ function CreateTaskSheet({
                 </span>
               </CollapsibleTrigger>
               <CollapsibleContent className="grid gap-5 pt-5">
+                {opsCatalog && opsCatalog.device_mode === false && (
+                  <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-xs text-amber-700 dark:text-amber-400">
+                    后端未开启 <code>PRAETOR_MOBILE_DEVICE_MODE=1</code>：即使此处签发授权，9 个 mobile_* 工具也不会注入，
+                    任务会静默降级到静态分析。请在 .env 开启并重建容器（adb 落点 {opsCatalog.adb_addr}）。
+                  </div>
+                )}
+                {opsCatalog?.device_mode && (
+                  <p className="text-muted-foreground text-xs">
+                    后端设备模式已开启 · adb 落点 <code>{opsCatalog.adb_addr}</code>
+                    {opsCatalog.traffic_addr ? ` · 代理监听 ${opsCatalog.traffic_addr}` : ""}
+                  </p>
+                )}
                 <div className="grid gap-2">
                   <label htmlFor="dynamic-grant-enabled" className="flex items-center gap-2 text-sm">
                     <Checkbox
@@ -3499,23 +3548,47 @@ function CreateTaskSheet({
                       </div>
                       <div className="grid gap-2">
                         <Label htmlFor="dynamic-grant-apk">目标 APK SHA256</Label>
-                        <Input
-                          id="dynamic-grant-apk"
-                          value={dynamicGrant.apk_sha256}
-                          onChange={(e) => patchGrant({ apk_sha256: e.target.value })}
-                          placeholder="64 位十六进制"
-                        />
+                        <div className="flex gap-2">
+                          <Input
+                            id="dynamic-grant-apk"
+                            value={dynamicGrant.apk_sha256}
+                            onChange={(e) => patchGrant({ apk_sha256: e.target.value })}
+                            placeholder="64 位十六进制"
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="shrink-0"
+                            disabled={hashingAPK}
+                            onClick={() => apkFileRef.current?.click()}
+                          >
+                            {hashingAPK ? "计算中" : "选 APK 自动算"}
+                          </Button>
+                          <input
+                            ref={apkFileRef}
+                            type="file"
+                            accept=".apk"
+                            className="hidden"
+                            onChange={(e) => void hashAPK(e.target.files?.[0])}
+                          />
+                        </div>
+                        <p className="text-muted-foreground text-xs">
+                          这里只登记指纹用于安装前校验，不上传文件；APK 本体仍需上传到工作空间 /work 后由工具按路径安装。
+                        </p>
                       </div>
                       <div className="grid gap-2">
-                        <Label htmlFor="dynamic-grant-hours">有效期（小时，1~168）</Label>
+                        <Label htmlFor="dynamic-grant-hours">
+                          有效期（小时，{opsCatalog?.min_hours ?? 1}~{opsCatalog?.max_hours ?? 168}）
+                        </Label>
                         <Input
                           id="dynamic-grant-hours"
                           type="number"
-                          min={1}
-                          max={168}
+                          min={opsCatalog?.min_hours ?? 1}
+                          max={opsCatalog?.max_hours ?? 168}
                           className="w-32"
                           value={dynamicGrant.valid_hours}
-                          onChange={(e) => patchGrant({ valid_hours: Number(e.target.value) || 8 })}
+                          onChange={(e) => patchGrant({ valid_hours: Number(e.target.value) || (opsCatalog?.default_hours ?? 8) })}
                         />
                       </div>
                     </div>
@@ -3540,7 +3613,7 @@ function CreateTaskSheet({
                     <div className="grid gap-2">
                       <Label>允许的操作（闭集白名单，服务端复核）</Label>
                       <div className="grid gap-2 sm:grid-cols-2">
-                        {DYNAMIC_OPS.map((op) => (
+                        {dynamicOpOptions(opsCatalog).map((op) => (
                           <label key={op.value} htmlFor={`dynamic-op-${op.value}`} className="flex items-center gap-2 text-sm">
                             <Checkbox
                               id={`dynamic-op-${op.value}`}

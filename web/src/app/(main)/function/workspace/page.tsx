@@ -92,7 +92,9 @@ export default function WorkspacePage() {
   );
 
   React.useEffect(() => {
-    load("");
+    // 任务详情页「在工作空间打开」会带 ?path=work/<taskID>/mobile 深链进来。
+    // 在 effect 里读 location，避免 useSearchParams 的 Suspense / 预渲染约束。
+    load(new URLSearchParams(window.location.search).get("path") ?? "");
   }, [load]);
 
   const crumbs = React.useMemo(() => {

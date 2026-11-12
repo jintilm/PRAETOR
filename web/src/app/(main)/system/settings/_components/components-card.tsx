@@ -2,6 +2,8 @@
 
 import * as React from "react";
 
+import { toast } from "sonner";
+
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,9 +23,10 @@ const GROUP_LABELS: Record<string, string> = {
   rev: "逆向分析",
   crypto: "密码学",
   forensics: "取证 / 隐写",
+  mobile: "移动端 / App 安全",
 };
 
-const GROUP_ORDER = ["pwn", "rev", "crypto", "forensics"];
+const GROUP_ORDER = ["pwn", "rev", "crypto", "forensics", "mobile"];
 
 type ProbeState = "unknown" | "ok" | "missing";
 
@@ -106,7 +109,11 @@ export function ComponentsCard() {
     setSel((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
   const items = data?.items ?? [];
+  const presets = data?.presets ?? [];
   const totalMB = items.filter((i) => sel.includes(i.id)).reduce((n, i) => n + i.size_mb, 0);
+  // 当前勾选恰好等于某个预置（忽略顺序）时高亮它，避免用户以为预置没生效。
+  const selKey = [...sel].sort().join(",");
+  const activePreset = presets.find((p) => [...p.ids].sort().join(",") === selKey)?.id ?? "";
   const dirty = React.useMemo(() => {
     const saved = data?.selected ?? [];
     if (saved.length !== sel.length) return true;
@@ -174,7 +181,7 @@ export function ComponentsCard() {
       <CardHeader>
         <CardTitle>可选组件（沙箱镜像）</CardTitle>
         <CardDescription>
-          这些是<strong>可选加速器</strong>：不选也能正常跑，只是逆向 / CTF 的深度能力会浅一些。
+          这些是<strong>可选加速器</strong>：不选也能正常跑，只是 CTF / 逆向 / 移动端分析的深度能力会浅一些。
           选中后点「应用」，系统会在<strong>沙箱镜像</strong>里安装（不动你的宿主机），
           失败可切回基础镜像一键回滚。
         </CardDescription>
@@ -191,6 +198,32 @@ export function ComponentsCard() {
               <span>·</span>
               <span>基础镜像：<code className="rounded bg-muted px-1 py-0.5">{data?.base_image}</code></span>
             </div>
+
+            {presets.length > 0 && (
+              <div className="space-y-2">
+                <div className="text-xs text-muted-foreground">
+                  一键预置（后端已展开基础层，点完仍需按「应用」才会构建镜像）
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {presets.map((p) => (
+                    <Button
+                      key={p.id}
+                      type="button"
+                      size="sm"
+                      variant={activePreset === p.id ? "default" : "outline"}
+                      disabled={running}
+                      title={`${p.why} · 共 ${p.ids.length} 项 · 约 ${p.total_mb}MB`}
+                      onClick={() => {
+                        setSel([...p.ids]);
+                        toast.success(`已勾选「${p.title}」${p.ids.length} 项，点「应用」生效`);
+                      }}
+                    >
+                      {p.title} · {p.total_mb}MB
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {grouped.map((g) => (

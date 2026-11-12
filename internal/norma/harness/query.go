@@ -50,6 +50,7 @@ type QueryInput struct {
 	// per-tool output budget (head size; 0 = default 30000). See tool.Capture.
 	ToolOutputDir      string
 	MaxToolOutputChars int
+	ArtifactSink       func(context.Context, *tool.ToolContext, string, string, []byte) (string, error)
 
 	// Tasks, when non-nil, is the background-task manager shared with the tools.
 	// The loop drains its completion notifications into the conversation between

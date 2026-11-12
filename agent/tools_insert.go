@@ -645,7 +645,7 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 	tools := []actool.CoreTool{
 		// list_findings 保留：报漏洞前先查本任务已确认漏洞，避免重复上报同一漏洞。
 		t.listFindings(),
-		t.addFinding(), t.recordFact(),
+		t.addFinding(), t.addFindingAttachmentTool(), t.recordFact(),
 		// verify_finding：确定性重放验证（P1-2）。只给 worker —— 它是唯一负责证据与复现的角色。
 		t.verifyFinding(),
 		// asset management (handlers guard nil store internally)。
@@ -660,6 +660,7 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		// 以下工具仍【不给】worker，只留给 planner/main（读上下文、跨 work 复盘是规划职责，
 		// worker 只做单条意图的执行与写回）：list_facts / list_companies / list_worker_traces。
 	}
+	tools = append(tools, t.searchVulnKnowledgeTool())
 	// 领域专属工具按任务领域裁剪（见 ToolSet.SetDomain）：
 	// 渗透任务的 worker 不需要逆向/CTF 工具，多给一个就是每轮多付一份 schema。
 	return append(tools, t.domainTools()...)
@@ -704,7 +705,7 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 		t.setConstraints(),
 		// asset management (handlers guard nil store internally)
 		t.insertAssets(), t.addCompanyScope(), t.listAssets(),
-		t.addFinding(), t.recordFact(),
+		t.addFinding(), t.addFindingAttachmentTool(), t.recordFact(),
 		t.addTaskScope(),
 		// list_untested_assets：按需查本任务范围内未测资产(类型+分页)，自行决定补测。
 		t.listUntestedAssets(),

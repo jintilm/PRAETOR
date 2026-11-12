@@ -85,6 +85,7 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 			b.WriteString("\n\n")
 		}
 		b.WriteString(findingTrafficMarkdown(f, false))
+		b.WriteString(findingAttachmentsMarkdown(f, true))
 		b.WriteString("---\n\n")
 	}
 	return b.String()
@@ -116,6 +117,7 @@ func SingleFindingMarkdown(f *db.DBFinding, generatedAt time.Time) string {
 		b.WriteString("\n")
 	}
 	b.WriteString(findingTrafficMarkdown(f, true))
+	b.WriteString(findingAttachmentsMarkdown(f, true))
 	return b.String()
 }
 
@@ -149,7 +151,7 @@ func FindingsCSV(fs []*db.DBFinding) []byte {
 	var buf bytes.Buffer
 	buf.WriteString("\xEF\xBB\xBF") // UTF-8 BOM
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"ID", "名称", "类别", "严重等级", "状态", "所属任务", "发现时间", "概述", "流量证据数量", "流量证据ID"})
+	_ = w.Write([]string{"ID", "名称", "类别", "严重等级", "状态", "所属任务", "发现时间", "概述", "流量证据数量", "流量证据ID", "附件数量", "附件文件"})
 	for _, f := range items {
 		_ = w.Write([]string{
 			fmt.Sprintf("%d", f.ID),
@@ -161,10 +163,19 @@ func FindingsCSV(fs []*db.DBFinding) []byte {
 			f.CreatedAt.Format("2006-01-02 15:04:05"),
 			strings.TrimSpace(f.Summary),
 			fmt.Sprint(len(f.TrafficBindings)), findingTrafficIDs(f),
+			fmt.Sprint(len(f.Attachments)), findingAttachmentNames(f),
 		})
 	}
 	w.Flush()
 	return buf.Bytes()
+}
+
+func findingAttachmentNames(f *db.DBFinding) string {
+	names := make([]string, 0, len(f.Attachments))
+	for _, a := range f.Attachments {
+		names = append(names, a.Filename)
+	}
+	return strings.Join(names, ",")
 }
 
 func findingTrafficIDs(f *db.DBFinding) string {
@@ -193,6 +204,30 @@ func findingTrafficMarkdown(f *db.DBFinding, attachments bool) string {
 		}
 		if attachments {
 			fmt.Fprintf(&out, "   [请求报文](evidence/%d/%d/request.http) · [响应报文](evidence/%d/%d/response.http)\n", f.ID, b.ID, f.ID, b.ID)
+		}
+	}
+	out.WriteString("\n")
+	return out.String()
+}
+
+func findingAttachmentsMarkdown(f *db.DBFinding, links bool) string {
+	if len(f.Attachments) == 0 {
+		return ""
+	}
+	var out strings.Builder
+	out.WriteString("\n## 证据附件\n\n")
+	for _, a := range f.Attachments {
+		label := strings.TrimSpace(a.Caption)
+		if label == "" {
+			label = a.Filename
+		}
+		if links && strings.HasPrefix(a.MIMEType, "image/") {
+			fmt.Fprintf(&out, "![%s](evidence/%d/attachments/%d-%s)\n\n",
+				strings.ReplaceAll(label, "]", "\\]"), f.ID, a.ID, safeAttachmentReportName(a.Filename))
+		}
+		fmt.Fprintf(&out, "- 文件：`%s`（%s，%d 字节）\n", a.Filename, nz(a.Role, "supporting"), a.Size)
+		if a.Source != "" {
+			fmt.Fprintf(&out, "  来源：%s\n", a.Source)
 		}
 	}
 	out.WriteString("\n")

@@ -60,18 +60,19 @@ type WebSearchOpts struct {
 }
 
 type Worker struct {
-	findingRecorder FindingRecorder
-	findingVerifier FindingVerifier // nil = 未启用确定性验证
-	prov            llm.Provider
-	model           string
-	workDir         string
-	proxyAddr       string
-	proxyCACert     string            // recording proxy's CA cert path (for WebFetch HTTPS verify)
-	webSearch       WebSearchOpts     // web_search tool backend selection (off by default)
-	tx              *transcript.Store // raw LLM conversation persistence (nil = off)
-	window          int               // context window in tokens (for compaction)
-	windowFn        func() int        // optional dynamic task-chain minimum
-	maxTurns        int               // max agent turns per run (0 = unlimited)
+	findingRecorder    FindingRecorder
+	attachmentRecorder FindingAttachmentRecorder
+	findingVerifier    FindingVerifier // nil = 未启用确定性验证
+	prov               llm.Provider
+	model              string
+	workDir            string
+	proxyAddr          string
+	proxyCACert        string            // recording proxy's CA cert path (for WebFetch HTTPS verify)
+	webSearch          WebSearchOpts     // web_search tool backend selection (off by default)
+	tx                 *transcript.Store // raw LLM conversation persistence (nil = off)
+	window             int               // context window in tokens (for compaction)
+	windowFn           func() int        // optional dynamic task-chain minimum
+	maxTurns           int               // max agent turns per run (0 = unlimited)
 	// runTimeout is the wall-clock budget for the main exploration of one intent
 	// (0 = unlimited). When it fires, the run is cut and a settlement round is
 	// forced so already-identified facts get written back instead of being lost.
@@ -134,7 +135,8 @@ type Worker struct {
 	noaEnabledFn func() bool
 	// maxTokensFn resolves the per-reply output cap in tokens, on the same
 	// per-run basis. nil or 0 = send no cap and let the endpoint decide.
-	maxTokensFn func() int
+	maxTokensFn   func() int
+	vulnKnowledge VulnKnowledgeSearcher
 }
 
 // WorkerSessionID returns the stable transcript key used by a worker intent.
@@ -166,6 +168,8 @@ func hasWorkerChatMessage(messages []llm.Message, requestID string) bool {
 // run so a profile or task-chain toggle takes effect without rebuilding.
 // SetDomain 设置任务领域：worker 的工具面按领域裁剪（逆向/CTF 专属工具不进渗透任务）。
 func (w *Worker) SetDomain(domainKey string) { w.domain = domainKey }
+
+func (w *Worker) SetVulnKnowledge(s VulnKnowledgeSearcher) { w.vulnKnowledge = s }
 
 // SetCTFSubmitter 注入 CTF 判题后端（nil = ctf_submit 明确报不可用）。
 func (w *Worker) SetCTFSubmitter(s CTFSubmitter) { w.ctfSubmitter = s }
@@ -559,7 +563,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	tsx.SetCTFChallengeSource(w.ctfChallenge)
 	tsx.SetCTFBoard(w.ctfBoard)
 	tsx.SetFindingRecorder(w.findingRecorder)
+	tsx.SetAttachmentRecorder(w.attachmentRecorder)
 	tsx.SetFindingVerifier(w.findingVerifier)
+	tsx.SetVulnKnowledge(w.vulnKnowledge)
 	tsx.SetTaskID(taskID)
 	tsx.SetDefaultIntent(intent.ID)     // 图写回归口：子 agent（solver）没传 intent_id 时落到本意图
 	tsx.SetCampaignGate(w.campaignGate) // 红队战役：前置未满足的意图不下发（nil = 非战役域）
@@ -657,6 +663,8 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 				ParentTools: tool.NewRegistry(fullTools...),
 				Agents:      defs,
 				MaxDepth:    maxDepth,
+				Hooks:       hooks,
+				Transcript:  w.tx,
 				BaseCtx:     func(context.Context) context.Context { return baseCtx },
 				// 派生的每个角色都带 agent_type 进用量账本(worker 泳道不变)。不接的话
 				// solver/re_analyst 的消耗全混在 worker 行里,"哪个角色贵"只能猜 ——
@@ -795,6 +803,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		// 12000 字符仍够看清一个页面的结构/表单/链接（真正需要全文时 agent 可以
 		// Read 落盘的 cmd-output 文件——spill 保留了全文，只是不塞进上下文）。
 		ToolOutputDir:      cmdOutDir(runDir),
+		ArtifactSink:       saveAgentArtifact,
 		MaxToolOutputChars: 12000,
 		Compaction:         compactionConfig(w.compactionWindow()), // long tool-heavy runs stay within the window
 		Todos:              actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢

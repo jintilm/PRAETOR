@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -107,6 +108,25 @@ func writeFindingsZipEntriesWithTemplates(zw *zip.Writer, findings []*db.DBFindi
 				}
 			}
 		}
+		for _, a := range f.Attachments {
+			blob, _, err := store.OpenAttachment(db.FindingAttachment{SHA256: a.SHA256, Size: a.Size})
+			if err != nil {
+				return err
+			}
+			name := fmt.Sprintf("evidence/%d/attachments/%d-%s", f.ID, a.ID, safeAttachmentZipName(a.Filename))
+			w, err := zw.Create(name)
+			if err != nil {
+				blob.Close()
+				return err
+			}
+			if _, err = io.Copy(w, blob); err != nil {
+				blob.Close()
+				return err
+			}
+			if err = blob.Close(); err != nil {
+				return err
+			}
+		}
 	}
 	// 平台模板一漏洞一提交，附一份逐份待补项清单；纯 praetor 导出保持原有 zip 结构。
 	if platformSubmission {
@@ -119,6 +139,20 @@ func writeFindingsZipEntriesWithTemplates(zw *zip.Writer, findings []*db.DBFindi
 		}
 	}
 	return nil
+}
+
+func safeAttachmentZipName(name string) string {
+	name = filepath.Base(strings.TrimSpace(name))
+	name = strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r == '\x00' || r == '\r' || r == '\n' {
+			return '_'
+		}
+		return r
+	}, name)
+	if name == "" || name == "." || name == ".." {
+		return "attachment"
+	}
+	return name
 }
 
 func buildFindingsEvidenceZip(path string, findings []*db.DBFinding, stage string, now time.Time) error {

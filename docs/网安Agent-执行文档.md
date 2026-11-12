@@ -1458,3 +1458,84 @@ ctf_submissions(flag_sha256 PK, challenge_id, flag, verdict, submitted_at, raw_r
    - `DomainPack.MCP()` —— 同样没有消费点（`grep '\.MCP()'` 为空）。这也是为什么 `ctf.go` 里删掉
      `rea` MCP 声明是零风险的：它本来就只是声明。
    > 结论：**别用这三个字段的存在感判断功能是否生效**。要判断，就看有没有调用点。
+
+---
+
+## 8. 控制面统一与领域硬策略（2026-11-12）
+
+> 目标：把「看起来已实现、实际有角色绕过」的控制面收口。先做硬边界，不改调度拓扑、
+> 不增加工具、不引入新的 MCP，避免影响合法渗透路径。
+
+| ID | 任务 | 改动 / 验收 | 状态 |
+| --- | --- | --- | --- |
+| C0-1 | 所有 Agent 统一挂 guard hooks | planner、mainagent、worker、subagent 的工具调用都必须经过同一个任务级 `guard.Guard`；worker 派生子 Agent 时必须继承 hooks 与 transcript。验收：构造被 guard 拦截的 Bash 调用，四类角色都返回平台拦截原因；子 Agent sidechain transcript 可见 | 已完成（接线级） |
+| C0-2 | `ModelPolicy.LocalOnly` 进入生产模型选择 | LLM 配置增加显式 `local_only` 标记；`DomainPack.Model().LocalOnly=true` 时，Agent 绑定、任务链、全局配置和子 Agent 角色绑定都必须拒绝云端配置，不能靠 BaseURL 猜。验收：逆向任务绑定普通云配置直接报可读错误；绑定本地配置可启动；Web UI 可标记/查看该字段 | ✅ 已完成 |
+| C0-3 | `Policy.ScopeRequired` 的下发前置 | 渗透/红队任务下发时必须能从目标、CIDR 或关联企业得到显式 scope；只有目标 URL 时在 seed 阶段写入 task_scope。验收：无目标且无企业的 pentest 任务在创建接口返回 400；明确目标可正常创建；CTF/逆向不受该前置影响 | ✅ 已完成 |
+| C0-4 | 回归与文档 | 补 C0-1/2/3 单测；更新 README 的模型配置与任务下发说明；回填本表与执行记录 | ✅ 已完成 |
+
+**实施约束**
+
+- 合法目标内的工具能力不因本批次减少；guard 只收口越界动作，不把所有 Bash 都改成人工审批。
+- 网络 scope 的逐请求强制（沙箱/代理效果边界）本批次不做半成品；本批次先保证下发前 scope 存在且可审计。
+- 现有未提交的移动端报告与 UI 改动不得被覆盖。
+
+**验收记录（2026-11-12）**
+
+- `./test-with-db.sh`：独立测试库全量 `go test -p 1 ./... -count=1` 全绿（含 agent/db/server）。
+- `go vet ./...`、`go build ./...`、`gofmt -l` 本次改动文件均通过。
+- `npm run build`：Next.js 生产构建通过（含 TypeScript 检查）。
+- 覆盖用例：`TestValidateTaskScopePolicy`、`TestTaskScopeSeedsFromText`、`TestParseTargetKeepsFullDomainWithPort`、`TestTaskRequiresLocalOnly`、`TestTaskLLMRuntimeEnforcesLocalOnly`、`TestPlannerAndMainAgentAcceptTaskHooks`，以及 HTTP 建任务的无 scope 400/有目标 201 生命周期用例。
+- C0-1 目前是接线与单测级验收；四类角色各跑一次真实“被 guard 拦截的 Bash”冒烟仍需在下一轮真机批次补，不单独为它烧模型 token。
+
+---
+
+## 9. 漏洞知识库 V1（2026-11-12）
+
+> 目标：把已验证漏洞转成可治理、可检索的漏洞模式记忆，先解决冷启动和人工审核，
+> 不做大而全的外部漏洞库导入，也不让 LLM 自述直接晋升为全局知识。
+
+| ID | 任务 | 改动 / 验收 | 状态 |
+| --- | --- | --- | --- |
+| K1-1 | 漏洞知识数据模型 | 新增 `vuln_kb` / `vuln_kb_sources` / `vuln_kb_usage`；状态 `candidate/active/deprecated`；记录来源 finding、技术栈、前置条件、测试步骤、预期信号、误报检查、置信度、版本和许可证。验收：全新库幂等建表；已验证 finding 可生成候选且重复执行不重复插入 | ✅ 已完成 |
+| K1-2 | 自动候选与治理 API | `verified` finding 自动生成候选；启动时补扫历史 verified findings；提供列表、详情、统计、编辑、启停 API。激活前必须有测试步骤/预期信号/误报检查。验收：未验证 finding 不入库；candidate 编辑后 activation；deprecated 不再被 agent 检索 | ✅ 已完成 |
+| K1-3 | 漏洞知识库 UI | 新增「漏洞知识库」页面；状态/类型/关键词筛选；详情抽屉可审核来源、补全字段、启用/停用；显示使用与成功计数。验收：空库有明确空状态；候选可编辑；来源 finding 可跳转 | ✅ 已完成 |
+| K1-4 | Agent 有界检索 | 新增只读 `search_vuln_knowledge` 工具，只检索 `active` 条目；planner/worker 可调用，返回最多 5 条、强制带来源与置信度；不把整库注入上下文。验收：无 active 条目时明确返回空；单次结果受字符/条数上限约束；工具进入 tools 目录可单独启停 | ✅ 已完成 |
+| K1-5 | 回归与文档 | 更新 README；补 DB/API/工具测试；执行全量 Go、DB、前端构建；回填状态 | ✅ 已完成 |
+
+**设计边界**
+
+- 当前只做内部 verified findings；不导入 CVE/nuclei/第三方 exploit 仓库。
+- 知识条目只保存脱敏模式和证据引用，不保存客户凭据、Cookie、完整请求体或 CTF flag。
+- 模型可读取知识，不可直接修改全局知识；启用/停用由 UI/API 操作者完成。
+- 评测/基准任务后续必须支持关闭知识检索，避免跨任务答案泄漏抬高分数。
+
+**验收记录（2026-11-12）**
+
+- `./test-with-db.sh`：独立测试库全量 `go test -p 1 ./... -count=1` 全绿（含 server 68s）。
+- `TestVulnKnowledgeLifecycle`：未验证不生成候选、verified 生成候选、重复 upsert 幂等、active 前不可检索、启用后可检索且使用计数增长。
+- `TestVulnKnowledgeAPI`：列表、详情来源、candidate → active 更新链路通过。
+- `TestSearchVulnKnowledgeToolIsBounded`：工具默认注册、输入 limit 被钳制到 5、结果包含知识内容。
+- `npm run build`：新增 `/function/vuln-kb` 路由生产构建通过。
+- 平台工具 golden 有意新增 `search_vuln_knowledge → planner,worker`，通过项目指定 `-update-seed-golden` 更新。
+
+---
+
+## 10. 漏洞截图附件 V1（2026-11-12）
+
+> 目标：让漏洞证据不再只停留在文字和流量引用；截图必须成为可持久化、可预览、
+> 可随报告和任务归档移动的一等证据。
+
+| ID | 任务 | 改动 / 验收 | 状态 |
+| --- | --- | --- | --- |
+| A1-1 | 附件数据与 blob 存储 | 新增 `finding_attachments`；PNG/JPEG 写入 `data/evidence` 内容寻址 blob；附件增删改和排序统一 bump `findings.evidence_version`；GC 同时检查流量与附件引用 | ✅ 已完成 |
+| A1-2 | 附件 API | 列表、multipart 上传、工作区导入、二进制预览/下载、编辑、删除、排序；沿用 `context_task` 继承只读与 finding 归属校验；限制 20 MiB/图、100 MiB/finding、PNG/JPEG 和图片尺寸 | ✅ 已完成 |
+| A1-3 | Agent 与 MCP 截图 | 新增 `attach_finding_attachment`；MCP image content 通过 artifact sink 落盘并只向模型返回相对路径，不把 base64 塞进上下文；Browser/Burp 均使用同一 sink | ✅ 已完成 |
+| A1-4 | UI | 漏洞详情新增截图附件卡片：上传、缩略图、原图预览、下载、说明/用途编辑、排序、删除；继承漏洞只读；Burp 截图可手工上传 | ✅ 已完成 |
+| A1-5 | 报告与导出 | `md-zip` 输出 `evidence/<finding>/attachments/` 图片；`md-single` 使用 data URI，总内嵌量超过 32 MiB 时明确要求改用 ZIP；三套报告模板和任务报告均显示附件 | ✅ 已完成 |
+| A1-6 | 归档与回归 | 任务归档快照/恢复包含附件表与 blob；补 DB、API、PNG 校验、data URI、ZIP 和归档快照测试 | ✅ 已完成 |
+
+**边界**
+
+- Burp GUI 截图仍由宿主机截屏后手工上传；Burp MCP 当前没有截图工具，不把 GUI 装进应用容器。
+- 图片快照与原始流量证据分离：流量继续走 `finding_traffic_bindings`，截图走 `finding_attachments`。
+- 主栈部署只做增量建表，不执行主数据卷重置；测试使用独立 `praetor-test` 数据库。

@@ -51,13 +51,15 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 // ToolSet exposes the PG-backed dual graph (asset + exploration) to an LLM agent.
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
-	findingRecorder FindingRecorder
-	findingVerifier FindingVerifier    // nil = 未启用确定性验证
-	ctfSubmitter    CTFSubmitter       // nil = 未配置判题后端（ctf_submit 会明确报不可用）
-	ctfChallenge    CTFChallengeSource // nil = 未配置题面来源（ctf_challenge 会明确报不可用）
-	ctfBoard        CTFBoardProvider   // nil = 未配置题目看板（ctf_board 会明确报不可用）
-	as              *db.AssetStore     // asset store (optional; nil = asset tools not available)
-	cs              *db.CompanyStore   // company store (optional)
+	findingRecorder    FindingRecorder
+	attachmentRecorder FindingAttachmentRecorder
+	findingVerifier    FindingVerifier // nil = 未启用确定性验证
+	vulnKnowledge      VulnKnowledgeSearcher
+	ctfSubmitter       CTFSubmitter       // nil = 未配置判题后端（ctf_submit 会明确报不可用）
+	ctfChallenge       CTFChallengeSource // nil = 未配置题面来源（ctf_challenge 会明确报不可用）
+	ctfBoard           CTFBoardProvider   // nil = 未配置题目看板（ctf_board 会明确报不可用）
+	as                 *db.AssetStore     // asset store (optional; nil = asset tools not available)
+	cs                 *db.CompanyStore   // company store (optional)
 	// campaignGate 是红队战役的"这一步能不能下发"闸门（nil = 非战役域）。
 	// 由 server 注入（server/campaign_gate.go）：判定逻辑在 internal/campaign，
 	// 这里只负责"在意图落地之前问一句"。
@@ -2176,14 +2178,14 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 
 // PlannerTools is the read + intent-generation + goal-judgement tool set.
 func (t *ToolSet) PlannerTools() []actool.CoreTool {
-	return []actool.CoreTool{
+	tools := []actool.CoreTool{
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
 		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
 		t.expandDigest(),
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.addIntent(), t.proveGoal(), t.goalMet(),
 		t.killWorkTool(), t.steerWorkTool(),
 		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。
-		t.addFinding(),
+		t.addFinding(), t.addFindingAttachmentTool(),
 		// list_companies：查看企业列表 + scope + 资产数（拿 company_id / 理解归属范围）。
 		t.listCompanies(),
 		// list_assets：规划时按 DSL 检索全资产库（配合 list_untested_assets 的"范围内未测"视角，
@@ -2196,4 +2198,6 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		// list_untested_assets：按需查本任务范围内未测资产(类型+分页)，自行决定补测。
 		t.listUntestedAssets(),
 	}
+	tools = append(tools, t.searchVulnKnowledgeTool())
+	return tools
 }

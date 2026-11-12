@@ -46,6 +46,7 @@ const components: Components = {
     <th className="border border-border bg-muted/60 px-2 py-1 text-left font-medium" {...p} />
   ),
   td: ({ node, ...p }) => <td className="border border-border px-2 py-1 align-top" {...p} />,
+  img: ({ node, ...p }) => <img className="my-2 max-h-[480px] max-w-full rounded-md border object-contain" {...p} />,
 };
 
 export function Markdown({ text }: { text: string }) {

@@ -177,6 +177,9 @@ type Options struct {
 	// size fed to the model (0 = default 30000).
 	ToolOutputDir      string
 	MaxToolOutputChars int
+	// ArtifactSink captures binary tool output (e.g. Playwright image blocks)
+	// outside the model context and returns a workspace-relative pointer.
+	ArtifactSink func(context.Context, *tool.ToolContext, string, string, []byte) (string, error)
 
 	// BashEnv holds extra "KEY=VALUE" entries injected into the environment of
 	// Bash subprocesses (foreground + background), overriding inherited values.
@@ -518,6 +521,7 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 		Todos:              s.opts.Todos,
 		ToolOutputDir:      s.opts.ToolOutputDir,
 		MaxToolOutputChars: s.opts.MaxToolOutputChars,
+		ArtifactSink:       s.opts.ArtifactSink,
 		Tasks:              s.tasks,
 		BashEnv:            s.opts.BashEnv,
 		PermissionMode:     s.opts.PermissionMode,

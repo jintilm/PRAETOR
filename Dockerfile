@@ -76,7 +76,7 @@ WORKDIR /app
 
 # data/（jwt.key、任务工作区等）持久化点
 VOLUME ["/app/data"]
-EXPOSE 8787 8788
+EXPOSE 8787 8798
 
 # ── ④ CI 发布目标：用交叉编译好的二进制 ──────────
 FROM runtime-base AS runtime-with-binary
@@ -91,7 +91,7 @@ COPY start.sh /app/start.sh
 RUN chmod +x /app/praetor /app/start.sh
 COPY skills/ /app/skills/
 ENTRYPOINT ["/app/start.sh"]
-CMD ["-addr", ":8787", "-proxy", ":8788"]
+CMD ["-addr", ":8787", "-proxy", ":8798"]
 
 # ── ⑤ 默认目标：从本仓库源码构建 ─────────────────
 # 放在最后 = `docker build .` 的默认行为：克隆者不用装 Go/Node 也能出镜像，
@@ -103,4 +103,4 @@ COPY start.sh /app/start.sh
 RUN chmod +x /app/praetor /app/start.sh
 COPY skills/ /app/skills/
 ENTRYPOINT ["/app/start.sh"]
-CMD ["-addr", ":8787", "-proxy", ":8788"]
+CMD ["-addr", ":8787", "-proxy", ":8798"]

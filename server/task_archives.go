@@ -188,6 +188,13 @@ func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 	if err = s.evidenceStore().CopySnapshots(s.ctx, evidenceSnapshots, filepath.Join(fileStage.payload, "evidence")); err != nil {
 		return err
 	}
+	attachmentHashes, err := pgdb.ArchiveAttachmentHashes(snapshot)
+	if err != nil {
+		return err
+	}
+	if err = s.evidenceStore().CopyAttachmentHashes(attachmentHashes, filepath.Join(fileStage.payload, "attachments")); err != nil {
+		return err
+	}
 	_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "compress", 50)
 	originalSize, compressedSize, checksum, err := writeTaskArchivePackage(archivePath, fileStage.payload, snapshot)
 	if err != nil {
@@ -282,6 +289,13 @@ func (s *Server) restoreTaskArchive(job *pgdb.TaskArchive) (runErr error) {
 	}
 	evidenceSnapshots, err := pgdb.ArchiveEvidenceSnapshots(&snapshot)
 	if err != nil {
+		return err
+	}
+	attachmentHashes, err := pgdb.ArchiveAttachmentHashes(&snapshot)
+	if err != nil {
+		return err
+	}
+	if err := s.evidenceStore().InstallAttachmentHashes(s.ctx, attachmentHashes, filepath.Join(extracted, "attachments")); err != nil {
 		return err
 	}
 	return s.evidenceStore().WithInstalledSnapshots(s.ctx, evidenceSnapshots, filepath.Join(extracted, "evidence"), func() error {

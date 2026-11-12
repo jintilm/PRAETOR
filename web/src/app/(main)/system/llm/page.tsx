@@ -328,6 +328,7 @@ function ProfileSheet({
   const [maxTokens, setMaxTokens] = React.useState("0"); // 单次回复输出上限;0=不发送
   const [maxTokensField, setMaxTokensField] = React.useState(NONE); // 上限用哪个字段名;NONE=max_tokens
   const [sessionHeaderKey, setSessionHeaderKey] = React.useState(""); // 自定义会话头名;空=不发送
+  const [localOnly, setLocalOnly] = React.useState(false); // 本地/私有部署;LocalOnly 领域只允许绑定它
   const [retry, setRetry] = React.useState<LLMRetryOverride>(ZERO_OVERRIDE); // 本配置的重试覆盖;全 0=跟随全局
   const [testing, setTesting] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
@@ -355,6 +356,7 @@ function ProfileSheet({
     setMaxTokens(String(profile?.max_tokens ?? 0));
     setMaxTokensField(fromStore(profile?.max_tokens_field));
     setSessionHeaderKey(profile?.session_header_key ?? "");
+    setLocalOnly(profile?.local_only ?? false);
     setRetry(profile?.retry ?? ZERO_OVERRIDE);
     setApiKey("");
     setKeyHint(profile?.api_key_hint ?? "");
@@ -444,6 +446,7 @@ function ProfileSheet({
         // 后端也会再做一次同样的归一化，这里只是别让 UI 送出自相矛盾的值。
         max_tokens_field: format === "openai" ? toStore(maxTokensField) : "",
         session_header_key: sessionHeaderKey.trim(),
+        local_only: localOnly,
         retry,
       });
       if (isNew) toast.success(`已新建：${name.trim()}（在卡片上「设为激活」以启用）`);
@@ -659,6 +662,15 @@ function ProfileSheet({
                 </p>
               </div>
               <Switch checked={poolExclude} onCheckedChange={setPoolExclude} aria-label="不参与轮询" />
+            </div>
+            <div className="flex items-center justify-between gap-4 border-t pt-3">
+              <div className="grid gap-0.5">
+                <Label className="text-sm">本地部署 · LocalOnly</Label>
+                <p className="text-muted-foreground text-xs">
+                  标记后可供逆向等敏感域使用。这些领域会拒绝非本地配置，也不会通过故障转移切换到云端配置。
+                </p>
+              </div>
+              <Switch checked={localOnly} onCheckedChange={setLocalOnly} aria-label="本地部署" />
             </div>
             <div className="flex items-center justify-between gap-4 border-t pt-3">
               <div className="grid gap-0.5">
@@ -918,6 +930,11 @@ export default function LLMPage() {
                           <Badge variant="outline" className="uppercase">
                             {p.format}
                           </Badge>
+                          {p.local_only && (
+                            <Badge variant="outline" className="border-sky-500/50 text-sky-600 dark:text-sky-400">
+                              本地
+                            </Badge>
+                          )}
                           <Badge variant="outline" className={cn("ml-auto", h.cls)} title={h.hint}>
                             {h.label}
                           </Badge>

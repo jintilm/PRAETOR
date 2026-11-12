@@ -71,6 +71,9 @@ type Config struct {
 	// OpenAI 推理模型(o 系列/GPT-5)只认后者,收到 max_tokens 会直接报
 	// unsupported_parameter;而多数兼容网关只认前者,故不做自动推断,交由用户按端点选。
 	MaxTokensField string
+	// LocalOnly marks a local/private model deployment. Domains declaring
+	// ModelPolicy.LocalOnly may only run on such configs.
+	LocalOnly bool
 	// SessionHeaderKey,非空时,让每次 LLM 请求带上一个自定义 HTTP 头,头名为该值、
 	// 头值为【当前会话的 session id】(chat 会话=conv-<id>,worker=exp<x>-worker-i<intent>
 	// 等,见 WorkerSessionID)。用于某些按 session-id 头做提示缓存/粘性路由的网关。
@@ -220,6 +223,9 @@ func FromEnv() (Config, bool) {
 		ReasoningEffort: strings.TrimSpace(config.Env("LLM_REASONING_EFFORT")),
 		// 默认流式;PRAETOR_LLM_STREAM=false/0/off 显式关闭走非流式。
 		Stream: !isFalsy(config.Env("LLM_STREAM")),
+		// PRAETOR_LLM_LOCAL_ONLY=true marks an environment-provided endpoint as
+		// local/private. Profile-based configs carry the same flag from DB.
+		LocalOnly: !isFalsy(config.Env("LLM_LOCAL_ONLY")) && strings.TrimSpace(config.Env("LLM_LOCAL_ONLY")) != "",
 	}
 	switch prov {
 	case "openai":

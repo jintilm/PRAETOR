@@ -9,7 +9,7 @@
 #      praetor-pgdata / praetor-pg 卷、praetor/praetor:* 与 praetor/sandbox:* 镜像。
 #      绝不执行 docker system/image/volume prune 或任何通配删除。
 #   5. 靶场网络、docker:27-cli 构建镜像、.workbuddy/、docs/、skills/ 不属于安装产物，
-#      脚本只提示、不碰。别的 compose 项目（尤其旧 ARTEX 栈）一律不碰。
+#      脚本只提示、不碰。其它 compose 项目一律不碰。
 #
 # 用法：
 #   ./uninstall.sh                    交互菜单（默认「仅停止服务」）
@@ -343,7 +343,7 @@ preview_full(){
   echo "  · 归档以下本地文件到 $BACKUP_DIR/removed/（移动，可原样移回）："
   existing_paths "${STATE_PATHS[@]}" "${BUILD_PATHS[@]}" | sed 's/^/      /'
   echo "  · 不碰：靶场网络(praetor-ctf / chal-*)、docker:27-cli 构建镜像、"
-  echo "          .workbuddy/、docs/、skills/、其它 compose 项目（含旧 ARTEX 栈）"
+  echo "          .workbuddy/、docs/、skills/、其它 compose 项目"
   echo
 }
 

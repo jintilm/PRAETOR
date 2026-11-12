@@ -59,7 +59,7 @@ RETURNING id`, r.Key, r.Name, r.Description).Scan(&agentID)
 // 提示词以 DB 为权威（seedDomainAgents 播种、页面编辑即时生效、重启不丢）；
 // 绑定 llm_profile 的角色用 per-role provider（如逆向 analyst 走本地模型）。
 // 无行/无 prompt/绑定解析失败时保持代码默认 —— 播种缺失不该让派生失效。
-func (s *Server) applyAgentOverrides(defs map[string]subagent.Definition) {
+func (s *Server) applyAgentOverrides(defs map[string]subagent.Definition, pack domain.DomainPack) {
 	for key, def := range defs {
 		a, err := s.m.PG().GetAgentByKey(key)
 		if err != nil || a == nil {
@@ -69,8 +69,13 @@ func (s *Server) applyAgentOverrides(defs map[string]subagent.Definition) {
 			def.Prompt = []string{tmpl}
 		}
 		if a.LLMProfileID != nil {
-			if prov, _, ok := s.providerForProfile(*a.LLMProfileID); ok {
-				def.Provider = prov
+			if prov, cfg, ok := s.providerForProfile(*a.LLMProfileID); ok {
+				if pack != nil && pack.Model().LocalOnly && !cfg.LocalOnly {
+					log.Printf("[domain-agents] %s 绑定 #%d 非本地模型，但领域 %s 要求 LocalOnly；忽略该绑定并继承任务本地模型",
+						key, *a.LLMProfileID, pack.Key())
+				} else {
+					def.Provider = prov
+				}
 			}
 		}
 		// 轮次：库里这一列默认 0 = 未设置，语义干净，接上就能让运营在页面上给 solver 加轮次

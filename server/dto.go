@@ -307,10 +307,12 @@ func coverageAssetRefDTO(ref db.AssetRef) CoverageAssetRefDTO {
 
 type FindingDTO struct {
 	TrafficCount          int                        `json:"traffic_count"`
+	AttachmentCount       int                        `json:"attachment_count"`
 	EvidenceVersion       int64                      `json:"evidence_version"`
 	ReportEvidenceVersion int64                      `json:"report_evidence_version"`
 	ReportStale           bool                       `json:"report_stale"`
 	TrafficBindings       []db.FindingTrafficBinding `json:"traffic_bindings,omitempty"`
+	Attachments           []db.FindingAttachment     `json:"attachments,omitempty"`
 
 	ID        string `json:"id"`
 	FindingID string `json:"finding_id,omitempty"` // standalone findings-table id — the handle for status updates
@@ -420,6 +422,7 @@ func findingDTOsForOwner(taskID, description string, in []*db.Node, meta map[int
 			d.FindingID = i64s(m.ID)
 			d.Status = m.Status
 			d.TrafficCount = m.TrafficCount
+			d.AttachmentCount = m.AttachmentCount
 			d.Assets = findingAssetDTOs(m.AssetIDs, assets)
 		}
 		out = append(out, d)
@@ -449,16 +452,18 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 	d := FindingDTO{
 		ID:           i64s(f.ID),
 		FindingID:    i64s(f.ID),
-		TrafficCount: f.TrafficCount, EvidenceVersion: f.EvidenceVersion, ReportEvidenceVersion: f.ReportEvidenceVersion,
+		TrafficCount: f.TrafficCount, AttachmentCount: f.AttachmentCount,
+		EvidenceVersion: f.EvidenceVersion, ReportEvidenceVersion: f.ReportEvidenceVersion,
 		ReportStale: f.Report != "" && f.EvidenceVersion != f.ReportEvidenceVersion, TrafficBindings: f.TrafficBindings,
-		VulnClass: f.VulnClass,
-		Name:      f.Name,
-		Severity:  f.Severity,
-		Status:    status,
-		Summary:   f.Summary,
-		Evidence:  f.Evidence,
-		Report:    f.Report,
-		TS:        rfc3339(f.CreatedAt),
+		Attachments: f.Attachments,
+		VulnClass:   f.VulnClass,
+		Name:        f.Name,
+		Severity:    f.Severity,
+		Status:      status,
+		Summary:     f.Summary,
+		Evidence:    f.Evidence,
+		Report:      f.Report,
+		TS:          rfc3339(f.CreatedAt),
 	}
 	d.Assets = findingAssetDTOs(f.AssetIDs, assets)
 	if f.TaskID != nil {
@@ -622,6 +627,8 @@ type LLMProfileDTO struct {
 	// 自定义会话头名：非空时每次请求带该 HTTP 头，头值=当前会话/意图的 session id。
 	// ''=不发送。用于按 session-id 头做提示缓存/粘性路由的网关。
 	SessionHeaderKey string `json:"session_header_key"`
+	// LocalOnly=true 表示本地/私有部署；LocalOnly 领域只允许绑定此类配置。
+	LocalOnly bool `json:"local_only"`
 	// 本配置对重试的覆盖(建连/空响应/同 provider 安全窗口)。每项 attempts:
 	// 0=继承全局策略 | -1=关闭该层重试 | >0=次数；interval_ms: 0=用默认指数退避 |
 	// >0=改用该固定毫秒间隔。全 0 = 完全跟随全局，即历史行为。
@@ -649,6 +656,7 @@ func llmProfileDTO(p *db.LLMProfile) LLMProfileDTO {
 		MaxTokens:        p.MaxTokens,
 		MaxTokensField:   p.MaxTokensField,
 		SessionHeaderKey: p.SessionHeaderKey,
+		LocalOnly:        p.LocalOnly,
 		Retry:            p.Retry,
 	}
 }

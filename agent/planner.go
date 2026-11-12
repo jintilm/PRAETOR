@@ -12,6 +12,7 @@ import (
 	"github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/intercept"
 	"github.com/jintilm/praetor/internal/norma/agentcore"
+	"github.com/jintilm/praetor/internal/norma/harness"
 	"github.com/jintilm/praetor/internal/norma/llm"
 	"github.com/jintilm/praetor/internal/norma/permission"
 	actool "github.com/jintilm/praetor/internal/norma/tool"
@@ -24,28 +25,31 @@ import (
 // into the frontier. It is the sole intent generator.
 type Planner struct {
 	// campaignGate / cleanupGuard 由 server 注入（红队战役的阶段闸门与收尾清理判定）。
-	campaignGate      func(string) error
-	cleanupGuard      func() (bool, []string)
-	findingRecorder   FindingRecorder
-	findingVerifier   FindingVerifier // nil = 未启用确定性验证
-	prov              llm.Provider
-	model             string
-	tx                *transcript.Store                      // raw LLM conversation persistence (nil = off)
-	window            int                                    // context window in tokens (for compaction)
-	windowFn          func() int                             // optional dynamic task-chain minimum
-	maxTurns          int                                    // max agent turns per run (0 = unlimited)
-	domain            string                                 // 任务领域（ctf/reverse/redteam/pentest），决定工具面
-	killWork          func(intentID int64) error             // engine callback to terminate a running work (nil = off)
-	steerWork         func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
-	proxyAddr         string                                 // recording proxy for WebFetch (empty = direct)
-	proxyCACert       string                                 // recording proxy's CA cert path (HTTPS verify)
-	webSearch         WebSearchOpts                          // web_search tool backend selection (off by default)
-	workDir           string                                 // shared work dir (surfaced in prompt as artifact-output target)
-	injectConstraints func() bool                            // resolver: inject task operation constraints into system prompt? (nil = yes)
-	nonStreamingFn    func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
-	noaEnabledFn      func() bool                            // resolver: use experimental noa compaction? (nil = off)
-	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
-	compactor         *Compactor                             // cold-node compaction (§7); nil = disabled
+	campaignGate       func(string) error
+	cleanupGuard       func() (bool, []string)
+	findingRecorder    FindingRecorder
+	attachmentRecorder FindingAttachmentRecorder
+	findingVerifier    FindingVerifier // nil = 未启用确定性验证
+	prov               llm.Provider
+	model              string
+	tx                 *transcript.Store                      // raw LLM conversation persistence (nil = off)
+	window             int                                    // context window in tokens (for compaction)
+	windowFn           func() int                             // optional dynamic task-chain minimum
+	maxTurns           int                                    // max agent turns per run (0 = unlimited)
+	domain             string                                 // 任务领域（ctf/reverse/redteam/pentest），决定工具面
+	killWork           func(intentID int64) error             // engine callback to terminate a running work (nil = off)
+	steerWork          func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
+	proxyAddr          string                                 // recording proxy for WebFetch (empty = direct)
+	proxyCACert        string                                 // recording proxy's CA cert path (HTTPS verify)
+	webSearch          WebSearchOpts                          // web_search tool backend selection (off by default)
+	workDir            string                                 // shared work dir (surfaced in prompt as artifact-output target)
+	injectConstraints  func() bool                            // resolver: inject task operation constraints into system prompt? (nil = yes)
+	nonStreamingFn     func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
+	noaEnabledFn       func() bool                            // resolver: use experimental noa compaction? (nil = off)
+	maxTokensFn        func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	compactor          *Compactor                             // cold-node compaction (§7); nil = disabled
+	hooks              harness.HookRunner                     // shared task guard / lifecycle hooks (nil = none)
+	vulnKnowledge      VulnKnowledgeSearcher                  // reviewed vulnerability patterns (nil = tool unavailable)
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
@@ -69,6 +73,12 @@ func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
 // SetDomain 设置任务领域：planner 的工具面按领域裁剪（Linux 域不给 Bash）。
 // 与 Worker.SetDomain 同名同义，由装配层（server/task_llm.go）一起接。
 func (p *Planner) SetDomain(domainKey string) { p.domain = domainKey }
+
+// SetHooks wires the same task-scoped guard used by workers. Planner tool calls
+// (notably Bash and WebFetch) must not be a policy bypass.
+func (p *Planner) SetHooks(h harness.HookRunner) { p.hooks = h }
+
+func (p *Planner) SetVulnKnowledge(s VulnKnowledgeSearcher) { p.vulnKnowledge = s }
 
 // plannerBaseTools 返回 planner 的基础工具面，并按领域裁掉注定跑不通的工具。
 //
@@ -424,7 +434,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	tsx.SetCampaignGate(p.campaignGate)
 	tsx.SetCleanupGuard(p.cleanupGuard)
 	tsx.SetFindingRecorder(p.findingRecorder)
+	tsx.SetAttachmentRecorder(p.attachmentRecorder)
 	tsx.SetFindingVerifier(p.findingVerifier)
+	tsx.SetVulnKnowledge(p.vulnKnowledge)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
 	}
@@ -500,6 +512,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		BashEnv:               proxyEnv(p.proxyAddr, p.proxyCACert), // Bash 子命令默认走代理+信任 CA
 		WorkingDir:            taskDir,                              // 本任务工作目录 <workDir>/tasks/<taskID>
 		ToolOutputDir:         cmdOutDir(taskDir),
+		ArtifactSink:          saveAgentArtifact,
 		// 与 worker 同口径（12000，而非 SDK 默认 30000）：planner 也会被抓页面/长输出
 		// 一次吃掉 10K tokens，且同样每轮重发。见 worker.go 的详细说明。
 		MaxToolOutputChars: 12000,
@@ -514,6 +527,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		Settlement:   settle,
 		NonStreaming: p.nonStreaming(), // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:    p.maxTokens(),    // 0 = 不发上限,由服务端默认值决定
+	}
+	if p.hooks != nil {
+		opts.Hooks = p.hooks
 	}
 	if p.tx != nil { // persist raw LLM conversation; one accumulating file per task's planner
 		opts.Transcript = p.tx

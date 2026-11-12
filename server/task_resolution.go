@@ -17,7 +17,7 @@ type taskLLMResolution struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
-func (s *Server) resolutionFromProfile(p *db.LLMProfile, source string) taskLLMResolution {
+func (s *Server) resolutionFromProfile(p *db.LLMProfile, source string, requireLocal bool) taskLLMResolution {
 	if p == nil {
 		return taskLLMResolution{Source: source, Reason: "LLM 配置不存在"}
 	}
@@ -31,6 +31,10 @@ func (s *Server) resolutionFromProfile(p *db.LLMProfile, source string) taskLLMR
 	}
 	if p.APIKey == "" {
 		result.Reason = "LLM 配置未设置 API Key"
+		return result
+	}
+	if requireLocal && !p.LocalOnly {
+		result.Reason = "领域要求 LocalOnly，但该配置未标记为「本地部署」"
 		return result
 	}
 	if _, _, ok := s.providerForProfile(p.ID); !ok {
@@ -48,6 +52,7 @@ func (s *Server) resolveTaskRoleLLM(t *Task, agentKey string) (taskLLMResolution
 	if s == nil || s.m == nil || s.m.pg == nil {
 		return taskLLMResolution{}, fmt.Errorf("database unavailable")
 	}
+	requireLocal := taskRequiresLocalOnly(t)
 	a, err := s.m.pg.GetAgentByKey(agentKey)
 	if err != nil {
 		return taskLLMResolution{}, fmt.Errorf("load agent %q: %w", agentKey, err)
@@ -58,8 +63,8 @@ func (s *Server) resolveTaskRoleLLM(t *Task, agentKey string) (taskLLMResolution
 			return taskLLMResolution{}, fmt.Errorf("load agent LLM profile: %w", err)
 		}
 		if p != nil {
-			resolved := s.resolutionFromProfile(p, "agent_binding")
-			if resolved.Available {
+			resolved := s.resolutionFromProfile(p, "agent_binding", requireLocal)
+			if resolved.Available || requireLocal {
 				return resolved, nil
 			}
 		}
@@ -73,15 +78,15 @@ func (s *Server) resolveTaskRoleLLM(t *Task, agentKey string) (taskLLMResolution
 		if err != nil {
 			return taskLLMResolution{}, fmt.Errorf("load task LLM profile: %w", err)
 		}
-		return s.resolutionFromProfile(p, "task_chain"), nil
+		return s.resolutionFromProfile(p, "task_chain", requireLocal), nil
 	}
 	p, err := s.m.pg.ActiveProfile()
 	if err != nil {
 		return taskLLMResolution{}, fmt.Errorf("load global LLM profile: %w", err)
 	}
 	if p != nil {
-		resolved := s.resolutionFromProfile(p, "global_profile")
-		if resolved.Available {
+		resolved := s.resolutionFromProfile(p, "global_profile", requireLocal)
+		if resolved.Available || requireLocal {
 			return resolved, nil
 		}
 	}
@@ -92,9 +97,15 @@ func (s *Server) resolveTaskRoleLLM(t *Task, agentKey string) (taskLLMResolution
 		if name == "" {
 			name = "全局配置"
 		}
+		available := true
+		reason := ""
+		if requireLocal && !cfg.LocalOnly {
+			available = false
+			reason = "领域要求 LocalOnly，但环境变量 LLM 配置未标记为本地部署"
+		}
 		return taskLLMResolution{
 			Name: name, Format: cfg.Provider(), Model: cfg.Model,
-			Source: "environment", Available: true,
+			Source: "environment", Available: available, Reason: reason,
 		}, nil
 	}
 	return taskLLMResolution{Source: "global", Reason: "没有可用的 LLM 配置"}, nil

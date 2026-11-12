@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -80,8 +81,57 @@ func AllTemplates() []Template {
 	return []Template{TemplatePraetor, TemplateButian, TemplateEdusrc}
 }
 
+// MobileMeta 是移动端（APK / IPA / 真机）任务的结构化目标信息。
+// 三套模板共用同一份数据：包名 / 版本由 server 从发现正文解析，设备序列号与
+// APK 指纹来自任务动态授权记录（撤销或过期后仍是事实，可供溯源）。
+type MobileMeta struct {
+	Platform     string `json:"platform"`
+	Package      string `json:"package"`
+	Version      string `json:"version"`
+	DeviceSerial string `json:"device_serial"`
+	APKSha256    string `json:"apk_sha256"`
+	Source       string `json:"source"`
+	Present      bool   `json:"present"`
+}
+
+func (m MobileMeta) Any() bool { return m.Present }
+
+// Markdown / SubMarkdown 是三套模板共用的「移动端目标」小节，只是标题层级不同：
+// 补天与 praetor 作为独立二级章节，edusrc 的「内容」里用三级，避免跳级。
+// 缺的字段列成待补项，不编造包名或版本；非移动端任务返回空串，存量报告字节不变。
+func (m MobileMeta) Markdown() string    { return m.markdown("##") }
+func (m MobileMeta) SubMarkdown() string { return m.markdown("###") }
+
+func (m MobileMeta) markdown(heading string) string {
+	if !m.Present {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s 移动端目标（App）\n\n", heading)
+	row := func(k, val string) {
+		if strings.TrimSpace(val) != "" {
+			fmt.Fprintf(&b, "- %s：%s\n", k, val)
+		}
+	}
+	row("平台", m.Platform)
+	row("应用包名 / Bundle ID", m.Package)
+	row("应用版本", m.Version)
+	row("授权设备序列号", m.DeviceSerial)
+	row("授权 APK SHA256", m.APKSha256)
+	row("字段来源", m.Source)
+	b.WriteString("\n")
+	if m.Package == "" {
+		b.WriteString(todo("应用包名 / Bundle ID") + "\n")
+	}
+	if m.Version == "" {
+		b.WriteString(todo("应用版本") + "\n")
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
 // View 是三套模板唯一的输入。字段要么来自 findings 表 / 探索图节点，要么由
-// server 层补充（企业名、资产域名）。渲染器不得反向查库。
+// server 层补充（企业名、资产域名、移动端目标）。渲染器不得反向查库。
 type View struct {
 	// Template 是本次导出对该份漏洞实际生效的模板。server 层按
 	// 「?template= 显式覆盖 > 任务 report_template > praetor」填好。
@@ -100,8 +150,26 @@ type View struct {
 	Hosts           []string // 资产反查的域名/IP + 从 URL 提取的 host
 	URLs            []string // 从正文/证据/流量绑定提取的 http(s) URL
 	TrafficMarkdown string   // 原模板的「关联流量证据」段落
+	Attachments     []AttachmentView
 	CreatedAt       time.Time
 	GeneratedAt     time.Time
+	Mobile          MobileMeta // 移动端目标；非移动端任务为零值，模板不输出
+}
+
+// AttachmentView is the renderer-facing projection of a finding attachment.
+// Link is relative inside an md-zip package; DataURI is set only for md-single.
+type AttachmentView struct {
+	ID       int64
+	Kind     string
+	Filename string
+	MIMEType string
+	Size     int64
+	SHA256   string
+	Caption  string
+	Role     string
+	Source   string
+	Link     string
+	DataURI  string
 }
 
 // ViewFromFinding 把发现页导出的 findings 表行归一成 View。
@@ -127,6 +195,13 @@ func ViewFromFinding(f *db.DBFinding, now time.Time) View {
 	}
 	v.Hosts = dedupe(v.Hosts)
 	v.TrafficMarkdown = findingTrafficMarkdown(f, false)
+	for _, a := range f.Attachments {
+		v.Attachments = append(v.Attachments, AttachmentView{
+			ID: a.ID, Kind: a.Kind, Filename: a.Filename, MIMEType: a.MIMEType,
+			Size: a.Size, SHA256: a.SHA256, Caption: a.Caption, Role: a.Role, Source: a.Source,
+			Link: fmt.Sprintf("evidence/%d/attachments/%d-%s", f.ID, a.ID, safeAttachmentReportName(a.Filename)),
+		})
+	}
 	return v
 }
 
@@ -172,6 +247,12 @@ func (v View) WithHosts(hosts []string) View {
 		}
 	}
 	v.Hosts = dedupe(v.Hosts)
+	return v
+}
+
+// WithMobile 供 server 层补充移动端目标信息。
+func (v View) WithMobile(m MobileMeta) View {
+	v.Mobile = m
 	return v
 }
 
@@ -413,8 +494,48 @@ func renderPraetorSingle(v View) string {
 		b.WriteString(r)
 		b.WriteString("\n\n")
 	}
+	b.WriteString(v.Mobile.Markdown())
 	b.WriteString(v.TrafficMarkdown)
+	b.WriteString(renderAttachmentMarkdown(v))
 	return b.String()
+}
+
+func renderAttachmentMarkdown(v View) string {
+	if len(v.Attachments) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n## 证据附件\n\n")
+	for _, a := range v.Attachments {
+		label := strings.TrimSpace(a.Caption)
+		if label == "" {
+			label = a.Filename
+		}
+		imageURL := a.Link
+		if a.DataURI != "" {
+			imageURL = a.DataURI
+		}
+		if strings.HasPrefix(a.MIMEType, "image/") && imageURL != "" {
+			fmt.Fprintf(&b, "![%s](%s)\n\n", strings.ReplaceAll(label, "]", "\\]"), imageURL)
+		}
+		fmt.Fprintf(&b, "- 文件：`%s`（%s，%d 字节）\n", a.Filename, nz(a.Role, "supporting"), a.Size)
+		if a.Source != "" {
+			fmt.Fprintf(&b, "  来源：%s\n", a.Source)
+		}
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+func safeAttachmentReportName(name string) string {
+	name = filepath.Base(strings.TrimSpace(name))
+	name = strings.ReplaceAll(name, "\\", "_")
+	name = strings.ReplaceAll(name, "/", "_")
+	name = strings.ReplaceAll(name, "\x00", "_")
+	if name == "" || name == "." || name == ".." {
+		return "attachment"
+	}
+	return name
 }
 
 // --- 公共工具 ---

@@ -120,11 +120,15 @@ func (s *Server) getComponents(w http.ResponseWriter, r *http.Request) {
 			continue // 预置引用了不存在的组件：不展示，测试会把它卡住
 		}
 		mb := 0
+		ids := make([]string, 0, len(items))
 		for _, it := range items {
 			mb += it.SizeMB
+			ids = append(ids, it.ID)
 		}
+		// IDs 必须是**展开后**的集合：增量预置（如 ctf-crypto）在 PresetItems 里
+		// 会并上 Base，若把 p.IDs 原样给前端，一键勾选会丢掉基础层工具链。
 		presets = append(presets, presetDTO{
-			ID: p.ID, Title: p.Title, Why: p.Why, IDs: p.IDs,
+			ID: p.ID, Title: p.Title, Why: p.Why, IDs: ids,
 			Image: components.ImageTag(items), TotalMB: mb,
 		})
 	}

@@ -1,6 +1,11 @@
 package server
 
 import (
+	"context"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
 	"net/url"
 	"strconv"
 	"time"
@@ -8,6 +13,8 @@ import (
 	"github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/report"
 )
+
+const maxInlineReportAttachmentBytes = int64(32 << 20)
 
 // 报告模板的取数与优先级集中在这里，避免 getReport / findingsExport 各写一套。
 //
@@ -84,6 +91,8 @@ func templateForTask(t *Task) report.Template {
 func (s *Server) reportViewsForFindings(fs []*db.DBFinding, now time.Time, override report.Template, hasOverride bool) []report.View {
 	names := s.companyNameMap()
 	assets := s.resolveFindingAssets(fs)
+	// 授权记录按 taskID 缓存：跨任务批量导出时同任务的 finding 只查一次库。
+	grants := map[int64]*db.DynamicGrant{}
 	views := make([]report.View, 0, len(fs))
 	for _, f := range fs {
 		if f == nil {
@@ -99,6 +108,13 @@ func (s *Server) reportViewsForFindings(fs []*db.DBFinding, now time.Time, overr
 			}
 		}
 		v = v.WithHosts(hosts)
+		id := viewTaskID(f, t)
+		grant, ok := grants[id]
+		if !ok {
+			grant = s.grantFor(id)
+			grants[id] = grant
+		}
+		v = v.WithMobile(s.mobileMetaWithGrant(grant, mobileMetaTexts(v)...))
 		switch {
 		case hasOverride:
 			v.Template = override
@@ -117,17 +133,88 @@ func (s *Server) reportViewsForFindings(fs []*db.DBFinding, now time.Time, overr
 func (s *Server) reportViewsForNodes(nodes []*db.Node, t *Task, now time.Time, tpl report.Template) []report.View {
 	names := s.companyNameMap()
 	companies := companyNamesForTask(t, names)
+	grant := s.grantFor(taskNumericID(t))
+	nodeIDs := make([]int64, 0, len(nodes))
+	for _, n := range nodes {
+		if n != nil {
+			nodeIDs = append(nodeIDs, n.ID)
+		}
+	}
+	findingIDs, _ := s.m.pg.AttachmentFindingIDsByNodeIDs(context.Background(), nodeIDs)
+	attachmentsByFinding := map[int64][]db.FindingAttachment{}
+	for _, findingID := range findingIDs {
+		items, err := s.m.pg.ListFindingAttachments(context.Background(), findingID)
+		if err == nil {
+			attachmentsByFinding[findingID] = items
+		}
+	}
 	views := make([]report.View, 0, len(nodes))
 	for _, n := range nodes {
 		v := report.ViewFromNode(n, now)
+		if n == nil {
+			views = append(views, v)
+			continue
+		}
 		if t != nil {
 			v.TaskDescription = t.Description
 		}
 		v = v.WithCompanies(companies)
+		v = v.WithMobile(s.mobileMetaWithGrant(grant, mobileMetaTexts(v)...))
 		v.Template = tpl
+		if findingID := findingIDs[n.ID]; findingID > 0 {
+			for _, a := range attachmentsByFinding[findingID] {
+				v.Attachments = append(v.Attachments, report.AttachmentView{
+					ID: a.ID, Kind: a.Kind, Filename: a.Filename, MIMEType: a.MIMEType,
+					Size: a.Size, SHA256: a.SHA256, Caption: a.Caption, Role: a.Role, Source: a.Source,
+					Link: fmt.Sprintf("evidence/%d/attachments/%d-%s", findingID, a.ID, safeAttachmentZipName(a.Filename)),
+				})
+			}
+		}
 		views = append(views, v)
 	}
 	return views
+}
+
+func reportViewsHaveAttachments(views []report.View) bool {
+	for _, v := range views {
+		if len(v.Attachments) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// inlineReportAttachments turns attachment blobs into data URIs for md-single.
+// The cap is intentionally explicit: a single self-contained Markdown file must
+// not silently balloon into hundreds of megabytes.
+func (s *Server) inlineReportAttachments(ctx context.Context, views []report.View) error {
+	var total int64
+	for i := range views {
+		for j := range views[i].Attachments {
+			a := &views[i].Attachments[j]
+			if a.SHA256 == "" {
+				continue
+			}
+			total += a.Size
+			if total > maxInlineReportAttachmentBytes {
+				return errors.New("md-single 附件总量超过 32 MiB，请改用 md-zip")
+			}
+			f, _, err := s.evidenceStore().OpenAttachment(db.FindingAttachment{SHA256: a.SHA256, Size: a.Size})
+			if err != nil {
+				return err
+			}
+			data, readErr := io.ReadAll(io.LimitReader(f, a.Size+1))
+			closeErr := f.Close()
+			if err := errors.Join(readErr, closeErr); err != nil {
+				return err
+			}
+			if int64(len(data)) != a.Size {
+				return errors.New("附件正文长度不一致")
+			}
+			a.DataURI = "data:" + a.MIMEType + ";base64," + base64.StdEncoding.EncodeToString(data)
+		}
+	}
+	return nil
 }
 
 func allPraetor(views []report.View, fallback report.Template) bool {

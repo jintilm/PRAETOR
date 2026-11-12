@@ -1,11 +1,11 @@
 # PRAETOR 独立部署栈。
 #
-# 与同机可能存在的其它栈（例如旧的 ARTEX 栈）完全隔离：
+# 与同机可能存在的其它栈完全隔离（多栈共存互不干扰）：
 #   1. 顶层 name: praetor → 独立 compose 项目，不共享 network / 容器归属
 #   2. 显式 container_name → praetor-pg / praetor-app，不会和旧容器重名
 #   3. 独立命名卷 praetor-pgdata → 旧库数据物理隔离
 #   4. 宿主端口默认 8797/8798（可用 PRAETOR_HTTP_PORT / PRAETOR_MCP_PORT 覆盖），
-#      避开旧栈常用的 8787/8788；容器内端口不变（8787/8788）
+#      容器内监听 8787/8798（代理端口与宿主一致）
 #
 # 起停：
 #   docker compose up -d --build
@@ -25,7 +25,7 @@ services:
       - praetor-pgdata:/var/lib/postgresql/data
     ports:
       # 只为「在宿主机直接跑二进制」时用；容器间走内部网络，不经过这里。
-      # 默认 55433：避开旧 ARTEX 的 5432 和测试栈的 55432，三套互不干扰。
+      # 默认 55433：避开 PostgreSQL 默认的 5432 和测试栈的 55432，多套互不干扰。
       - "127.0.0.1:${PRAETOR_PG_PORT:-55433}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-praetor} -d ${POSTGRES_DB:-praetor}"]
@@ -91,20 +91,22 @@ services:
       PRAETOR_SANDBOX_IDLE_TTL: ${PRAETOR_SANDBOX_IDLE_TTL:-30m}
       # ---- Android 真机接入（默认全关，不接手机时零影响）----
       # 录制代理在**容器内**的监听地址。默认只绑回环；真机 WiFi 代理要连进来时
-      # 必须同时设 PRAETOR_TRAFFIC_ADDR=0.0.0.0:8788 与 PRAETOR_MOBILE_DEVICE_MODE=1，
+      # 必须同时设 PRAETOR_TRAFFIC_ADDR=0.0.0.0:8798 与 PRAETOR_MOBILE_DEVICE_MODE=1，
       # 只设前者会被后端回落到回环并告警（见 cmd/praetor/main.go trafficAddrDefault）。
-      PRAETOR_TRAFFIC_ADDR: ${PRAETOR_TRAFFIC_ADDR:-127.0.0.1:8788}
+      PRAETOR_TRAFFIC_ADDR: ${PRAETOR_TRAFFIC_ADDR:-127.0.0.1:8798}
       PRAETOR_MOBILE_DEVICE_MODE: ${PRAETOR_MOBILE_DEVICE_MODE:-0}
       # adb server 跑在宿主（USB 边界留在宿主），容器里只连 TCP。
       PRAETOR_MOBILE_ADB_HOST: ${PRAETOR_MOBILE_ADB_HOST:-host.docker.internal}
       PRAETOR_MOBILE_ADB_PORT: ${PRAETOR_MOBILE_ADB_PORT:-5037}
       # 真机 IP / adb / frida 端口在全量出口透明层里的直连白名单，逗号分隔。
       PRAETOR_MOBILE_DEVICE_EXCLUDE: ${PRAETOR_MOBILE_DEVICE_EXCLUDE:-}
+      # 宿主侧绑定也传进来，让 -check-config 的「宿主绑定」显示真实值而不是 compose 默认猜测
+      PRAETOR_TRAFFIC_BIND: ${PRAETOR_TRAFFIC_BIND:-127.0.0.1}
     ports:
       - "${PRAETOR_HTTP_PORT:-8797}:8787"
       # 宿主侧绑定也默认回环：真机接入时设 PRAETOR_TRAFFIC_BIND=0.0.0.0，
       # 让手机能访问 <宿主IP>:<PRAETOR_MCP_PORT> 上的录制代理。
-      - "${PRAETOR_TRAFFIC_BIND:-127.0.0.1}:${PRAETOR_MCP_PORT:-8798}:8788"
+      - "${PRAETOR_TRAFFIC_BIND:-127.0.0.1}:${PRAETOR_MCP_PORT:-8798}:8798"
     volumes:
       # 数据目录（含 jwt.key 等）绑定到宿主机，方便查看/备份，容器重建不丢。
       # 与旧栈共用同一仓库目录时注意：两套栈不应同时指向同一个 data/。

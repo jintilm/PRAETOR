@@ -7,6 +7,7 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -96,7 +97,7 @@ func newConn(r io.Reader, w io.Writer) *conn {
 
 func (c *conn) readLoop(r io.Reader) {
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), 32*1024*1024)
 	for sc.Scan() {
 		line := sc.Bytes()
 		if len(line) == 0 {
@@ -231,8 +232,10 @@ func (c *Client) wrap(rt remoteTool) tool.CoreTool {
 			}
 			var res struct {
 				Content []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
+					Type     string `json:"type"`
+					Text     string `json:"text"`
+					Data     string `json:"data"`
+					MIMEType string `json:"mimeType"`
 				} `json:"content"`
 				IsError bool `json:"isError"`
 			}
@@ -241,7 +244,35 @@ func (c *Client) wrap(rt remoteTool) tool.CoreTool {
 			}
 			var text string
 			for _, blk := range res.Content {
-				text += blk.Text
+				switch blk.Type {
+				case "image":
+					if tc == nil || tc.ArtifactSink == nil {
+						text += "[image output omitted: no artifact sink]"
+						continue
+					}
+					data, err := base64.StdEncoding.DecodeString(blk.Data)
+					if err != nil {
+						text += "[image decode failed]"
+						continue
+					}
+					name := "screenshot"
+					if blk.MIMEType == "image/jpeg" {
+						name += ".jpg"
+					} else {
+						name += ".png"
+					}
+					path, err := tc.ArtifactSink(ctx, tc, name, blk.MIMEType, data)
+					if err != nil {
+						text += "[image save failed: " + err.Error() + "]"
+						continue
+					}
+					if text != "" {
+						text += "\n"
+					}
+					text += "[截图为二进制证据，已保存为 " + path + "；先调用 attach_finding_attachment 绑定 finding_id]"
+				default:
+					text += blk.Text
+				}
 			}
 			return tool.Result{Content: []llm.ContentBlock{llm.TextBlock(tool.Capture(tc, text))}, IsError: res.IsError}, nil
 		},
