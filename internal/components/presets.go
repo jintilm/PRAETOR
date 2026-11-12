@@ -20,9 +20,14 @@ type Preset struct {
 	Title string   // 面板显示名
 	Why   string   // 一句话说明这份预置解决什么
 	IDs   []string // 组件 ID（引用 All()）
+	// Base 指向要叠加的基础预置；空 = 独立完整集合。
+	// 原先「凡不是 ctf-base 的预置都并上 ctf-base」是硬编码，一加第二个领域就错：
+	// 移动端会为了一个 apktool 背上 12 项 CTF 工具（约 700MB）。增量改成显式声明。
+	Base string
 }
 
-// Presets 返回全部预置。第一个是 CTF 基础层，其余是它的**增量**。
+// Presets 返回全部预置。CTF 系以 ctf-base 为基础层，其余是它的**增量**（Base 字段声明）；
+// 其它领域的预置是独立完整集合，不背 CTF 的体积。
 //
 // 增量而不是并列：crypto 预置 = 基础层 + angr，不是「只有 angr」。并列会让人勾了
 // crypto 预置却发现自己没了 gdb，然后回去再勾一堆 —— 那还不如直接给张勾选表。
@@ -44,12 +49,20 @@ func Presets() []Preset {
 			Title: "CTF + 符号执行（基础层 + angr）",
 			Why:   "校验逻辑复杂到人读不动时用 angr 求输入；多约 1.2GB",
 			IDs:   []string{"angr"},
+			Base:  "ctf-base",
 		},
 		{
 			ID:    "ctf-forensics",
 			Title: "CTF + 内存取证（基础层 + volatility3）",
 			Why:   "给了内存镜像（.raw/.vmem）的题；volatility3 按需装",
 			IDs:   []string{"volatility3"},
+			Base:  "ctf-base",
+		},
+		{
+			ID:    "mobile-static",
+			Title: "移动端静态分析（1 项）",
+			Why:   "只装 apktool：解包 + 纯 Go 静态规则扫描，约 60MB；jadx 保持宿主侧可选增强",
+			IDs:   []string{"apktool"},
 		},
 	}
 }
@@ -67,8 +80,9 @@ func PresetByID(id string) (Preset, bool) {
 
 // PresetItems 把预置展开成组件列表。
 //
-// 基础层预置（ctf-base）直接给出完整集合；其余预置是**增量**，展开时自动并上 ctf-base ——
+// 带 Base 的预置是**增量**，展开时自动并上它声明的基础层 ——
 // 调用方只需要说「我要 crypto 预置」，不用自己记「还得先勾基础层」。
+// 不带 Base 的（ctf-base / mobile-static）就是完整集合，照原样校验。
 // 这里刻意复用 Validate：白名单、去重、稳定排序都只实现一份。
 func PresetItems(id string) ([]Item, error) {
 	p, ok := PresetByID(id)
@@ -80,10 +94,10 @@ func PresetItems(id string) ([]Item, error) {
 		return nil, fmt.Errorf("未知预置：%s（可选：%s）", id, strings.Join(names, ", "))
 	}
 	ids := append([]string(nil), p.IDs...)
-	if p.ID != "ctf-base" {
-		base, ok := PresetByID("ctf-base")
+	if p.Base != "" {
+		base, ok := PresetByID(p.Base)
 		if !ok {
-			return nil, fmt.Errorf("预置 ctf-base 缺失：增量预置没有基础层可叠")
+			return nil, fmt.Errorf("预置 %s 的基础层 %s 缺失：增量预置没有基础层可叠", p.ID, p.Base)
 		}
 		ids = append(ids, base.IDs...)
 	}

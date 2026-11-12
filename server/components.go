@@ -103,7 +103,7 @@ func (s *Server) getComponents(w http.ResponseWriter, r *http.Request) {
 			Selected: selSet[it.ID],
 		})
 	}
-	// 预置：把「CTF 需要哪 12 项」变成一次点击。面板不必自己记清单，
+	// 预置：把「某个领域需要哪些组件」变成一次点击。面板不必自己记清单，
 	// 清单只在 internal/components 里存一份。
 	type presetDTO struct {
 		ID      string   `json:"id"`

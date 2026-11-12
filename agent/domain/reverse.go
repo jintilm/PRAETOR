@@ -166,6 +166,11 @@ func ReverseRecipes() []Recipe {
 		{Name: "mobile", Upstream: "iBotPeaches/Apktool（jadx 可选）", License: "Apache-2.0", Needs: []string{"apktool"},
 			Returns: "APK 解包摘要：清单关键项、入口 Activity、类名清单（分页，不返回反编译全文）；" +
 				"select=类名时回该类的 Java（装了 jadx）或 smali 源码"},
+		// 第 10 条，正好卡住 TestReverseRecipeCatalogIsLean 的上限。
+		// 再加移动端能力时优先合并进这条（用 select 区分子动作），不要扩表。
+		{Name: "mobile_scan", Upstream: "iBotPeaches/Apktool（仅解包，规则自研）", License: "Apache-2.0", Needs: []string{"apktool"},
+			Returns: "APK 静态规则扫描：导出组件 / 可调试 / 备份 / 明文流量 / 用户 CA / 证书绑定 / 危险权限 / " +
+				"WebView 与硬编码凭据线索；一行一条带「文件:行 + 依据」，分页 ≤60 行，全文落盘"},
 	}
 }
 

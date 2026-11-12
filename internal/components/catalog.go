@@ -20,7 +20,7 @@ import (
 // Item 是一个可选组件。
 type Item struct {
 	ID      string // 稳定标识（写进 settings，不要改）
-	Group   string // pwn / rev / crypto / forensics
+	Group   string // pwn / rev / crypto / forensics / mobile
 	Title   string
 	Why     string
 	License string
@@ -156,6 +156,20 @@ func All() []Item {
 			Why:     "内存镜像分析",
 			Install: []string{"pip3 install --no-cache-dir --break-system-packages volatility3"},
 			Probe:   []string{"python3", "-c", "import volatility3;print('ok')"},
+		},
+
+		// ---------- mobile ----------
+		// 只放 apktool：mobile / mobile_scan 两条配方都需要它把二进制 AXML 解成明文。
+		// 静态规则本身是纯 Go（读解包产物），不需要 androguard / jadx 之类的重依赖；
+		// jadx 只影响「Java 源码 vs smali」的可读性，缺了会明确退回 smali，不进清单。
+		{
+			ID: "apktool", Group: "mobile", Title: "apktool", SizeMB: 60, License: "Apache-2.0（外部进程调用）",
+			Why:     "APK 解包成明文 AndroidManifest 与 smali；mobile / mobile_scan 配方的唯一硬依赖",
+			Install: []string{"apt-get install -y --no-install-recommends apktool"},
+			// Kali 的 apktool 是 Java 包装脚本，各版本 CLI 参数不一致（有的只认无参数
+			// 输出用法且退出码非 0）。赌 --version 会让面板把已装的显示成未装；
+			// 用 test -x 探「文件在不在」，配方侧另有 LookPath 确认可执行性。
+			Probe: []string{"test", "-x", "/usr/bin/apktool"},
 		},
 	}
 }

@@ -61,8 +61,8 @@ var reRecipeHints = map[string]string{
 	"capa":            "pip install flare-capa",
 	"diec":            "下载 Detect-It-Easy 后把 diec 加进 PATH",
 	"gdb":             "apt install gdb",
-	"apktool":         "apt install apktool",
-	"jadx":            "下载 jadx release 后加进 PATH",
+	"apktool":         "在「系统设置 → 可选组件」应用 mobile-static 预置（或 apt install apktool）",
+	"jadx":            "可选增强：装 jadx release 后加进 PATH；不装则 mobile 配方明确退回 smali",
 }
 
 // reDecompileScript 是 Ghidra headless 的单函数反编译脚本（Java，运行时编译）。
@@ -197,6 +197,15 @@ func reRecipeRun(recipe string) (reRecipe, bool) {
 				return runMobile(ctx, target, sel)
 			},
 		}, true
+	case "mobile_scan":
+		return reRecipe{
+			// 命中行比反汇编行短，但一条规则一行、命中可能十几条，
+			// 给到 4KB 让第一页能装下整份摘要（全文仍由 spillRecipe 落盘）。
+			perPage: reRecipePageLines, limit: reRecipeDecompCap, timeout: reRecipeMobile,
+			run: func(ctx context.Context, target, _ string) (string, error) {
+				return runMobileScan(ctx, target)
+			},
+		}, true
 	}
 	return reRecipe{}, false
 }
@@ -211,12 +220,15 @@ func (t *ToolSet) reRecipe() actool.CoreTool {
 		"按配方执行已固化的分析管道（外部 CLI），一次一页。可用配方："+strings.Join(names, "/")+"。\n"+
 			"每条配方只做一件事且输出确定：disasm(反汇编函数/地址段) xrefs(交叉引用) decompile(单函数伪代码) "+
 			"strings(还原混淆串) capability(能力命中) packer(编译器/壳判定) triage(全貌，等价 re_triage)。\n"+
+			"mobile(APK 解包：清单摘要/类名清单，select 填类名可取该类源码) "+
+			"mobile_scan(APK 静态规则扫描：导出组件/可调试/明文流量/硬编码凭据等，一行一条带依据) "+
+			"trace(动态调用序列，需授权)。\n"+
 			"缺依赖时会明确告诉缺哪个可执行文件 —— 那是环境问题，按提示记下来换路线，不要自己拼命令绕过。"+
 			"输出超过一页就带 page 续取，全文同时落盘，需要细节用 Read 读落盘文件。",
 		obj(map[string]any{
 			"recipe": str("配方名：" + strings.Join(names, " / ")),
 			"target": str("样本的本地路径"),
-			"select": str("可选：函数名 / 地址 / 字符串，disasm、xrefs、decompile 必填"),
+			"select": str("可选：函数名/地址/字符串（disasm、xrefs、decompile 必填）；mobile 里填类名取该类源码"),
 			"page":   intp("可选：页码，从 0 起；默认 0"),
 		}, "recipe", "target"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {

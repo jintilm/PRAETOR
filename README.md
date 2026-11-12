@@ -612,6 +612,35 @@ server {
 - 命名避让：项目已有 `task_templates`（任务描述预设），新功能一律用 `report_template` / `ReportTemplate`。
 - 未知模板名在创建任务或导出时返回 400，不会静默回落；读旧库脏值时回落 `praetor`。
 
+## 移动端静态分析（P0）
+
+当前只做 **APK 静态分析**，不涉及模拟器、真机、动态运行或联网。动态链路（任务级授权、真机适配器、设备锁）尚未实现。
+
+### 安装
+
+「系统设置 → 可选组件」应用 **`mobile-static`** 预置，或手动勾选 `apktool`。这份预置只装 1 项（约 60MB），因为静态规则是纯 Go 读解包产物，不需要 androguard / MobSF 之类的服务与重依赖。`mobile-static` 是**独立预置**，不会像 `ctf-*` 增量预置那样并上 CTF 基础层。
+
+`jadx` 故意不进组件清单：它需要下载 release 并做版本校验，且只影响「Java 源码还是 smali」的可读性。缺了它 `mobile` 配方会明确退回 smali，不阻断分析；需要 Java 源码时自行安装并加入 PATH。
+
+### 配方
+
+在逆向域的 `re_recipe` 里选：
+
+| 配方 | 作用 | 依赖 |
+| --- | --- | --- |
+| `mobile` | 解包摘要：包名 / 入口 Activity / 权限 / 组件 / 类名清单；`select=类名` 取该类 Java 或 smali 源码 | `apktool`（`jadx` 可选） |
+| `mobile_scan` | 静态规则扫描，一行一条命中，每条带「文件:行 + 依据」，按行分页且全文落盘 | `apktool` |
+
+`mobile_scan` 覆盖：导出组件无权限保护、可调试、备份未关闭、明文流量（`usesCleartextTraffic` / `networkSecurityConfig` / 旧 `targetSdk`）、信任用户 CA、证书绑定配置、敏感权限面、自定义 scheme、WebView JS 桥与远程调试、自定义 TrustManager、硬编码凭据线索。扫描上限 400 个文件 / 单文件 2MB / 每类 8 条，超出会在头行标 `truncated=true`，不静默截断。
+
+**命中只是线索，不是漏洞结论**：每条都必须回到源码或流量上复核，再用 `re_evidence` 落证据链。不传 `select` 时不需要额外参数；缺 `apktool` 会明确报缺哪个及装法（指向 `mobile-static` 预置），不会静默降级。
+
+### 边界
+
+- 配方表已满 10 条（`TestReverseRecipeCatalogIsLean` 上限）。后续加移动端能力优先合并进 `mobile_scan` 的 `select` 子动作，不要扩表。
+- 不支持 iOS IPA 解析、APK 动态运行、frida / 抓包 / 真机接入；这些属于后续阶段。
+- 与报告模板无关：`report_template` 只影响 Markdown 导出，静态命中等 finding 后按任务所选模板输出。
+
 ---
 ## 开发
 

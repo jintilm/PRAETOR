@@ -175,21 +175,36 @@ func joinOrDash(xs []string) string {
 	return strings.Join(xs, ", ")
 }
 
+// unpackAPK 把 APK 解成明文 AndroidManifest + smali，返回目录与清理函数。
+//
+// mobile 与 mobile_scan 共用：两条配方看的是同一份解包产物，不该各写一套解包逻辑。
+// 每次调用仍然各自建临时目录（配方是无状态的一次外部调用），好处是清理由调用方
+// defer 兜住，不存在跨配方残留。
+func unpackAPK(ctx context.Context, target string) (string, func(), error) {
+	dir, err := os.MkdirTemp("", "praetor-apk-")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	if out, derr := reRecipeExec(ctx, []string{"apktool", "d", "-f", "-o", dir, target}, reRecipeMobile); derr != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("apktool 解包失败：%v（输出：%s）", derr, strings.TrimSpace(clipText(out, 300)))
+	}
+	return dir, cleanup, nil
+}
+
 // runMobile 解包 APK 并返回清单摘要 / 类清单 / 单个类的源码。
 //
 // 依赖策略：apktool 是硬依赖（解包本身），jadx 可选 —— 装了就用 Java 源码，
 // 没装就退回 smali（同一份逻辑，可读性差一点，但不阻塞分析）。
 // 不为一个"可读性增强"要求所有人装 200MB 的 jadx。
 func runMobile(ctx context.Context, target, sel string) (string, error) {
-	dir, err := os.MkdirTemp("", "praetor-apk-")
+	dir, cleanup, err := unpackAPK(ctx, target)
 	if err != nil {
 		return "", err
 	}
-	defer os.RemoveAll(dir)
+	defer cleanup()
 
-	if out, derr := reRecipeExec(ctx, []string{"apktool", "d", "-f", "-o", dir, target}, reRecipeMobile); derr != nil {
-		return out, fmt.Errorf("apktool 解包失败：%v", derr)
-	}
 	manifest, _ := os.ReadFile(filepath.Join(dir, "AndroidManifest.xml"))
 
 	if strings.TrimSpace(sel) == "" {
