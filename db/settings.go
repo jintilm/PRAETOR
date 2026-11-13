@@ -25,6 +25,16 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, key
 	return err
 }
 
+// DeleteSetting 移除一个键，让读取方回落到它自己的默认值。
+//
+// 对 target_device 这类"查得到键就用键值"的配置很关键：只提供 SetSetting 时，
+// 用户一旦在 UI 里写过一次空值就会永久盖住部署级环境变量，且没有任何出口能退回去。
+// 删除而不是写空串，才能把"显式不设"和"回落到默认"区分开。
+func (d *DB) DeleteSetting(key string) error {
+	_, err := d.Exec(`DELETE FROM settings WHERE key=$1`, key)
+	return err
+}
+
 // InsertSettingIfAbsent 只在 key 尚未存在时写入，已存在则原样保留并返回 inserted=false。
 // 给 auth.password_hash 这类"只允许首次设置"的键用：判定落在数据库的主键约束上，
 // 调用方先 GetSetting 再写的那种检查就只是快速失败路径——读出错或并发撞车时，

@@ -8,8 +8,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -86,6 +88,7 @@ func buildDynamicGrantInput(req *dynamicGrantReq) (*pgdb.DynamicGrantInput, erro
 func (s *Server) dynamicOpsCatalog(w http.ResponseWriter, _ *http.Request) {
 	// device_mode / adb_addr 是只读的运行时前置，供 UI 明确告知「签发授权 ≠ 工具会注入」。
 	// 没有这两个字段时用户签完授权只会看到任务静默降级，无从排查。
+	serial, source := s.mobileTargetSerial()
 	writeJSON(w, 200, map[string]any{
 		"ops":           pgdb.DynamicOpNames(),
 		"descriptions":  pgdb.DynamicOps,
@@ -95,7 +98,125 @@ func (s *Server) dynamicOpsCatalog(w http.ResponseWriter, _ *http.Request) {
 		"device_mode":   config.Env("MOBILE_DEVICE_MODE") == "1",
 		"adb_addr":      mobileADBAddr(),
 		"traffic_addr":  config.Env("TRAFFIC_ADDR"),
+		// 授权模式：assume（默认）下任务不签发授权记录也能拿到 mobile_* 工具，
+		// UI 据此调整文案，避免显示「未签发 → 一律降级静态分析」这种过期说明。
+		"auth_mode":    mobileAuthMode(),
+		"auth_assumed": mobileAuthAssumed(),
+		// 目标设备 + 命中来源（setting / env / none）：改了值却能看出是哪一层在生效。
+		"device_serial": serial,
+		"device_source": source,
 	})
+}
+
+// mobileTargetDevice 读写目标设备，支持两个作用域：
+//
+//	不带 task_id → 全局默认（settings 的 mobile.target_device），影响所有未单独指定的任务
+//	带  task_id → 该任务专属（settings 的 mobile.task_device.<id>），只影响这一个任务
+//
+// 为什么需要它：上游把设备序列号只存在任务级授权记录里，assume 模式没有那条记录，
+// 若目标设备只放环境变量，换手机就得改 .env 再重建容器。放进 settings 表后运行期
+// 即可切换；任务级那层则让多机并行时每个任务能各占一台设备。
+//
+// 三种写法，语义互不重叠（少了第三种，用户写一次空值就永久盖住下一层，没有出口退回）：
+//
+//	{"serial":"R58M1234567"}  指定设备（设备锁按它生效）
+//	{"serial":""}             显式不锁设备（盖住下一层）
+//	{"reset":true}            删掉本层，回落到下一层
+func (s *Server) mobileTargetDevice(w http.ResponseWriter, r *http.Request) {
+	if s == nil || s.m == nil || s.m.pg == nil {
+		writeErr(w, http.StatusServiceUnavailable, "数据库不可用，无法读写目标设备")
+		return
+	}
+	// task_id 省略 → 全局作用域。解析失败按省略处理，不因为一个坏参数 500。
+	taskID, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("task_id")), 10, 64)
+	key := settingMobileTargetDevice
+	if taskID > 0 {
+		key = mobileTaskDeviceKey(taskID)
+	}
+
+	if r.Method == http.MethodPut || r.Method == http.MethodPost {
+		var req struct {
+			Serial string `json:"serial"`
+			Reset  bool   `json:"reset"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON")
+			return
+		}
+		serial := strings.TrimSpace(req.Serial)
+		switch {
+		case req.Reset:
+			// 回落下一层：删键而不是写空，否则又变成"盖住下一层"。
+			if err := s.m.pg.DeleteSetting(key); err != nil {
+				writeErr(w, http.StatusInternalServerError, "清除目标设备设置失败："+err.Error())
+				return
+			}
+		default:
+			if serial != "" && !validDeviceSerial(serial) {
+				writeErr(w, http.StatusBadRequest, "设备序列号非法："+mobileDeviceSerialHint)
+				return
+			}
+			if err := s.m.pg.SetSetting(key, serial); err != nil {
+				writeErr(w, http.StatusInternalServerError, "写入目标设备失败："+err.Error())
+				return
+			}
+		}
+	}
+
+	// 生效值：带 task_id 时走完整解析链，不带时就是全局那层。
+	serial, source := s.mobileTargetSerial()
+	if taskID > 0 {
+		serial, source = mobileTargetSerialForTask(s.m.pg, taskID)
+	}
+	// 任务级覆盖单独回传，供 UI 显示「本任务覆盖 X / 跟随全局 Y」。
+	taskSerial := ""
+	if taskID > 0 {
+		if v, ok, err := s.m.pg.GetSetting(mobileTaskDeviceKey(taskID)); err == nil && ok {
+			taskSerial = strings.TrimSpace(v)
+		}
+	}
+	globalSerial, globalSource := s.mobileTargetSerial()
+
+	// 顺手列出当前 adb 在线设备：这是只读探测，不装包、不改设备、不抓数据。
+	// adb 不通时不该让整个端点失败 —— 用户仍要能看到并改当前值。
+	// 只给裸序列号：这个列表的每一项都可能被选中并回写成目标设备，
+	// 混进带状态后缀的展示串会让提交必然 400（见 DeviceStatus.SerialList 的注释）。
+	st := probeMobileDevice(r.Context(), "")
+	devices := st.SerialList
+	if devices == nil {
+		devices = []string{}
+	}
+	for _, extra := range []string{serial, globalSerial, st.Serial} {
+		if extra != "" && !containsString(devices, extra) {
+			devices = append(devices, extra)
+		}
+	}
+	writeJSON(w, 200, map[string]any{
+		"serial":        serial,
+		"source":        source,
+		"scope":         map[bool]string{true: "task", false: "global"}[taskID > 0],
+		"task_id":       taskID,
+		"task_serial":   taskSerial,
+		"global_serial": globalSerial,
+		"global_source": globalSource,
+		"env_serial":    strings.TrimSpace(config.Env("MOBILE_DEVICE_SERIAL")),
+		"auth_mode":     mobileAuthMode(),
+		"adb_addr":      mobileADBAddr(),
+		"adb_reachable": st.Reachable,
+		"devices":       devices,
+		"locked":        serial != "",
+		"hint":          mobileDeviceSerialHint,
+	})
+}
+
+// containsString 小工具：设备列表去重判断。
+func containsString(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
 }
 
 // mobileDevices 是只读探测：不装包、不改设备、不抓数据。

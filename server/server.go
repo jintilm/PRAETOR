@@ -122,6 +122,11 @@ type Server struct {
 	archiveWG   sync.WaitGroup
 	side        *sideQuestionState
 
+	// proxyPool collects/checks public egress proxies in the background and
+	// rotates the healthy selection. It owns its own lock; request handlers only
+	// read Manager.ProxyPoolConfig/EffectiveEgress.
+	proxyPool *proxyPoolService
+
 	// cancel stops the server-owned root context. New derives it from the caller's
 	// ctx so Close can stop every background goroutine (side-question flusher,
 	// engine task runtimes, archive worker) without the caller having to own a
@@ -167,6 +172,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
 	s.initSideQuestions()
+	s.proxyPool = newProxyPoolService(s)
+	go s.proxyPool.Run(s.ctx)
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
 	// 之后每次保存策略再推一次（saveLLMRetryPolicy）。
 	s.applyRetryPolicy()
@@ -804,6 +811,9 @@ func (s *Server) Handler() http.Handler {
 	// Android 真机动态授权：只能随任务创建签发，之后只读 / 撤销 / 查审计。
 	mux.HandleFunc("GET /api/dynamic-ops", s.dynamicOpsCatalog)
 	mux.HandleFunc("GET /api/mobile/devices", s.mobileDevices)
+	// assume 模式下的默认目标设备：运行期可切换，不必改 .env 重建容器。
+	mux.HandleFunc("GET /api/mobile/target-device", s.mobileTargetDevice)
+	mux.HandleFunc("PUT /api/mobile/target-device", s.mobileTargetDevice)
 	mux.HandleFunc("GET /api/tasks/{id}/dynamic-grant", s.taskDynamicGrant)
 	mux.HandleFunc("GET /api/tasks/{id}/dynamic-grant/audits", s.taskDynamicGrantAudits)
 	mux.HandleFunc("POST /api/tasks/{id}/dynamic-grant/revoke", s.taskDynamicGrantRevoke)
@@ -925,6 +935,24 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/llm/records/{id}", s.pgGetLLMRecord)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
+	// Proxy pool: collection/health/routing for target egress. Task-level
+	// egress_upstreams still takes precedence inside the sandbox. LLM/search
+	// proxies remain separate settings and are never mixed into this pool.
+	mux.HandleFunc("GET /api/proxy-pool", s.getProxyPool)
+	mux.HandleFunc("GET /api/proxy-pool/config", s.getProxyPoolConfig)
+	mux.HandleFunc("PUT /api/proxy-pool/config", s.putProxyPoolConfig)
+	mux.HandleFunc("POST /api/proxy-pool/refresh", s.refreshProxyPool)
+	mux.HandleFunc("POST /api/proxy-pool/check", s.checkProxyPool)
+	mux.HandleFunc("POST /api/proxy-pool/import", s.importProxyPool)
+	mux.HandleFunc("PATCH /api/proxy-pool/{id}", s.patchProxyPoolEntry)
+	mux.HandleFunc("DELETE /api/proxy-pool/{id}", s.deleteProxyPoolEntry)
+	mux.HandleFunc("POST /api/proxy-pool/{id}/check", s.checkProxyPoolEntry)
+	mux.HandleFunc("GET /api/proxy-pool/sources", s.listProxyPoolSources)
+	mux.HandleFunc("POST /api/proxy-pool/sources", s.createProxyPoolSource)
+	mux.HandleFunc("PATCH /api/proxy-pool/sources/{id}", s.updateProxyPoolSource)
+	mux.HandleFunc("DELETE /api/proxy-pool/sources/{id}", s.deleteProxyPoolSource)
+	mux.HandleFunc("POST /api/proxy-pool/sources/{id}/fetch", s.fetchProxyPoolSource)
+	mux.HandleFunc("GET /api/proxy-pool/runs", s.listProxyPoolRuns)
 	// 漏洞 IM 推送。渠道是「多实例 + 各自过滤规则」的资源，因此独立成一组
 	// REST 接口，而不是塞进扁平的 /api/settings 键值里。
 	mux.HandleFunc("GET /api/notify/meta", s.notifyMeta)
@@ -1596,6 +1624,10 @@ type createTaskReq struct {
 	// DynamicGrant Android 真机动态授权。省略/Enabled=false = 不签发：
 	// 该任务的所有动态工具调用一律 fail-closed 降级静态（见 server/dynamic_grant.go）。
 	DynamicGrant *dynamicGrantReq `json:"dynamic_grant,omitempty"`
+	// MobileDeviceSerial 本任务的目标设备序列号（仅 assume 模式使用）。
+	// 省略/空 = 跟随全局目标设备；填了则写入 settings 的 mobile.task_device.<taskID>，
+	// 只影响这一个任务 —— 多机并行时可以让每个任务各占一台设备。
+	MobileDeviceSerial string `json:"mobile_device_serial,omitempty"`
 }
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
@@ -1642,6 +1674,13 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.CompanyIDs = companyIDs
+	// 目标设备先校验再建任务：否则会出现「任务建好了、设备没写进去」的半成品状态。
+	// 空值合法，表示跟随全局目标设备（见 mobile_auth.go 的解析链）。
+	mobileSerial := strings.TrimSpace(req.MobileDeviceSerial)
+	if mobileSerial != "" && !validDeviceSerial(mobileSerial) {
+		writeErr(w, 400, "目标设备序列号非法："+mobileDeviceSerialHint)
+		return
+	}
 	interceptRules, err := buildTaskInterceptRules(req.InterceptRules)
 	if err != nil {
 		writeErr(w, 400, "任务级拦截规则无效："+err.Error())
@@ -1694,6 +1733,15 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("[task] 新建任务 #%s «%s» 目标: %s", t.ID, req.Description, req.Goal)
+	// 任务级目标设备绑定（仅 assume 模式使用；required 模式以授权记录里的为准）。
+	// 写入失败不阻断建任务：任务已经建好了，设备可以事后在详情页再设。
+	if mobileSerial != "" {
+		if id, convErr := strconv.ParseInt(t.ID, 10, 64); convErr == nil && id > 0 {
+			if err := s.m.pg.SetSetting(mobileTaskDeviceKey(id), mobileSerial); err != nil {
+				log.Printf("[task] 任务 #%s 目标设备写入失败（可在详情页重设）：%v", t.ID, err)
+			}
+		}
+	}
 	// 共享的建后流程(seed + 种子意图 + 后台目标分解 + engine.Run),与 spawn_task 复用同一段。
 	// launchTask 内部异步,不阻塞 UI —— 目标分解在后台可见地进行。
 	s.launchTask(t, req.Description+" "+req.Goal, req.SeedFirstIntent != nil && *req.SeedFirstIntent)

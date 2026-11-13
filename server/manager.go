@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,7 @@ import (
 	"github.com/jintilm/praetor/guard"
 	"github.com/jintilm/praetor/intercept"
 	actool "github.com/jintilm/praetor/internal/norma/tool"
+	"github.com/jintilm/praetor/proxypool"
 	"github.com/jintilm/praetor/traffic"
 )
 
@@ -255,6 +257,11 @@ type Manager struct {
 	// capture is on it becomes the MITM's upstream; when capture is off it is
 	// injected into agent bash env / WebFetch directly. See ProxyAddr.
 	globalProxy string
+	// proxyPoolCfg controls automatic collection/routing; proxyPoolProxy is the
+	// currently selected healthy proxy. Only target egress uses these values;
+	// LLM/search-specific proxies stay independent.
+	proxyPoolCfg   proxypool.Config
+	proxyPoolProxy string
 	// egressUpstreams 是任务级出口池（见 settingEgressUpstreams）；空 = 全局出口。
 	egressUpstreams []string
 	// dynamicGrantSecret 是任务级动态授权令牌的 HMAC 密钥，独立于 jwt.key。
@@ -283,6 +290,10 @@ const (
 	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
 	// only routes the search backend) and the per-profile LLM proxy.
 	settingGlobalProxy = "global_proxy"
+	// settingProxyPoolConfig stores proxypool.Config as JSON. Kept separate from
+	// global_proxy so operators can switch between pool/system/direct without
+	// losing either configuration.
+	settingProxyPoolConfig = "proxy_pool_config"
 	// settingEgressUpstreams 是任务级出口的上游列表（换行分隔）：
 	// 配置后沙箱容器按任务稳定分配出口（hash(taskID)%N），实现任务间 IP 隔离；
 	// 空列表 = 回落全局出口代理。每个上游必须是合法的 http/https/socks5 URL。
@@ -458,6 +469,9 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if err := pg.EnsureLLMUsageTable(); err != nil {
 		log.Printf("[llmusage] create table: %v", err)
 	}
+	if err := pg.EnsureProxyPoolSources(context.Background()); err != nil {
+		log.Printf("[proxy-pool] seed sources: %v", err)
+	}
 	m := &Manager{
 		dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{},
 		interceptor: intercept.New(pg), dynamicGrantSecret: loadDynamicGrantSecret(dir),
@@ -522,6 +536,15 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if v, ok, _ := pg.GetSetting(settingGlobalProxy); ok {
 		m.globalProxy = strings.TrimSpace(v)
 	}
+	m.proxyPoolCfg = proxypool.DefaultConfig()
+	if v, ok, _ := pg.GetSetting(settingProxyPoolConfig); ok {
+		m.proxyPoolCfg = proxypool.ParseConfig(v)
+	}
+	if best, err := pg.SelectProxyPoolEntry(context.Background()); err == nil && best != nil {
+		m.proxyPoolProxy = best.URL
+	} else if err != nil {
+		log.Printf("[proxy-pool] 恢复最佳代理失败: %v", err)
+	}
 	if v, ok, _ := pg.GetSetting(settingEgressUpstreams); ok && strings.TrimSpace(v) != "" {
 		for _, line := range strings.Split(v, "\n") {
 			if line = strings.TrimSpace(line); line != "" {
@@ -529,10 +552,8 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 			}
 		}
 	}
-	if m.traffic != nil {
-		if err := m.traffic.SetUpstreamProxy(m.globalProxy); err != nil {
-			log.Printf("[proxy] 全局代理 %q 无效，已忽略: %v", m.globalProxy, err)
-		}
+	if err := m.applyEgressToTraffic(); err != nil {
+		log.Printf("[proxy] 出口代理无效，已忽略: %v", err)
 	}
 	m.enrich = enrich.New(m.assets, m.ProxyAddr, 4)
 	// Reconcile the seeded browser MCP with the persisted capture state, so a
@@ -844,9 +865,7 @@ func (m *Manager) ProxyAddr() string {
 	if m.traffic != nil && m.TrafficEnabled() {
 		return m.traffic.ProxyAddr()
 	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.globalProxy
+	return m.EffectiveEgress()
 }
 
 // ProxyCACert returns the CA cert path agents must trust to verify HTTPS through
@@ -868,6 +887,100 @@ func (m *Manager) GlobalProxy() string {
 	return m.globalProxy
 }
 
+// ProxyPoolConfig returns the current proxy-pool settings.
+func (m *Manager) ProxyPoolConfig() proxypool.Config {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.proxyPoolCfg
+}
+
+// SetProxyPoolConfig validates, persists and applies collection/routing settings.
+// Callers rebuild agents afterwards so capture-off bash/WebFetch pick it up.
+func (m *Manager) SetProxyPoolConfig(cfg proxypool.Config) error {
+	cfg = cfg.Normalize()
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	if err := m.pg.SetSetting(settingProxyPoolConfig, string(raw)); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.proxyPoolCfg = cfg
+	m.mu.Unlock()
+	if err := m.applyEgressToTraffic(); err != nil {
+		return err
+	}
+	m.syncBrowserMCPProxy()
+	return nil
+}
+
+// ProxyPoolSelection returns the cached healthy proxy chosen by the pool.
+func (m *Manager) ProxyPoolSelection() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.proxyPoolProxy
+}
+
+// SetProxyPoolSelection updates the healthy proxy used by route_mode=pool and
+// immediately re-points the MITM upstream. Browser MCP follows ProxyAddr.
+func (m *Manager) SetProxyPoolSelection(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	m.mu.Lock()
+	changed := m.proxyPoolProxy != raw
+	m.proxyPoolProxy = raw
+	m.mu.Unlock()
+	if !changed {
+		return false
+	}
+	if err := m.applyEgressToTraffic(); err != nil {
+		log.Printf("[proxy-pool] 应用出口失败: %v", err)
+	}
+	m.syncBrowserMCPProxy()
+	return true
+}
+
+// EffectiveEgress resolves the final target-traffic egress after task-level
+// routing (handled by callers) and pool fallback. Empty means direct.
+func (m *Manager) EffectiveEgress() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.effectiveEgressLocked()
+}
+
+func (m *Manager) effectiveEgressLocked() string {
+	cfg := m.proxyPoolCfg
+	if !cfg.Enabled {
+		return m.globalProxy
+	}
+	switch cfg.RouteMode {
+	case "direct":
+		return ""
+	case "system":
+		return m.globalProxy
+	case "pool", "":
+		if m.proxyPoolProxy != "" {
+			return m.proxyPoolProxy
+		}
+		if cfg.FallbackMode == "direct" {
+			return ""
+		}
+		return m.globalProxy
+	default:
+		return m.globalProxy
+	}
+}
+
+func (m *Manager) applyEgressToTraffic() error {
+	if m.traffic == nil {
+		return nil
+	}
+	return m.traffic.SetUpstreamProxy(m.EffectiveEgress())
+}
+
 // SetGlobalProxy validates, persists and applies the global egress proxy
 // (http/https/socks5, optional user:pass; empty = direct). It updates the MITM's
 // upstream immediately; callers must rebuild agents (applyLLM) afterwards so the
@@ -885,10 +998,8 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 	m.mu.Lock()
 	m.globalProxy = raw
 	m.mu.Unlock()
-	if m.traffic != nil {
-		if err := m.traffic.SetUpstreamProxy(raw); err != nil {
-			return err
-		}
+	if err := m.applyEgressToTraffic(); err != nil {
+		return err
 	}
 	// Keep the browser MCP's egress in sync with the new global proxy too.
 	m.syncBrowserMCPProxy()

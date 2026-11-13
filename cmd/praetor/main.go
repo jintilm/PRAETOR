@@ -121,7 +121,16 @@ func run() int {
 	// 宿主 shell 解析结果：Bash 的每一条命令都走它，而"为什么是 PowerShell"这类
 	// 问题在别人的机器上没法靠猜。启动即打，纯只读探测（一次 LookPath + 若干 stat）。
 	actool.LogHostShell()
-	srv := server.New(ctx, mgr, skillDir, *dataDir, config.BaseDir())
+	// JWT 签名密钥目录。默认与二进制同级的 BaseDir；容器里用 PRAETOR_KEY_DIR 指到一个
+	// 独立持久卷。为什么不能用 data 目录兜底：沙箱工作区(PRAETOR_SANDBOX_WORK_ROOT)
+	// 就在 data 下面，密钥放那儿等于让 agent 能读到它 —— 所以是「另挂一个目录」而不是
+	// 「挪进 data」。不指独立卷的话密钥会落在镜像层里，每次重建都重新生成，
+	// 所有浏览器会话跟着失效。
+	keyDir := strings.TrimSpace(config.Env("KEY_DIR"))
+	if keyDir == "" {
+		keyDir = config.BaseDir()
+	}
+	srv := server.New(ctx, mgr, skillDir, *dataDir, keyDir)
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),
@@ -242,8 +251,18 @@ func logConfigDiagnostics(dataDir string) {
 	if exclude == "" {
 		exclude = "(未配置)"
 	}
+	authMode := config.Env("MOBILE_AUTH_MODE")
+	if authMode == "" {
+		authMode = "assume (默认：视为授权已获得)"
+	}
+	serial := config.Env("MOBILE_DEVICE_SERIAL")
+	if serial == "" {
+		serial = "(未配置，不锁设备)"
+	}
 	log.Printf("[config] 录制代理: 监听=%s，真机模式=%s，宿主绑定=%s，adb=%s:%s，egress旁路=%s",
 		trafficAddrDefault(), mode, bind, adbHost, adbPort, exclude)
+	log.Printf("[config] 真机授权: 模式=%s，目标设备=%s（assume 下设备锁仍按它生效）",
+		authMode, serial)
 
 	dsn, source, err := config.PostgresDSN()
 	if err != nil {

@@ -7,7 +7,10 @@ package server
 // 三层纵深：
 //   ① 注入层：设备模式未开 / 任务无生效授权 → 这些工具根本不出现在模型工具面；
 //   ② guard 层：每次调用按 op 白名单 + 短时令牌 + 设备独占锁 fail-closed；
-//   ③ 工具层：再查 DB 授权、校验 APK 哈希、限制 shell 命令与设备侧路径。
+//   ③ 工具层：再查授权、校验 APK 哈希、限制 shell 命令与设备侧路径。
+//
+// 三层的「授权」都来自 effectiveMobileGrant；授权模式（assume / required）见
+// mobile_auth.go。assume 只解开「有没有授权记录」这一条，其余判定全部保留。
 //
 // 不提供「通用 adb 命令直通」工具：那会让 op 白名单退化成摆设。
 
@@ -145,6 +148,8 @@ func mobileToolSpecs() []mobileToolSpec {
 
 // mobileToolsFor 按当前 run 的 taskID 决定要不要注入工具。
 // 未开设备模式 / 无生效授权 → 返回 nil，模型连工具名都看不到。
+// 授权取自 effectiveMobileGrant：assume 模式下合成授权即视为生效，
+// required 模式下仍需任务级授权记录（见 mobile_auth.go）。
 func (s *Server) mobileToolsFor(taskID int64) []actool.CoreTool {
 	if s == nil || s.m == nil || s.m.pg == nil || taskID <= 0 {
 		return nil
@@ -152,7 +157,7 @@ func (s *Server) mobileToolsFor(taskID int64) []actool.CoreTool {
 	if config.Env("MOBILE_DEVICE_MODE") != "1" {
 		return nil
 	}
-	g, err := s.m.pg.GetTaskDynamicGrant(taskID)
+	g, err := s.effectiveMobileGrant(taskID)
 	if err != nil || g == nil || !g.Active(time.Now()) {
 		return nil
 	}
@@ -169,12 +174,13 @@ func (s *Server) mobileToolsFor(taskID int64) []actool.CoreTool {
 }
 
 // mobileAuthorization 是工具层二次校验。guard 已经在 PreToolUse 拦过一次，
-// 这里再读一次 DB：既防止跨任务调用，也让「撤销后正在排队的调用」立刻失败。
+// 这里再取一次授权：既防止跨任务调用，也让「撤销后正在排队的调用」立刻失败。
+// assume 模式下取到的是合成授权，设备锁与审计照常生效。
 func (s *Server) mobileAuthorization(taskID int64, op string) (*pgdb.DynamicGrant, error) {
 	if config.Env("MOBILE_DEVICE_MODE") != "1" {
 		return nil, errors.New("真机设备模式未开启（PRAETOR_MOBILE_DEVICE_MODE=1），动态工具不可用；改走静态分析")
 	}
-	g, err := s.m.pg.GetTaskDynamicGrant(taskID)
+	g, err := s.effectiveMobileGrant(taskID)
 	if err != nil {
 		return nil, fmt.Errorf("读取任务动态授权失败：%w", err)
 	}

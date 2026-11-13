@@ -90,6 +90,7 @@ export const sidebarItems: NavGroup[] = [
       { id: "llm", title: "LLM", url: "/system/llm", icon: Brain },
       { id: "usage", title: "用量成本", url: "/system/usage", icon: BarChart3 },
       { id: "agents", title: "Agent", url: "/system/agents", icon: Bot },
+      { id: "proxy-pool", title: "代理池", url: "/system/proxy-pool", icon: Network },
       { id: "mcp", title: "MCP", url: "/system/mcp", icon: Plug },
       { id: "skills", title: "Skill", url: "/system/skills", icon: Sparkles },
       { id: "tools", title: "工具", url: "/system/tools", icon: Wrench },

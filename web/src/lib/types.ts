@@ -45,6 +45,46 @@ export interface DynamicOpsCatalog {
   device_mode: boolean;
   adb_addr: string;
   traffic_addr: string;
+  /** 授权模式：assume = 视为授权已获得（默认），required = 必须签发任务级授权。 */
+  auth_mode?: string;
+  /** 便捷布尔：true 表示当前为 assume 模式，无需签发授权记录即可用 dynamic 工具。 */
+  auth_assumed?: boolean;
+  /** assume 模式下的目标设备序列号（后端 PRAETOR_MOBILE_DEVICE_SERIAL）；留空表示不锁设备。 */
+  device_serial?: string;
+  /** device_serial 的命中来源：setting=运行期设置，env=部署默认，none=都没有。 */
+  device_source?: string;
+}
+
+/**
+ * 后端 /api/mobile/target-device。
+ *
+ * 上游把设备序列号存在任务级授权记录里；assume 模式没有那条记录，默认设备改放
+ * settings 表，于是换手机不必改 .env 重建容器。source 用来告诉用户此刻到底是
+ * 哪一层在生效，免得改了值却看不出效果从哪来。
+ */
+export interface MobileTargetDevice {
+  serial: string;
+  /** setting = 运行期设置（此处写入）；env = 回落到 PRAETOR_MOBILE_DEVICE_SERIAL；none = 都不设，不锁设备 */
+  source: "setting" | "env" | "none" | string;
+  /** 部署级环境变量里的值：点「恢复部署默认」会回到这一台 */
+  env_serial: string;
+  auth_mode: string;
+  adb_addr: string;
+  adb_reachable: boolean;
+  /** 当前 adb 在线设备，供选择器使用 */
+  devices: string[];
+  /** serial 非空即会取设备独占锁 */
+  locked: boolean;
+  /** 序列号格式说明，直接展示即可 */
+  hint: string;
+  /** 本次查询的作用域：global=全局默认，task=某任务的专属绑定 */
+  scope?: "global" | "task" | string;
+  task_id?: number;
+  /** 任务级覆盖值；空 = 跟随全局。仅 scope=task 时有意义 */
+  task_serial?: string;
+  /** 全局那一层的值，供 UI 显示「跟随全局 X」 */
+  global_serial?: string;
+  global_source?: string;
 }
 
 // dynamicOpOptions：ops 顺序与取值跟随后端，标签优先用本地短标签；
@@ -1152,6 +1192,103 @@ export interface TrafficHost {
 }
 
 // ---- App settings (runtime toggles) ----
+// ---- 代理池（系统 → 代理池）----
+// 公共代理不可信：这里的 URL 是候选出口，不代表可信链路。后端在 API 输出里
+// 会掩码 user:pass，前端永远不要把掩码值当成可编辑的真实凭据。
+export type ProxyPoolStatus = "unknown" | "healthy" | "unhealthy" | "quarantine";
+
+export interface ProxyPoolEntry {
+  id: number;
+  url: string;
+  protocol: "http" | "https" | "socks5" | string;
+  host: string;
+  port: number;
+  region: string;
+  source: string;
+  enabled: boolean;
+  status: ProxyPoolStatus | string;
+  latency_ms: number;
+  success_count: number;
+  failure_count: number;
+  consecutive_failures: number;
+  success_rate: number;
+  score: number;
+  last_checked_at?: string | null;
+  last_error: string;
+  exit_ip: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProxyPoolSource {
+  id: number;
+  name: string;
+  url: string;
+  region: string;
+  protocol: string;
+  enabled: boolean;
+  last_fetch_at?: string | null;
+  last_error: string;
+  imported_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProxyPoolConfig {
+  enabled: boolean;
+  route_mode: "pool" | "system" | "direct" | string;
+  fallback_mode: "system" | "direct" | string;
+  auto_collect: boolean;
+  auto_check: boolean;
+  sources_via_system: boolean;
+  collect_interval_minutes: number;
+  check_interval_minutes: number;
+  probe_url: string;
+  timeout_seconds: number;
+  concurrency: number;
+  max_entries: number;
+  failure_threshold: number;
+}
+
+export interface ProxyPoolStats {
+  total: number;
+  enabled: number;
+  healthy: number;
+  unhealthy: number;
+  quarantine: number;
+  unknown: number;
+  sources: number;
+}
+
+export interface ProxyPoolRun {
+  id: number;
+  kind: string;
+  source_id?: number | null;
+  started_at: string;
+  finished_at?: string | null;
+  imported: number;
+  checked: number;
+  healthy: number;
+  failed: number;
+  error: string;
+}
+
+export interface ProxyPoolResponse {
+  entries: ProxyPoolEntry[];
+  total: number;
+  page: number;
+  page_size: number;
+  stats: ProxyPoolStats;
+  config: ProxyPoolConfig;
+  selected_proxy: string;
+  route_mode: string;
+  effective_egress: string;
+  running: boolean;
+  last_error: string;
+  sources: ProxyPoolSource[];
+  runs: ProxyPoolRun[];
+}
+
 export interface Settings {
   traffic_capture: boolean;
   agent_traffic_binding: boolean; // Agent 自动绑定流量证据，默认关闭；不影响人工绑定

@@ -130,6 +130,7 @@ import type {
   DeviceProbeResult,
   DynamicGrantInput,
   DynamicOpsCatalog,
+  MobileTargetDevice,
   LLMProfile,
   ReportTemplate,
   Task,
@@ -3121,6 +3122,9 @@ function CreateTaskSheet({
   const [probingDevice, setProbingDevice] = React.useState(false);
   // 运行时前置与 ops 闭集都来自后端，避免前端写死清单与后端漂移。
   const [opsCatalog, setOpsCatalog] = React.useState<DynamicOpsCatalog | null>(null);
+  // 本任务的目标设备：空串 = 跟随全局；非空 = 写到本任务专属键（只影响这个任务）。
+  const [mobileTarget, setMobileTarget] = React.useState<MobileTargetDevice | null>(null);
+  const [mobileDevice, setMobileDevice] = React.useState<string>("");
   const [hashingAPK, setHashingAPK] = React.useState(false);
   const apkFileRef = React.useRef<HTMLInputElement>(null);
   // 方式1 文件上传:建任务前把文件暂存到 drafts/<draftId>/uploads/,拿回绝对路径追加进描述。
@@ -3144,6 +3148,15 @@ function CreateTaskSheet({
       .dynamicOps()
       .then(setOpsCatalog)
       .catch(() => setOpsCatalog(null));
+    // 全局目标设备 + 当前在线设备：创建表单里直接挑设备用。
+    // 拿不到就退化成「跟随全局」一项，不影响建任务。
+    api
+      .mobileTargetDevice()
+      .then((d) => {
+        setMobileTarget(d);
+        setMobileDevice(d.serial);
+      })
+      .catch(() => setMobileTarget(null));
   }, []);
 
   // pickFiles uploads the chosen files into this draft's staging dir and appends their
@@ -3244,6 +3257,8 @@ function CreateTaskSheet({
         coverageEnabled,
         reportTemplate,
         dynamicGrant: dynamicGrant.enabled ? dynamicGrant : undefined,
+        // 空串 = 跟随全局目标设备；非空写入本任务专属绑定（只影响这个任务）。
+        mobileDeviceSerial: mobileDevice || undefined,
         interceptRules: interceptRules
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
           .filter((r) => r.pattern !== ""),
@@ -3264,6 +3279,7 @@ function CreateTaskSheet({
       setCoverageEnabled(true);
       setReportTemplate("praetor");
       setDynamicGrant(emptyDynamicGrant());
+      setMobileDevice(""); // 复位成「跟随全局」，避免下一单莫名绑上一台的设备
       setDeviceProbe(null);
       setInterceptRules([]);
       setUploadCount(0);
@@ -3468,7 +3484,11 @@ function CreateTaskSheet({
                 <ChevronRightIcon className="text-muted-foreground size-4 transition-transform group-data-[state=open]:rotate-90" />
                 Android 真机动态授权（可选）
                 <span className="text-muted-foreground ml-auto text-xs font-normal">
-                  {dynamicGrant.enabled ? "已启用" : "未启用 · 动态操作降级静态"}
+                  {dynamicGrant.enabled
+                    ? "已启用"
+                    : opsCatalog?.auth_assumed === true
+                      ? "未签发 · assume 模式下动态工具照常可用"
+                      : "未启用 · 动态操作降级静态"}
                 </span>
               </CollapsibleTrigger>
               <CollapsibleContent className="grid gap-5 pt-5">
@@ -3478,11 +3498,76 @@ function CreateTaskSheet({
                     任务会静默降级到静态分析。请在 .env 开启并重建容器（adb 落点 {opsCatalog.adb_addr}）。
                   </div>
                 )}
+                {opsCatalog?.device_mode && opsCatalog?.auth_assumed === true && (
+                  <div className="rounded-md border border-sky-500/40 bg-sky-500/5 p-3 text-xs text-sky-700 dark:text-sky-400">
+                    当前为 <code>assume</code> 模式：<strong>不填这里也能用动态工具</strong>，可用范围为全量动态操作。
+                    此处签发的记录仍然有效，作为书面凭证保留（可撤销）。要恢复「必须先签发否则降级」改
+                    <code>PRAETOR_MOBILE_AUTH_MODE=required</code>。
+                  </div>
+                )}
                 {opsCatalog?.device_mode && (
                   <p className="text-muted-foreground text-xs">
                     后端设备模式已开启 · adb 落点 <code>{opsCatalog.adb_addr}</code>
                     {opsCatalog.traffic_addr ? ` · 代理监听 ${opsCatalog.traffic_addr}` : ""}
                   </p>
+                )}
+                {/* 本任务的目标设备：assume 模式下任务不签发授权记录，设备就在这儿挑。
+                    只写任务级键，不动全局 —— 多机并行时每个任务可以各占一台。 */}
+                {opsCatalog?.device_mode && opsCatalog.auth_assumed === true && mobileTarget && (
+                  <div className="grid gap-2">
+                    <Label htmlFor="mobile-device-serial">本任务的目标设备</Label>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        className="border-input bg-background h-9 rounded-md border px-2 text-sm"
+                        value={mobileTarget.devices.includes(mobileDevice) ? mobileDevice : ""}
+                        onChange={(e) => setMobileDevice(e.target.value)}
+                      >
+                        <option value="">
+                          {mobileTarget.serial
+                            ? `跟随全局目标设备（${mobileTarget.serial}）`
+                            : "跟随全局目标设备（当前不锁设备）"}
+                        </option>
+                        {mobileTarget.devices.map((d) => (
+                          <option key={d} value={d}>
+                            {d}
+                          </option>
+                        ))}
+                      </select>
+                      <Input
+                        id="mobile-device-serial"
+                        value={mobileDevice}
+                        onChange={(e) => setMobileDevice(e.target.value)}
+                        placeholder="或手填序列号"
+                        className="h-9 w-56"
+                      />
+                      {mobileDevice !== "" && (
+                        <Button type="button" size="sm" variant="outline" onClick={() => setMobileDevice("")}>
+                          跟随全局
+                        </Button>
+                      )}
+                    </div>
+                    <p className="text-muted-foreground text-xs">
+                      {mobileDevice ? (
+                        <>
+                          本任务独占 <code>{mobileDevice}</code>，设备锁按它生效，其它任务不受影响。
+                        </>
+                      ) : (
+                        <>
+                          跟随全局目标设备
+                          {mobileTarget.serial ? (
+                            <>
+                              {" "}
+                              <code>{mobileTarget.serial}</code>
+                            </>
+                          ) : (
+                            "（当前不锁设备）"
+                          )}
+                          ，全局值变了本任务跟着变。
+                        </>
+                      )}{" "}
+                      留空也能用 —— assume 模式下动态工具照常注入，不会降级。
+                    </p>
+                  </div>
                 )}
                 <div className="grid gap-2">
                   <label htmlFor="dynamic-grant-enabled" className="flex items-center gap-2 text-sm">
@@ -3491,11 +3576,13 @@ function CreateTaskSheet({
                       checked={dynamicGrant.enabled}
                       onCheckedChange={(v) => patchGrant({ enabled: !!v })}
                     />
-                    启用并签发授权
+                    {opsCatalog?.auth_assumed === true ? "额外签发书面授权记录（可选）" : "启用并签发授权"}
                   </label>
                   <p className="text-muted-foreground text-xs">
-                    真机会触发真实登录、推送与数据读写。授权随任务下发后由平台逐步自动校验，无需逐次人工确认；
-                    但授权本身必须由人在这里显式签发，任务存在 ≠ 已授权。未签发时 adb / frida 类调用一律被拦截并改用静态分析。
+                    真机会触发真实登录、推送与数据读写。授权随任务下发后由平台逐步自动校验，无需逐次人工确认。
+                    {opsCatalog?.auth_assumed === true
+                      ? "当前 assume 模式下不签发也能用动态工具；这里签发只是额外留下一条可撤销的书面凭证。"
+                      : "授权必须由人在这里显式签发，任务存在 ≠ 已授权。未签发时 adb / frida 类调用一律被拦截并改用静态分析。"}
                   </p>
                 </div>
                 {dynamicGrant.enabled && (

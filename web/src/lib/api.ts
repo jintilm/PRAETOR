@@ -24,26 +24,22 @@ import type {
   CommandRecord,
   Company,
   CompanyScopeMutation,
+  CompanyScopeRule,
   ComponentProbe,
   ComponentsResp,
-  PersonaAudit,
-  SystemPersonaResp,
-  CompanyScopeRule,
   Conversation,
   ConvTokenSummary,
   CoverageAssetRefs,
   CoverageGraphData,
-  DailyTokenBucket,
-  DeviceProbeResult,
-  DynamicGrantInput,
-  DynamicGrantRecord,
-  DynamicGrantAudit,
-  DynamicOpsCatalog,
-  MobileMeta,
-  UsageSummary,
   CtfBoard,
+  DailyTokenBucket,
   DeleteTaskOptions,
   DeleteTaskResult,
+  DeviceProbeResult,
+  DynamicGrantAudit,
+  DynamicGrantInput,
+  DynamicGrantRecord,
+  DynamicOpsCatalog,
   Edge,
   ErrorKindStat,
   EvidenceBodyPreview,
@@ -79,13 +75,21 @@ import type {
   MCPServer,
   MCPTool,
   MissingSkill,
+  MobileMeta,
+  MobileTargetDevice,
   ModelTokenStat,
   NotificationChannel,
   NotificationDelivery,
   NotificationFilter,
   NotificationMeta,
+  PersonaAudit,
   PromptVar,
   PromptVersion,
+  ProxyPoolConfig,
+  ProxyPoolEntry,
+  ProxyPoolResponse,
+  ProxyPoolRun,
+  ProxyPoolSource,
   ReportTemplate,
   SessionTokenUsage,
   Settings,
@@ -95,6 +99,7 @@ import type {
   SSProject,
   SSTask,
   Stats,
+  SystemPersonaResp,
   Task,
   TaskArchive,
   TaskArchivePage,
@@ -119,12 +124,14 @@ import type {
   TrafficResp,
   UpdateCheck,
   UsageStats,
+  UsageSummary,
   VulnKnowledgeDetail,
   VulnKnowledgePage,
   VulnKnowledgeStats,
   WorkspaceFile,
   WorkspaceListing,
 } from "@/lib/types";
+
 export type { PersonaAudit } from "@/lib/types";
 
 function getToken(): string | null {
@@ -289,6 +296,7 @@ export const api = {
     reportTemplate?: ReportTemplate; // 报告输出模板；缺省=praetor
     interceptRules?: AssetInterceptRuleInput[];
     dynamicGrant?: DynamicGrantInput; // Android 真机动态授权；未启用时不要签发
+    mobileDeviceSerial?: string; // 本任务的目标设备序列号；空=跟随全局目标设备
   }) =>
     post<Task>("/tasks", {
       name: input.name ?? "",
@@ -306,6 +314,7 @@ export const api = {
       report_template: input.reportTemplate ?? "praetor", // 报告输出模板(创建时定)
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
       dynamic_grant: input.dynamicGrant?.enabled ? input.dynamicGrant : null, // 真机动态授权(默认不签发)
+      mobile_device_serial: input.mobileDeviceSerial ?? "", // 本任务目标设备；空=跟随全局
     }),
   // ---- Android 真机动态授权 ----
   // 授权只能随任务创建签发一次；下面只有只读探测/查询与撤销，没有创建/修改入口。
@@ -314,6 +323,13 @@ export const api = {
   taskMobileMeta: (id: string) => get<MobileMeta>(`/tasks/${encodeURIComponent(id)}/mobile-meta`),
   mobileDevices: (serial?: string) =>
     get<DeviceProbeResult>(`/mobile/devices${serial ? `?serial=${encodeURIComponent(serial)}` : ""}`),
+  // 目标设备：运行期可切换（写 settings 表），不必改 .env 重建容器。
+  // 带 taskId 读写「本任务专属设备」，不带则是全局默认。
+  // reset=true 删掉本层回落到下一层；serial="" 表示显式不锁设备。
+  mobileTargetDevice: (taskId?: string) =>
+    get<MobileTargetDevice>(`/mobile/target-device${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`),
+  setMobileTargetDevice: (input: { serial?: string; reset?: boolean }, taskId?: string) =>
+    put<MobileTargetDevice>(`/mobile/target-device${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`, input),
   taskDynamicGrant: (id: string) =>
     get<{ state: "none" | "active" | "revoked" | "expired" | string; grant: DynamicGrantRecord | null }>(
       `/tasks/${encodeURIComponent(id)}/dynamic-grant`,
@@ -324,14 +340,22 @@ export const api = {
     post<{ ok: boolean }>(`/tasks/${encodeURIComponent(id)}/dynamic-grant/revoke`, { reason, operator }),
   // ---- CTF（域=ctf 的任务）：判分/题面配置、竞速看板、提交记录 ----
   taskCTFConfig: (id: string) =>
-    get<{ task_id: string; domain: string; challenge_dir?: string; expected_flag?: string; challenge_ready: boolean; submitter_ready: boolean }>(
-      `/tasks/${id}/ctf`,
-    ),
+    get<{
+      task_id: string;
+      domain: string;
+      challenge_dir?: string;
+      expected_flag?: string;
+      challenge_ready: boolean;
+      submitter_ready: boolean;
+    }>(`/tasks/${id}/ctf`),
   saveTaskCTFConfig: (id: string, input: { challengeDir?: string; expectedFlag?: string }) =>
-    put<{ challenge_dir?: string; expected_flag?: string; challenge_ready: boolean; submitter_ready: boolean }>(`/tasks/${id}/ctf`, {
-      challenge_dir: input.challengeDir?.trim() || "",
-      expected_flag: input.expectedFlag?.trim() || "",
-    }),
+    put<{ challenge_dir?: string; expected_flag?: string; challenge_ready: boolean; submitter_ready: boolean }>(
+      `/tasks/${id}/ctf`,
+      {
+        challenge_dir: input.challengeDir?.trim() || "",
+        expected_flag: input.expectedFlag?.trim() || "",
+      },
+    ),
   ctfBoard: (id: string) =>
     get<{
       strategy: string;
@@ -340,7 +364,17 @@ export const api = {
       slice_tokens?: number;
       token_left?: number;
       exhausted?: boolean;
-      todo?: { id: string; name?: string; category?: string; points: number; state: string; action: string; est_tokens: number; spent_tokens: number; reason?: string }[];
+      todo?: {
+        id: string;
+        name?: string;
+        category?: string;
+        points: number;
+        state: string;
+        action: string;
+        est_tokens: number;
+        spent_tokens: number;
+        reason?: string;
+      }[];
       give_up?: { id: string; name?: string; points: number; reason?: string }[];
       solved?: string[];
     }>(`/tasks/${id}/ctf/board`),
@@ -631,13 +665,7 @@ export const api = {
   findingAssetTree: (q: Omit<FindingQuery, "page" | "pageSize">) =>
     get<FindingAssetTree>(`/exploration/findings/asset-tree?${findingFilterParams(q).toString()}`),
   findingStats: () => get<FindingStats>("/exploration/findings/stats"),
-  vulnKnowledgePage: (params: {
-    page?: number;
-    pageSize?: number;
-    status?: string;
-    kind?: string;
-    q?: string;
-  }) => {
+  vulnKnowledgePage: (params: { page?: number; pageSize?: number; status?: string; kind?: string; q?: string }) => {
     const qs = new URLSearchParams();
     if (params.page) qs.set("page", String(params.page));
     if (params.pageSize) qs.set("page_size", String(params.pageSize));
@@ -995,6 +1023,41 @@ export const api = {
   // ---- app settings (runtime toggles) ----
   settings: () => get<Settings>(`/settings`),
   setSettings: (patch: Partial<Settings>) => put<Settings>(`/settings`, patch),
+  // ---- 代理池（目标流量出口）----
+  // 代理池只影响目标流量；LLM / 网络搜索 / 宿主 HTTP_PROXY 各走自己的配置。
+  proxyPool: (params?: { status?: string; q?: string; source?: string; page?: number; pageSize?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.status) sp.set("status", params.status);
+    if (params?.q?.trim()) sp.set("q", params.q.trim());
+    if (params?.source) sp.set("source", params.source);
+    sp.set("page", String(params?.page ?? 1));
+    sp.set("page_size", String(params?.pageSize ?? 20));
+    return get<ProxyPoolResponse>(`/proxy-pool?${sp}`);
+  },
+  proxyPoolConfig: () =>
+    get<{ config: ProxyPoolConfig; selected_proxy: string; effective_egress: string }>("/proxy-pool/config"),
+  updateProxyPoolConfig: (patch: Partial<ProxyPoolConfig>) =>
+    put<{ config: ProxyPoolConfig; selected_proxy: string; effective_egress: string }>("/proxy-pool/config", patch),
+  proxyPoolRefresh: () => post<{ started: boolean }>("/proxy-pool/refresh"),
+  proxyPoolCheckAll: () => post<{ started: boolean }>("/proxy-pool/check"),
+  proxyPoolImport: (payload: { text: string; region?: string; protocol?: string; source?: string }) =>
+    post<{ parsed: number; imported: number }>("/proxy-pool/import", payload),
+  proxyPoolPatchEntry: (id: number, enabled: boolean) =>
+    patch<{ id: number; enabled: boolean }>(`/proxy-pool/${id}`, { enabled }),
+  proxyPoolDeleteEntry: (id: number) => del<{ deleted: number }>(`/proxy-pool/${id}`),
+  proxyPoolCheckEntry: (id: number) =>
+    post<{ entry: ProxyPoolEntry | null; selected_proxy: string }>(`/proxy-pool/${id}/check`),
+  proxyPoolSources: () => get<{ sources: ProxyPoolSource[] }>("/proxy-pool/sources").then((r) => arr(r.sources)),
+  proxyPoolCreateSource: (input: { name: string; url: string; region?: string; protocol?: string }) =>
+    post<ProxyPoolSource>("/proxy-pool/sources", input),
+  proxyPoolUpdateSource: (
+    id: number,
+    input: Partial<Pick<ProxyPoolSource, "name" | "url" | "region" | "protocol" | "enabled">>,
+  ) => patch<ProxyPoolSource>(`/proxy-pool/sources/${id}`, input),
+  proxyPoolDeleteSource: (id: number) => del<{ deleted: number }>(`/proxy-pool/sources/${id}`),
+  proxyPoolFetchSource: (id: number) => post<{ imported: number }>(`/proxy-pool/sources/${id}/fetch`),
+  proxyPoolRuns: (limit = 20) =>
+    get<{ runs: ProxyPoolRun[] }>(`/proxy-pool/runs?limit=${limit}`).then((r) => arr(r.runs)),
   // Run a real "test" search with the given (or saved) config to verify it works.
   testWebSearch: (patch: {
     web_search_backend?: string;
@@ -1007,8 +1070,7 @@ export const api = {
   // 渠道是多实例资源（同一类型可配多个机器人、各有过滤规则），因此独立成组，
   // 不塞进扁平的 settings 键值里。
   notifyMeta: () => get<NotificationMeta>(`/notify/meta`),
-  notifyChannels: () =>
-    get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
+  notifyChannels: () => get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
   notifyCreateChannel: (payload: {
     name: string;
     kind: string;

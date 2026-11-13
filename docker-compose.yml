@@ -85,6 +85,9 @@ services:
       # 自动推导（见 sandbox/hostpath.go），因此这里不需要、也不应该填任何与机器
       # 相关的绝对路径：换台机器、换个 clone 目录、挪动仓库都能直接复跑。
       PRAETOR_SANDBOX_WORK_ROOT: /app/data/work
+      # JWT 签名密钥目录：指向下面的命名卷，容器重建不换密钥（否则所有人被踢下线）。
+      # 刻意不放 /app/data —— 沙箱工作区就在它下面，agent 能读到。
+      PRAETOR_KEY_DIR: /app/keys
       # 逃生舱：只有 Docker daemon 不在本机（远程 DOCKER_HOST）等非常规布局才需要，
       # 填 daemon 能识别的宿主绝对路径。留空 = 自动推导。
       PRAETOR_SANDBOX_WORK_HOST_ROOT: ${PRAETOR_SANDBOX_WORK_HOST_ROOT:-}
@@ -100,6 +103,12 @@ services:
       PRAETOR_MOBILE_ADB_PORT: ${PRAETOR_MOBILE_ADB_PORT:-5037}
       # 真机 IP / adb / frida 端口在全量出口透明层里的直连白名单，逗号分隔。
       PRAETOR_MOBILE_DEVICE_EXCLUDE: ${PRAETOR_MOBILE_DEVICE_EXCLUDE:-}
+      # 授权模式：assume（默认）= 视为授权已获得，不要求任务级书面授权记录；
+      # required = 必须签发任务级动态授权，否则 9 个 mobile_* 工具不注入。
+      # assume 只解开「有没有授权记录」这一条，设备锁/命令白名单/取证边界/审计全保留。
+      PRAETOR_MOBILE_AUTH_MODE: ${PRAETOR_MOBILE_AUTH_MODE:-assume}
+      # assume 模式下的目标设备序列号（上游只把它存在授权记录里）；留空 = 不锁设备。
+      PRAETOR_MOBILE_DEVICE_SERIAL: ${PRAETOR_MOBILE_DEVICE_SERIAL:-}
       # 宿主侧绑定也传进来，让 -check-config 的「宿主绑定」显示真实值而不是 compose 默认猜测
       PRAETOR_TRAFFIC_BIND: ${PRAETOR_TRAFFIC_BIND:-127.0.0.1}
     ports:
@@ -115,6 +124,11 @@ services:
       # 这个目录的子目录再挂进任务容器，命名卷没有「宿主路径」可供 -v 使用。
       # 相对路径由 compose 按本文件所在目录解析，程序会自动读回解析后的绝对路径。
       - ${PRAETOR_DATA_DIR:-./data}:/app/data
+      # JWT 签名密钥单独放一个**命名卷**，不放 data 目录：沙箱工作区就在 data 下面，
+      # 密钥放那儿等于让 agent 能读到它。之前 keyDir 默认等于 /app（镜像层，未挂载），
+      # 每次 compose up --force-recreate 都重新生成密钥，浏览器会话全部失效。
+      # 用命名卷而不是 bind mount：不需要宿主路径，可移植，且不落在沙箱可读范围内。
+      - praetor-appkeys:/app/keys
       # 项目根目录的 skills 挂进容器（覆盖镜像内置的 /app/skills）：
       # 改 skill 无需重建镜像。
       - ./skills:/app/skills
@@ -144,5 +158,11 @@ services:
     restart: unless-stopped
 
 volumes:
+  # ⚠️ name: 必须紧跟在自己的键下面。它把 Docker 卷名钉死成不带 compose 项目前缀的
+  # 固定名字；若被别的键插在中间，本键就退化成「按项目名前缀解析」→ 换一个空卷挂载，
+  # 表现为数据库"数据全没"（数据其实还在原卷里，只是挂错了）。
   praetor-pgdata:
     name: praetor-pgdata
+  # JWT 签名密钥（jwt.key）。持久化后容器重建不会把所有人踢下线。
+  praetor-appkeys:
+    name: praetor-appkeys

@@ -221,11 +221,15 @@ func (g *dynamicGrantGate) Check(ctx context.Context, tool string, input json.Ra
 		return g.block(tool, ops, grant.DeviceSerial, "动态授权令牌不可用："+err.Error())
 	}
 	// 设备独占锁：真机是共享物理资源，多任务并发会互相装包/覆盖 frida 脚本。
-	if err := g.pg.AcquireDeviceLease(ctx, grant.DeviceSerial, g.taskID, dynamicLeaseTTL); err != nil {
-		if errors.Is(err, pgdb.ErrDeviceBusy) {
-			return g.block(tool, ops, grant.DeviceSerial, "设备已被其它任务占用，请等待其租约到期或让对方收尾释放")
+	// 合成授权下可能没有序列号（未配 PRAETOR_MOBILE_DEVICE_SERIAL）：这时不锁——
+	// 「没有具体设备」不该被独占，也就谈不上多任务互相打架。配了序列号就照常抢锁。
+	if grant.DeviceSerial != "" {
+		if err := g.pg.AcquireDeviceLease(ctx, grant.DeviceSerial, g.taskID, dynamicLeaseTTL); err != nil {
+			if errors.Is(err, pgdb.ErrDeviceBusy) {
+				return g.block(tool, ops, grant.DeviceSerial, "设备已被其它任务占用，请等待其租约到期或让对方收尾释放")
+			}
+			return g.block(tool, ops, grant.DeviceSerial, "设备锁不可用，拒绝执行动态操作："+err.Error())
 		}
-		return g.block(tool, ops, grant.DeviceSerial, "设备锁不可用，拒绝执行动态操作："+err.Error())
 	}
 	g.audit(pgdb.DynamicGrantAudit{
 		TaskID: g.taskID, Action: "allow", Op: strings.Join(ops, ","), Tool: tool,
@@ -242,6 +246,28 @@ func (g *dynamicGrantGate) block(tool string, ops []string, serial, reason strin
 	return errors.New(reason)
 }
 
+// loadGrant 取授权事实，规则与 Server.effectiveMobileGrant 完全一致（见 mobile_auth.go）：
+// 签过且生效 → 用记录本身；签过但已撤销/过期 → 拒绝；从未签过 → 合成。
+// 刻意不复用 Server 上的方法：gate 只持有 Manager，两处共用同一份模式判定与设备解析。
+func (g *dynamicGrantGate) loadGrant() (*pgdb.DynamicGrant, error) {
+	if mobileAuthAssumed() {
+		real, err := g.pg.GetTaskDynamicGrant(g.taskID)
+		if err != nil {
+			return nil, err
+		}
+		if real != nil {
+			if real.Active(g.now()) {
+				return real, nil
+			}
+			// 撤销/过期必须真的停：绝不能在 assume 模式下回落到全量合成授权。
+			return nil, errMobileGrantRevoked
+		}
+		serial, _ := mobileTargetSerialForTask(g.pg, g.taskID)
+		return assumedMobileGrant(g.taskID, serial), nil
+	}
+	return g.pg.GetTaskDynamicGrant(g.taskID)
+}
+
 // grant 读取授权并做短缓存。缓存只影响性能：任何拒绝路径都在 Active 判定里，
 // 撤销接口会主动 Invalidate，不会出现「撤销后还靠缓存放行一个长任务」的窗口。
 func (g *dynamicGrantGate) grant() (*pgdb.DynamicGrant, error) {
@@ -251,7 +277,7 @@ func (g *dynamicGrantGate) grant() (*pgdb.DynamicGrant, error) {
 	if g.cached != nil && now.Sub(g.cachedAt) < dynamicGrantCacheTTL {
 		return g.cached, nil
 	}
-	grant, err := g.pg.GetTaskDynamicGrant(g.taskID)
+	grant, err := g.loadGrant()
 	if err != nil {
 		return nil, err
 	}
@@ -269,8 +295,8 @@ func (g *dynamicGrantGate) currentTicket(grant *pgdb.DynamicGrant, now time.Time
 	if g.ticket.raw != "" && g.ticket.bound == bound && now.Before(g.ticket.expiresAt) {
 		return g.ticket, nil
 	}
-	// 重新签发前再确认一次 DB 授权状态，避免缓存里的旧事实给已撤销的任务续命。
-	fresh, err := g.pg.GetTaskDynamicGrant(g.taskID)
+	// 重新签发前再确认一次授权状态，避免缓存里的旧事实给已撤销的任务续命。
+	fresh, err := g.loadGrant()
 	if err != nil {
 		return dynamicTicket{}, err
 	}

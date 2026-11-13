@@ -15,9 +15,184 @@ import {
   type DynamicGrantAudit,
   type DynamicGrantRecord,
   type DynamicOpsCatalog,
+  type MobileTargetDevice,
   type WorkspaceEntry,
 } from "@/lib/types";
 import { toast } from "sonner";
+
+/**
+ * 目标设备卡（双作用域）。
+ *
+ * assume 模式下任务不签发授权记录，设备从哪来就成了必须回答的问题：上游把序列号
+ * 存在授权记录里（一任务一设备），没有记录时改由后端 settings 表提供 —— 这里就是
+ * 它的读写界面。换手机、多机轮换改一次即生效，不用动 .env 更不用重建容器。
+ *
+ * 两级各有用途，所以都给全了：
+ *   本任务  → 只影响这一个任务（settings: mobile.task_device.<id>），多机并行时各占一台
+ *   全局    → 影响所有未单独指定的任务（settings: mobile.target_device）
+ *
+ * 每级三种状态互不重叠，都在按钮上：
+ *   切换/设为全局 → 写入指定序列号
+ *   不锁设备      → 显式空值（盖住下一层）
+ *   跟随全局 / 恢复部署默认 → 删键回落下一层
+ */
+function TargetDeviceCard({ taskId }: { taskId: string }) {
+  const [info, setInfo] = React.useState<MobileTargetDevice | null>(null);
+  const [taskSerial, setTaskSerial] = React.useState("");
+  const [globalSerial, setGlobalSerial] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+
+  const load = React.useCallback(() => {
+    let alive = true;
+    api
+      .mobileTargetDevice(taskId)
+      .then((d) => {
+        if (!alive) return;
+        setInfo(d);
+        setTaskSerial(d.task_serial ?? "");
+        setGlobalSerial(d.global_serial ?? "");
+      })
+      .catch(() => {
+        if (alive) setInfo(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [taskId]);
+  React.useEffect(() => load(), [load]);
+
+  const save = async (scope: "task" | "global", input: { serial?: string; reset?: boolean }) => {
+    setBusy(true);
+    try {
+      const d = await api.setMobileTargetDevice(input, scope === "task" ? taskId : undefined);
+      setInfo(d);
+      setTaskSerial(d.task_serial ?? "");
+      setGlobalSerial(d.global_serial ?? "");
+      toast.success(
+        input.reset
+          ? scope === "task"
+            ? "本任务已改为跟随全局目标设备"
+            : d.global_serial
+              ? `全局默认已恢复为 ${d.global_serial}`
+              : "全局默认已清除（不锁设备）"
+          : input.serial
+            ? scope === "task"
+              ? `本任务目标设备已设为 ${input.serial}`
+              : `全局目标设备已切换为 ${input.serial}`
+            : scope === "task"
+              ? "本任务已设为不锁设备"
+              : "全局已设为不锁设备",
+      );
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "保存目标设备失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!info) return null;
+
+  const devices = info.devices ?? [];
+  const sourceLabel =
+    info.source === "task"
+      ? "本任务专属"
+      : info.source === "setting"
+        ? "全局默认"
+        : info.source === "env"
+          ? "部署默认（.env）"
+          : "未设置";
+
+  const scopeRow = (
+    scope: "task" | "global",
+    value: string,
+    setValue: (v: string) => void,
+    followLabel: string,
+    followValue: string,
+  ) => {
+    const picked = devices.includes(value) ? value : "";
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-muted-foreground w-14 shrink-0">{scope === "task" ? "本任务" : "全局"}</span>
+        <select
+          className="border-input bg-background h-8 rounded-md border px-2 text-xs"
+          value={picked}
+          onChange={(e) => setValue(e.target.value)}
+          disabled={busy || devices.length === 0}
+        >
+          <option value="">{devices.length ? "— 从在线设备选择 —" : "— 无在线设备 —"}</option>
+          {devices.map((d) => (
+            <option key={d} value={d}>
+              {d}
+            </option>
+          ))}
+        </select>
+        <Input
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={info.hint}
+          className="h-8 w-44"
+          disabled={busy}
+        />
+        <Button
+          size="sm"
+          disabled={busy || (scope === "task" ? value === taskSerial : value === globalSerial)}
+          onClick={() => void save(scope, { serial: value })}
+        >
+          {busy && <Spinner data-icon="inline-start" />}
+          {scope === "task" ? "切换" : "设为全局"}
+        </Button>
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => void save(scope, { serial: "" })}>
+          不锁设备
+        </Button>
+        {/* 回落下一层：任务是「回到跟随全局」，全局是「回到部署默认」。
+            只给前两个按钮的话，写过一次空值就永久盖住下一层，没有出口退回。 */}
+        {scope === "task" ? (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy || (info.task_serial ?? "") === ""}
+            onClick={() => void save("task", { reset: true })}
+          >
+            {followLabel}
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy || info.global_source !== "setting"}
+            onClick={() => void save("global", { reset: true })}
+          >
+            恢复部署默认
+          </Button>
+        )}
+        {followValue ? <span className="text-muted-foreground">→ {followValue}</span> : null}
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-2 rounded-md border p-3 text-xs">
+      <div className="flex flex-wrap items-center gap-2 font-medium">
+        目标设备
+        <Badge variant="outline">{sourceLabel}</Badge>
+        <Badge variant={info.locked ? "secondary" : "outline"}>{info.locked ? "已锁定独占" : "不锁设备"}</Badge>
+      </div>
+
+      {scopeRow("task", taskSerial, setTaskSerial, "跟随全局", globalSerial || "不锁设备")}
+      {scopeRow("global", globalSerial, setGlobalSerial, "", info.env_serial || "不锁设备")}
+
+      <p className="text-muted-foreground">
+        adb 落点 <code>{info.adb_addr}</code> ·{" "}
+        {info.adb_reachable ? `在线设备 ${devices.length} 台` : "adb 不可达（仅能改值）"}
+        {info.env_serial ? ` · 部署默认 ${info.env_serial}` : " · 部署默认为空"}
+      </p>
+      <p className="text-muted-foreground">
+        设备独占锁按生效的那个序列号生效：同一台机器被另一个任务占用时会等待对方释放。
+        本任务留空即跟随全局；想让某个任务固定跑另一台机器，在这里或创建任务时指定即可。
+      </p>
+    </div>
+  );
+}
 
 const STATE_LABEL: Record<string, string> = {
   none: "未签发",
@@ -159,6 +334,7 @@ export function DynamicTab({ taskId }: { taskId: string }) {
     );
   }
 
+  const assumed = catalog?.auth_assumed === true;
   const modeHint = catalog && catalog.device_mode === false ? (
     <div className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-xs text-amber-700 dark:text-amber-400">
       后端未开启 <code>PRAETOR_MOBILE_DEVICE_MODE=1</code>：授权记录可能有效，但 mobile_* 工具不会注入，任务会降级静态分析。
@@ -176,8 +352,24 @@ export function DynamicTab({ taskId }: { taskId: string }) {
         </CardHeader>
         <CardContent className="space-y-3 text-sm text-muted-foreground">
           {modeHint}
-          <p>该任务未签发动态授权，<code>mobile_*</code> 工具不会出现在 agent 工具面里；所有真机操作一律 fail-closed 降级为静态分析。</p>
-          <p>授权只能由人在<strong>创建任务</strong>时显式签发一次，任务下发只传递与校验，不产生授权；创建后没有补签入口。</p>
+          {assumed ? (
+            <>
+              <p>
+                当前为 <code>assume</code> 模式（授权已获得）：本任务<strong>无需签发</strong>授权记录，
+                <code>mobile_*</code> 工具照常注入，可用范围取全量动态操作。
+              </p>
+              <p>
+                设备独占锁、adb shell 命令白名单、取证边界与审计落库全部照常生效。目标设备在下面切换，
+                改完立即生效 —— 不必改 <code>.env</code>，也不必重建容器。
+              </p>
+              <TargetDeviceCard taskId={taskId} />
+            </>
+          ) : (
+            <>
+              <p>该任务未签发动态授权，<code>mobile_*</code> 工具不会出现在 agent 工具面里；所有真机操作一律 fail-closed 降级为静态分析。</p>
+              <p>授权只能由人在<strong>创建任务</strong>时显式签发一次，任务下发只传递与校验，不产生授权；创建后没有补签入口。</p>
+            </>
+          )}
           <Button variant="outline" size="sm" onClick={() => void runProbe()} disabled={probing}>
             {probing && <Spinner data-icon="inline-start" />}
             探测宿主 adb 设备

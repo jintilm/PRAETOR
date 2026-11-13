@@ -256,12 +256,12 @@ func (s *Server) sandboxEgressFor(taskID string) *sandbox.EgressUpstream {
 		return nil
 	}
 	s.m.mu.RLock()
-	raw := s.m.globalProxy
 	pool := append([]string(nil), s.m.egressUpstreams...)
 	s.m.mu.RUnlock()
+	raw := s.m.EffectiveEgress()
 
 	// 任务级出口池优先：按任务稳定分配（同一任务重建容器后仍同一出口，
-	// 会话/登录态绑 IP 不能漂移）；池为空回落全局出口代理。
+	// 会话/登录态绑 IP 不能漂移）；池为空回落代理池/系统代理/直连的有效出口。
 	if len(pool) > 0 {
 		raw = pool[PickUpstreamIndex(taskID, len(pool))]
 	}

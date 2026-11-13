@@ -1329,6 +1329,81 @@ CREATE TRIGGER trg_conversation_retest_delete BEFORE DELETE ON conversations
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS evidence_version BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_evidence_version BIGINT NOT NULL DEFAULT 0;
 
+-- =====================================================================
+-- L3. 代理池：自动采集、健康检查与默认出口路由
+-- =====================================================================
+-- 公共代理不可信，因此这里只保存候选与观测结果；是否进入默认出口由
+-- proxy_pool_enabled / route_mode / 健康状态共同决定。所有迁移均幂等，
+-- 不删除既有代理或来源。
+CREATE TABLE IF NOT EXISTS proxy_pool_entries (
+    id                   BIGSERIAL PRIMARY KEY,
+    url                  TEXT NOT NULL UNIQUE,
+    protocol             TEXT NOT NULL DEFAULT 'http',
+    host                 TEXT NOT NULL,
+    port                 INTEGER NOT NULL,
+    region               TEXT NOT NULL DEFAULT '',
+    source               TEXT NOT NULL DEFAULT '',
+    enabled              BOOLEAN NOT NULL DEFAULT true,
+    status               TEXT NOT NULL DEFAULT 'unknown',
+    latency_ms           BIGINT NOT NULL DEFAULT -1,
+    success_count        INTEGER NOT NULL DEFAULT 0,
+    failure_count        INTEGER NOT NULL DEFAULT 0,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    success_rate         DOUBLE PRECISION NOT NULL DEFAULT 0,
+    score                INTEGER NOT NULL DEFAULT 0,
+    last_checked_at      TIMESTAMPTZ,
+    last_error           TEXT NOT NULL DEFAULT '',
+    exit_ip              TEXT NOT NULL DEFAULT '',
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ck_proxy_pool_protocol CHECK (protocol IN ('http','https','socks5')),
+    CONSTRAINT ck_proxy_pool_status CHECK (status IN ('unknown','healthy','unhealthy','quarantine')),
+    CONSTRAINT ck_proxy_pool_port CHECK (port BETWEEN 1 AND 65535),
+    CONSTRAINT ck_proxy_pool_score CHECK (score BETWEEN 0 AND 100)
+);
+CREATE INDEX IF NOT EXISTS idx_proxy_pool_select ON proxy_pool_entries(enabled, status, score DESC, latency_ms ASC);
+CREATE INDEX IF NOT EXISTS idx_proxy_pool_checked ON proxy_pool_entries(last_checked_at NULLS FIRST);
+CREATE INDEX IF NOT EXISTS idx_proxy_pool_source ON proxy_pool_entries(source);
+DROP TRIGGER IF EXISTS trg_proxy_pool_entries_upd ON proxy_pool_entries;
+CREATE TRIGGER trg_proxy_pool_entries_upd BEFORE UPDATE ON proxy_pool_entries
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS proxy_pool_sources (
+    id             BIGSERIAL PRIMARY KEY,
+    name           TEXT NOT NULL UNIQUE,
+    url            TEXT NOT NULL UNIQUE,
+    region         TEXT NOT NULL DEFAULT 'global',
+    protocol       TEXT NOT NULL DEFAULT 'http',
+    enabled        BOOLEAN NOT NULL DEFAULT true,
+    last_fetch_at  TIMESTAMPTZ,
+    last_error     TEXT NOT NULL DEFAULT '',
+    imported_count INTEGER NOT NULL DEFAULT 0,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ck_proxy_pool_source_protocol CHECK (protocol IN ('http','https','socks5'))
+);
+CREATE INDEX IF NOT EXISTS idx_proxy_pool_sources_due ON proxy_pool_sources(enabled, last_fetch_at NULLS FIRST);
+DROP TRIGGER IF EXISTS trg_proxy_pool_sources_upd ON proxy_pool_sources;
+CREATE TRIGGER trg_proxy_pool_sources_upd BEFORE UPDATE ON proxy_pool_sources
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS proxy_pool_runs (
+    id          BIGSERIAL PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    source_id   BIGINT REFERENCES proxy_pool_sources(id) ON DELETE SET NULL,
+    started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at TIMESTAMPTZ,
+    imported    INTEGER NOT NULL DEFAULT 0,
+    checked     INTEGER NOT NULL DEFAULT 0,
+    healthy     INTEGER NOT NULL DEFAULT 0,
+    failed      INTEGER NOT NULL DEFAULT 0,
+    error       TEXT NOT NULL DEFAULT '',
+    CONSTRAINT ck_proxy_pool_run_kind CHECK (kind IN ('collect','check','import'))
+);
+CREATE INDEX IF NOT EXISTS idx_proxy_pool_runs_time ON proxy_pool_runs(started_at DESC);
+
+-- Default sources are seeded by db.EnsureProxyPoolSources at startup.
+
 CREATE TABLE IF NOT EXISTS traffic_evidence_snapshots (
     id TEXT PRIMARY KEY,
     source_traffic_id TEXT NOT NULL,

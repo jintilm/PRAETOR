@@ -50,6 +50,10 @@ type DeviceStatus struct {
 	Checks     []DeviceCheck `json:"checks"`
 	ProbedAt   time.Time     `json:"probed_at"`
 	Devices    []string      `json:"devices,omitempty"` // 未指定 serial 时列出在线设备
+	// SerialList 与 Devices 同一个来源，但只放**裸序列号**（不带 " (device)" 状态后缀）。
+	// 任何要把序列号回写出去的界面都必须用这个：Devices 是给人看的展示串，
+	// 拿它当序列号提交会拼出含空格括号的非法值。展示用 Devices，回写用 SerialList。
+	SerialList []string `json:"serial_list,omitempty"`
 	ManualNote string        `json:"manual_note,omitempty"`
 }
 
@@ -180,9 +184,11 @@ func adbShell(ctx context.Context, addr, serial, cmd string) (string, error) {
 	return strings.ReplaceAll(string(out), "\r\n", "\n"), nil
 }
 
-// mobileTaskContext 判断一个任务是否是「已签发生效授权的真机任务」。
+// mobileTaskContext 判断一个任务是否该拿到真机上下文（设备序列号）。
 // 只有这类任务才该拿到 host.docker.internal 映射与设备环境变量 ——
 // 不给所有任务无条件加，避免把宿主服务的可达面扩散到普通渗透任务。
+// 授权模式决定判定门槛：required 看任务级授权记录，assume 视为已授权，
+// 但两者都仍受 PRAETOR_MOBILE_DEVICE_MODE=1 这个部署级开关约束。
 func (s *Server) mobileTaskContext(taskID string) (string, bool) {
 	if config.Env("MOBILE_DEVICE_MODE") != "1" || s == nil || s.m == nil || s.m.pg == nil {
 		return "", false
@@ -191,7 +197,7 @@ func (s *Server) mobileTaskContext(taskID string) (string, bool) {
 	if err != nil || id <= 0 {
 		return "", false
 	}
-	g, err := s.m.pg.GetTaskDynamicGrant(id)
+	g, err := s.effectiveMobileGrant(id)
 	if err != nil || g == nil || !g.Active(time.Now()) {
 		return "", false
 	}
@@ -249,8 +255,10 @@ func probeMobileDevice(ctx context.Context, serial string) DeviceStatus {
 	st.Checks = append(st.Checks, DeviceCheck{"adb_server", "pass", addr + " 可达"})
 	for s, state := range devices {
 		st.Devices = append(st.Devices, s+" ("+state+")")
+		st.SerialList = append(st.SerialList, s)
 	}
 	sort.Strings(st.Devices)
+	sort.Strings(st.SerialList)
 	if st.Serial == "" {
 		st.Reason = "未指定设备序列号：仅列出在线设备，动态分析仍按未授权处理。"
 		return st
@@ -268,16 +276,7 @@ func probeMobileDevice(ctx context.Context, serial string) DeviceStatus {
 	)
 	// 下面两项只影响「动态能抓到多少」，不作为 Ready 的硬前置：无 root 仍可做
 	// 安装/启动/日志/抓包，只是 frida hook 与系统证书装不上。
-	if out, err := adbShell(probeCtx, addr, st.Serial, "id"); err == nil {
-		state := "warn"
-		detail := "非 root：frida hook 与系统 CA 安装不可用，可用重打包 networkSecurityConfig 路线"
-		if strings.Contains(out, "uid=0") {
-			state, detail = "pass", "已取得 root"
-		}
-		st.Checks = append(st.Checks, DeviceCheck{"root", state, detail})
-	} else {
-		st.Checks = append(st.Checks, DeviceCheck{"root", "warn", "root 状态无法判定：" + err.Error()})
-	}
+	st.Checks = append(st.Checks, probeRoot(probeCtx, addr, st.Serial))
 	if out, err := adbShell(probeCtx, addr, st.Serial, "ps -A"); err == nil {
 		state := "warn"
 		detail := "未检测到 frida-server；hook 类操作不可用"
@@ -291,7 +290,7 @@ func probeMobileDevice(ctx context.Context, serial string) DeviceStatus {
 	st.Checks = append(st.Checks,
 		DeviceCheck{"unlocked", "manual", "锁屏状态需人工确认"},
 		DeviceCheck{"system_ca", "manual", "Android 7+ 系统 CA / networkSecurityConfig 需人工确认"},
-		DeviceCheck{"proxy_reachable", "manual", "真机 WiFi 代理到录制代理的连通性需人工确认"},
+		DeviceCheck{"proxy_reachable", "manual", "真机到录制代理的连通性需人工确认（WiFi 代理或 adb reverse 反向隧道两种接法都算通过）"},
 	)
 	st.Ready = true
 	st.Degraded = false
@@ -299,8 +298,40 @@ func probeMobileDevice(ctx context.Context, serial string) DeviceStatus {
 	return st
 }
 
-// mobileDeviceSerialHint 给创建任务表单用的设备序列号格式说明，避免把任意字符串
-// （甚至一段注入文本）写进授权记录。
+// probeRoot 判定设备是否已 root。
+//
+// 这里原本的写法是执行 `adb shell id`，再看输出里有没有 uid=0 —— 那是错的：
+// adb shell 默认以 shell(2000) 运行，`id` 在任何设备上都返回 uid=2000，
+// 于是所有真机都会被判成「非 root」；而同一轮 `ps -A` 又能看见 root 起的
+// frida-server，两条结论自相矛盾。判 root 必须显式看 su，不能拿默认身份自证。
+//
+// 顺序按「先快后慢」：which su 不需要授权、毫秒级返回；su -c id 在 Magisk 上
+// 首次调用可能弹授权框，非交互场景会一直阻塞到超时，所以放在后面。
+func probeRoot(ctx context.Context, addr, serial string) DeviceCheck {
+	noRoot := "非 root：frida hook 与系统 CA 安装不可用，可用重打包 networkSecurityConfig 路线"
+	// 1) su 存在即可认为 root 方案已就位（真正的提权由设备上的管理器授权）
+	if out, err := adbShell(ctx, addr, serial, "which su"); err == nil {
+		if p := strings.TrimSpace(out); p != "" && !strings.Contains(p, "not found") {
+			return DeviceCheck{"root", "pass", "su 已安装（" + p + "），提权需在设备上授权"}
+		}
+	}
+	// 2) 能直接拿到 uid=0 才算真提权成功
+	if out, err := adbShell(ctx, addr, serial, "su -c id"); err == nil && strings.Contains(out, "uid=0") {
+		return DeviceCheck{"root", "pass", "su -c id → uid=0，已取得 root"}
+	}
+	// 3) userdebug / eng 版本 adb shell 本身就是 root
+	if out, err := adbShell(ctx, addr, serial, "id"); err == nil && strings.Contains(out, "uid=0") {
+		return DeviceCheck{"root", "pass", "adb shell 自带 root（userdebug/eng 版本）"}
+	}
+	return DeviceCheck{"root", "warn", noRoot}
+}
+
+// mobileDeviceSerialHint 给创建任务表单与目标设备设置界面用的序列号格式说明，
+// 避免把任意字符串（甚至一段注入文本）写进授权记录或 settings。
+// 必须与下面的 validDeviceSerial 保持一字不差，否则提示与实际校验会漂移。
+const mobileDeviceSerialHint = "只允许字母、数字与 . : - _ ，长度 1..128"
+
+// validDeviceSerial 判定设备序列号是否合法。
 func validDeviceSerial(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" || len(s) > 128 {
