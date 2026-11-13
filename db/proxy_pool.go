@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -84,6 +85,19 @@ type ProxyPoolRun struct {
 }
 
 var defaultProxyPoolSources = []ProxyPoolSource{
+	// scdn.io exposes a small random API; the CN endpoint keeps domestic
+	// candidates flowing without downloading its very large full text dump.
+	{Name: "scdn-cn", URL: "https://proxy.scdn.io/api/get_proxy.php?protocol=http&count=20&country_code=CN", Region: "cn", Protocol: "http", Enabled: true},
+	{Name: "scdn-api", URL: "https://proxy.scdn.io/api/get_proxy.php?protocol=all&count=20", Region: "global", Protocol: "http", Enabled: true},
+	// Proxy5 publishes a JSON snapshot with ip_address/port/protocols fields;
+	// proxypool.Parse maps those fields and ignores unsupported SOCKS4-only rows.
+	{Name: "proxy5-json", URL: "https://proxy5.net/assets/data/free-proxies.json", Region: "global", Protocol: "http", Enabled: true},
+	// Kuaidaili currently serves a JavaScript bot challenge to non-browser
+	// clients. Keep the entry available for operators, but do not let a known
+	// failing source create noise in every automatic refresh.
+	{Name: "kuaidaili-free", URL: "https://www.kuaidaili.com/free/", Region: "cn", Protocol: "http", Enabled: false},
+	// 国内源：proxifly 的 CN 分区列表（混合 http/https/socks5，socks4 会被解析器跳过）。
+	{Name: "proxifly-cn", URL: "https://" + "raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/CN/data.txt", Region: "cn", Protocol: "http", Enabled: true},
 	{Name: "proxifly-all", URL: "https://" + "raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt", Region: "global", Protocol: "http", Enabled: true},
 	{Name: "thespeedx-http", URL: "https://" + "raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", Region: "global", Protocol: "http", Enabled: true},
 	{Name: "thespeedx-socks5", URL: "https://" + "raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt", Region: "global", Protocol: "socks5", Enabled: true},
@@ -92,15 +106,11 @@ var defaultProxyPoolSources = []ProxyPoolSource{
 }
 
 // EnsureProxyPoolSources seeds the built-in public lists without overwriting
-// operator edits. It is safe to call on every startup.
+// operator edits. It runs on every startup so existing installs pick up newly
+// added built-in sources (e.g. the domestic CN list); rows are matched by the
+// unique name/url constraints, so local health data and operator changes stay
+// intact.
 func (d *DB) EnsureProxyPoolSources(ctx context.Context) error {
-	var count int
-	if err := d.QueryRowContext(ctx, `SELECT count(*) FROM proxy_pool_sources`).Scan(&count); err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
 	for _, src := range defaultProxyPoolSources {
 		if _, err := d.ExecContext(ctx, `
 INSERT INTO proxy_pool_sources(name, url, region, protocol, enabled)
@@ -287,8 +297,9 @@ func scanProxyPoolEntry(scanner proxyPoolScanner) (ProxyPoolEntry, error) {
 }
 
 // UpsertProxyPoolCandidate preserves the learned health/statistics of an
-// existing proxy and only refreshes its provenance. New rows are refused once
-// maxEntries is reached, so a malicious/huge public list cannot exhaust the DB.
+// existing proxy and only refreshes its provenance. Once maxEntries is reached,
+// one non-healthy row with the lowest score is evicted before inserting, so a
+// malicious/huge public list cannot exhaust the DB while the pool still refreshes.
 func (d *DB) UpsertProxyPoolCandidate(ctx context.Context, c proxypool.Candidate, maxEntries int) (bool, error) {
 	u, err := proxypool.Normalize(c.URL, c.Protocol)
 	if err != nil {
@@ -323,7 +334,27 @@ WHERE id=$1`, id, protocol, host, port, region, source)
 			return false, err
 		}
 		if count >= maxEntries {
-			return false, nil
+			// Keep the pool fresh at the cap: drop one lowest-value entry that is
+			// not currently healthy. Healthy rows are never evicted, so a steady
+			// state of working proxies is preserved even under heavy churn.
+			res, err := d.ExecContext(ctx, `
+DELETE FROM proxy_pool_entries
+WHERE id = (
+  SELECT id FROM proxy_pool_entries
+  WHERE status <> 'healthy'
+  ORDER BY enabled ASC,
+           CASE status WHEN 'quarantine' THEN 0 WHEN 'unhealthy' THEN 1 ELSE 2 END,
+           score ASC,
+           last_checked_at ASC NULLS FIRST,
+           id ASC
+  LIMIT 1
+)`)
+			if err != nil {
+				return false, err
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
+				return false, nil
+			}
 		}
 	}
 	res, err := d.ExecContext(ctx, `
@@ -343,18 +374,141 @@ ON CONFLICT (url) DO UPDATE SET
 	return n > 0, nil
 }
 
+type proxyPoolImportRow struct {
+	URL      string `json:"url"`
+	Protocol string `json:"protocol"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Region   string `json:"region"`
+	Source   string `json:"source"`
+}
+
 // ImportProxyPoolCandidates returns how many NEW rows were inserted. Updates to
-// existing candidates are intentionally not counted as imports.
+// existing candidates are intentionally not counted as imports. The whole
+// source is applied in one transaction: public lists can contain tens of
+// thousands of rows, and per-row SELECT/INSERT loops make a manual fetch look
+// hung even though the download already succeeded.
 func (d *DB) ImportProxyPoolCandidates(ctx context.Context, candidates []proxypool.Candidate, maxEntries int) (int, error) {
-	inserted := 0
+	return d.ImportProxyPoolCandidatesWithSourceLimit(ctx, candidates, maxEntries, 0)
+}
+
+// ImportProxyPoolCandidatesWithSourceLimit applies a per-source retention
+// quota before the global capacity trim. Without this, a large source that was
+// imported earlier can keep its old rows by ID and evict every later source.
+func (d *DB) ImportProxyPoolCandidatesWithSourceLimit(ctx context.Context, candidates []proxypool.Candidate, maxEntries, perSourceLimit int) (int, error) {
+	if len(candidates) == 0 {
+		return 0, nil
+	}
+	rows := make([]proxyPoolImportRow, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
 	for _, c := range candidates {
-		ok, err := d.UpsertProxyPoolCandidate(ctx, c, maxEntries)
+		u, err := proxypool.Normalize(c.URL, c.Protocol)
 		if err != nil {
-			return inserted, err
+			return 0, err
 		}
-		if ok {
-			inserted++
+		rawURL := u.String()
+		if _, ok := seen[rawURL]; ok {
+			continue
 		}
+		seen[rawURL] = struct{}{}
+		port := 0
+		if _, err := fmt.Sscanf(u.Port(), "%d", &port); err != nil {
+			return 0, fmt.Errorf("代理 %q 端口无效: %w", rawURL, err)
+		}
+		rows = append(rows, proxyPoolImportRow{
+			URL: rawURL, Protocol: u.Scheme, Host: u.Hostname(), Port: port,
+			Region: strings.TrimSpace(c.Region), Source: strings.TrimSpace(c.Source),
+		})
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	payload, err := json.Marshal(rows)
+	if err != nil {
+		return 0, err
+	}
+
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var inserted int
+	err = tx.QueryRowContext(ctx, `
+WITH input AS (
+  SELECT DISTINCT ON (url) url, protocol, host, port, region, source
+  FROM jsonb_to_recordset($1::jsonb) AS x(
+    url text, protocol text, host text, port integer, region text, source text
+  )
+  ORDER BY url
+), upserted AS (
+  INSERT INTO proxy_pool_entries(url,protocol,host,port,region,source)
+  SELECT url,protocol,host,port,region,source FROM input
+  ON CONFLICT (url) DO UPDATE SET
+    protocol=EXCLUDED.protocol,
+    host=EXCLUDED.host,
+    port=EXCLUDED.port,
+    region=CASE WHEN EXCLUDED.region <> '' THEN EXCLUDED.region ELSE proxy_pool_entries.region END,
+    source=CASE WHEN EXCLUDED.source <> '' THEN EXCLUDED.source ELSE proxy_pool_entries.source END
+  RETURNING (xmax = 0) AS inserted
+)
+SELECT count(*) FILTER (WHERE inserted) FROM upserted`, string(payload)).Scan(&inserted)
+	if err != nil {
+		return 0, err
+	}
+	if perSourceLimit > 0 {
+		// Keep the best non-healthy rows in each source. Healthy rows are
+		// excluded from the quota and are never removed by this pass.
+		if _, err := tx.ExecContext(ctx, `
+WITH ranked AS (
+  SELECT id,
+         row_number() OVER (
+           PARTITION BY source
+           ORDER BY enabled DESC,
+                    CASE status WHEN 'unknown' THEN 0 WHEN 'unhealthy' THEN 1 ELSE 2 END,
+                    score DESC,
+                    last_checked_at DESC NULLS LAST,
+                    id ASC
+         ) AS rn
+  FROM proxy_pool_entries
+  WHERE status <> 'healthy'
+)
+DELETE FROM proxy_pool_entries p
+USING ranked r
+WHERE p.id = r.id AND r.rn > $1`, perSourceLimit); err != nil {
+			return 0, err
+		}
+	}
+	if maxEntries > 0 {
+		// Trim only the incoming batch to the space actually available. Applying
+		// the cap over the whole table here would discard rows that the previous
+		// per-source imports already chose to retain.
+		if _, err := tx.ExecContext(ctx, `
+WITH protected AS (
+  SELECT count(*)::integer AS healthy FROM proxy_pool_entries WHERE status='healthy'
+), budget AS (
+  SELECT GREATEST($1 - healthy, 0) AS n FROM protected
+), ranked AS (
+  SELECT id,
+         row_number() OVER (
+           ORDER BY enabled DESC,
+                    CASE status WHEN 'unknown' THEN 0 WHEN 'unhealthy' THEN 1 ELSE 2 END,
+                    score DESC,
+                    last_checked_at DESC NULLS LAST,
+                    id ASC
+         ) AS rn
+  FROM proxy_pool_entries
+  WHERE status <> 'healthy'
+)
+DELETE FROM proxy_pool_entries p
+USING ranked r, budget b
+WHERE p.id = r.id AND r.rn > b.n`, maxEntries); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
 	return inserted, nil
 }

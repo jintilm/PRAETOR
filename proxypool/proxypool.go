@@ -247,7 +247,12 @@ func Parse(text, defaultScheme, source, region string) []Candidate {
 
 	var decoded any
 	if json.Unmarshal([]byte(text), &decoded) == nil {
-		walkStrings(decoded, add)
+		walkStrings(decoded, add, func(raw, scheme string) {
+			if scheme != "" && !strings.Contains(raw, "://") {
+				raw = scheme + "://" + raw
+			}
+			add(raw)
+		})
 	}
 	for _, m := range urlPattern.FindAllString(text, -1) {
 		add(m)
@@ -272,7 +277,7 @@ func Parse(text, defaultScheme, source, region string) []Candidate {
 	return out
 }
 
-func walkStrings(v any, add func(string)) {
+func walkStrings(v any, add func(string), addStructured func(string, string)) {
 	switch x := v.(type) {
 	case string:
 		add(x)
@@ -281,13 +286,87 @@ func walkStrings(v any, add func(string)) {
 		}
 	case []any:
 		for _, item := range x {
-			walkStrings(item, add)
+			walkStrings(item, add, addStructured)
 		}
 	case map[string]any:
+		// Some public lists expose ip_address/port/protocols as separate JSON
+		// fields instead of a host:port string, so walkStrings also understands
+		// that shape and maps SOCKS5/HTTP capability to a supported proxy URL.
+		if host, port, scheme, ok := structuredJSONProxy(x); ok {
+			addStructured(net.JoinHostPort(host, strconv.Itoa(port)), scheme)
+			return
+		}
 		for _, item := range x {
-			walkStrings(item, add)
+			walkStrings(item, add, addStructured)
 		}
 	}
+}
+
+func structuredJSONProxy(m map[string]any) (host string, port int, scheme string, ok bool) {
+	for _, key := range []string{"ip_address", "ip", "host", "address"} {
+		if value, found := m[key].(string); found && strings.TrimSpace(value) != "" {
+			host = strings.TrimSpace(value)
+			break
+		}
+	}
+	if host == "" || strings.ContainsAny(host, "/@") || (strings.Contains(host, ":") && net.ParseIP(host) == nil) {
+		return "", 0, "", false
+	}
+	switch value := m["port"].(type) {
+	case float64:
+		port = int(value)
+		if value != float64(port) {
+			return "", 0, "", false
+		}
+	case string:
+		port, _ = strconv.Atoi(strings.TrimSpace(value))
+	}
+	if port < 1 || port > 65535 {
+		return "", 0, "", false
+	}
+
+	protocols := jsonProtocols(m)
+	if len(protocols) == 0 {
+		return host, port, "", true
+	}
+	for _, protocol := range protocols {
+		if protocol == "socks5" || protocol == "socks5h" {
+			return host, port, "socks5", true
+		}
+	}
+	for _, protocol := range protocols {
+		if protocol == "http" || protocol == "https" {
+			return host, port, "http", true
+		}
+	}
+	return "", 0, "", false
+}
+
+func jsonProtocols(m map[string]any) []string {
+	var raw any
+	if value, ok := m["protocols"]; ok {
+		raw = value
+	} else {
+		raw = m["protocol"]
+	}
+	var protocols []string
+	add := func(value string) {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value != "" {
+			protocols = append(protocols, value)
+		}
+	}
+	switch value := raw.(type) {
+	case string:
+		add(value)
+	case []any:
+		for _, item := range value {
+			if text, ok := item.(string); ok {
+				add(text)
+			}
+		}
+	}
+	return protocols
 }
 
 // MaskURL hides credentials in API/UI output.

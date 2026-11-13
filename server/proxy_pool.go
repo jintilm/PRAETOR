@@ -158,6 +158,26 @@ func (p *proxyPoolService) pg() *pgdb.DB {
 	return p.s.m.pg
 }
 
+// proxyPoolSourceImportLimit gives every enabled source a comparable share of
+// the pool. The same quota is used while fetching and while retaining rows so
+// an oversized list cannot replace almost every non-healthy row in one sync.
+func proxyPoolSourceImportLimit(maxEntries, enabledSources int) int {
+	if maxEntries <= 0 {
+		return 0
+	}
+	if enabledSources < 1 {
+		enabledSources = 1
+	}
+	limit := maxEntries / enabledSources
+	if limit < 25 {
+		limit = 25
+	}
+	if limit > maxEntries {
+		limit = maxEntries
+	}
+	return limit
+}
+
 // Refresh downloads every enabled source, imports new candidates, and probes
 // the entries that still have no health signal. Source failures are isolated:
 // one dead list must not prevent the remaining lists from being collected.
@@ -204,6 +224,13 @@ func (p *proxyPoolService) Refresh(ctx context.Context) (res ProxyPoolActionResu
 		}
 	}
 	successSources := 0
+	enabledSources := 0
+	for _, src := range sources {
+		if src.Enabled {
+			enabledSources++
+		}
+	}
+	sourceLimit := proxyPoolSourceImportLimit(cfg.MaxEntries, enabledSources)
 	for _, src := range sources {
 		if !src.Enabled {
 			continue
@@ -211,7 +238,7 @@ func (p *proxyPoolService) Refresh(ctx context.Context) (res ProxyPoolActionResu
 		if ctx.Err() != nil {
 			return res, ctx.Err()
 		}
-		imported, fetchErr := p.fetchSource(ctx, src, cfg)
+		imported, fetchErr := p.fetchSource(ctx, src, cfg, sourceLimit)
 		res.Imported += imported
 		res.Sources++
 		if fetchErr != nil {
@@ -356,7 +383,17 @@ func (p *proxyPoolService) FetchSource(ctx context.Context, id int64) (imported 
 		return 0, errors.New("来源不存在")
 	}
 	cfg := p.s.m.ProxyPoolConfig()
-	imported, err = p.fetchSource(ctx, *src, cfg)
+	sources, err := pg.ListProxyPoolSources(ctx)
+	if err != nil {
+		return 0, err
+	}
+	enabledSources := 0
+	for _, item := range sources {
+		if item.Enabled {
+			enabledSources++
+		}
+	}
+	imported, err = p.fetchSource(ctx, *src, cfg, proxyPoolSourceImportLimit(cfg.MaxEntries, enabledSources))
 	if markErr := pg.MarkProxyPoolSourceFetch(ctx, src.ID, imported, errString(err)); markErr != nil {
 		log.Printf("[proxy-pool] 记录来源 %s 抓取结果失败: %v", src.Name, markErr)
 	}
@@ -439,7 +476,7 @@ func (p *proxyPoolService) checkLimit(cfg proxypool.Config) int {
 // fetchSource downloads one list and imports its proxies. When SourcesViaSystem
 // is enabled, the list itself is fetched through the configured global proxy;
 // the candidate probes later still go directly to each candidate proxy.
-func (p *proxyPoolService) fetchSource(ctx context.Context, src pgdb.ProxyPoolSource, cfg proxypool.Config) (int, error) {
+func (p *proxyPoolService) fetchSource(ctx context.Context, src pgdb.ProxyPoolSource, cfg proxypool.Config, importLimit int) (int, error) {
 	transport := &http.Transport{
 		ForceAttemptHTTP2:     false,
 		TLSHandshakeTimeout:   proxyPoolSourceTimeout,
@@ -461,7 +498,12 @@ func (p *proxyPoolService) fetchSource(ctx context.Context, src pgdb.ProxyPoolSo
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("User-Agent", "PRAETOR-ProxyPool/1.0")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; PRAETOR-ProxyPool/1.0; +https://github.com/jintilm/praetor)")
+	req.Header.Set("Accept", "application/json,text/plain,text/html,*/*")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	if u, parseErr := url.Parse(src.URL); parseErr == nil && u.Host != "" {
+		req.Header.Set("Referer", u.Scheme+"://"+u.Host+"/")
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
@@ -478,7 +520,10 @@ func (p *proxyPoolService) fetchSource(ctx context.Context, src pgdb.ProxyPoolSo
 	if len(candidates) == 0 {
 		return 0, errors.New("未从来源解析到代理")
 	}
-	imported, err := p.pg().ImportProxyPoolCandidates(ctx, candidates, cfg.MaxEntries)
+	if importLimit > 0 && len(candidates) > importLimit {
+		candidates = candidates[:importLimit]
+	}
+	imported, err := p.pg().ImportProxyPoolCandidatesWithSourceLimit(ctx, candidates, cfg.MaxEntries, importLimit)
 	if err != nil {
 		return 0, err
 	}

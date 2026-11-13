@@ -108,9 +108,9 @@ CTF 与逆向域的 worker 即领域 lead，可通过 `Agent` 工具把「解一
 
 - **路由优先级**：任务级 `egress_upstreams` > 代理池健康代理 > 系统代理（设置页全局出口）> 直连。任务级配置永远最高，不会被代理池覆盖。
 - **三种路由模式**：`pool`（默认，池内有健康代理即走池）/ `system`（始终用系统代理）/ `direct`（始终直连）；池空时按 `fallback_mode` 回落 `system` 或 `direct`，不会“池空即断网”。
-- **自动采集**：启动后首次延迟约 1 分钟，之后按 `collect_interval_minutes` 抓取内置公开来源（proxifly / TheSpeedX / monosans 的 HTTP 与 SOCKS5 列表）；UI 可增删来源、手动抓取或粘贴导入，支持 `http` / `https` / `socks5`。来源可直连抓取，也可勾选「来源经系统代理」以应对 GitHub 不可直连的网络。
+- **自动采集**：启动后首次延迟约 1 分钟，之后按 `collect_interval_minutes` 抓取内置公开来源（proxifly 全球与 **CN 分区**、TheSpeedX / monosans、`proxy.scdn.io` 全球与 **CN API**、Proxy5 JSON 快照）；UI 可增删来源、手动抓取或粘贴导入，支持 `http` / `https` / `socks5`。来源可直连抓取，也可勾选「来源经系统代理」以应对 GitHub 不可直连的网络。快代理页面来源已预置但默认关闭：它当前会对非浏览器请求返回 JavaScript 验证页。
 - **自动健康检查**：按 `check_interval_minutes` 并发探测（默认 `https://api.ipify.org`，可改 `probe_url`），记录延迟、成功率与评分；连续失败达到 `failure_threshold` 自动隔离，恢复后自动回到可用。单条可手动检测。
-- **容量与并发**：`max_entries` 控制池上限，`concurrency` 控制探测并发，`timeout_seconds` 控制单次探测超时；超限按评分淘汰最低分条目。
+- **容量与并发**：`max_entries` 控制池上限，`concurrency` 控制探测并发，`timeout_seconds` 控制单次探测超时。每次采集按启用来源数分配单来源导入配额，避免超大列表挤占其它来源；超限时只淘汰非健康条目，健康代理不会被容量清理删除。
 - **热更新**：选中的健康代理通过 `reapplyEgressAgents` 同步到运行中的任务与流量代理，无需重启任务。
 - **可观测**：UI 展示条目总数 / 启用 / 健康 / 隔离异常、最近采集与检测运行记录、当前选中代理与当前有效出口；API 为 `/api/proxy-pool*`，条目与来源 URL 均脱敏输出。
 - **风险提示**：公开代理不可信，可能记录、篡改或注入流量；只用于授权测试中的出口隔离，不要承载凭据或敏感数据。生产场景优先自建出口（mihomo / gost / 商业隧道）。
