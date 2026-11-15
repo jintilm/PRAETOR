@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/jintilm/praetor/config"
 	"github.com/jintilm/praetor/db"
 	"github.com/jintilm/praetor/internal/norma/mcp"
 	actool "github.com/jintilm/praetor/internal/norma/tool"
@@ -23,6 +24,7 @@ type mcpClient interface {
 
 // connectMCP dials one MCP server per its transport. Callers must Close the client.
 func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
+	effectiveURL := config.TranslateRuntimeURL(m.URL)
 	switch m.Transport {
 	case "stdio":
 		if m.Command == "" {
@@ -30,16 +32,16 @@ func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
 		}
 		return mcp.NewStdioClient(ctx, m.Name, m.Command, jsonStrMap(m.Env), jsonStrSlice(m.Args)...)
 	case "http":
-		if m.URL == "" {
+		if effectiveURL == "" {
 			return nil, fmt.Errorf("http 传输缺少 URL")
 		}
 		// env map doubles as HTTP headers (e.g. Authorization).
-		return mcphttp.New(ctx, m.Name, m.URL, jsonStrMap(m.Env), m.Insecure)
+		return mcphttp.New(ctx, m.Name, effectiveURL, jsonStrMap(m.Env), m.Insecure)
 	case "sse":
-		if m.URL == "" {
+		if effectiveURL == "" {
 			return nil, fmt.Errorf("sse 传输缺少 URL")
 		}
-		return mcphttp.NewSSE(ctx, m.Name, m.URL, jsonStrMap(m.Env), m.Insecure)
+		return mcphttp.NewSSE(ctx, m.Name, effectiveURL, jsonStrMap(m.Env), m.Insecure)
 	default:
 		return nil, fmt.Errorf("未知传输方式 %q", m.Transport)
 	}

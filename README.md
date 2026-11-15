@@ -165,9 +165,9 @@ cd PRAETOR
 
 两种方式在 Docker 可用时得到同等的每任务沙箱能力。全 Docker 把 Docker 控制面通过 socket 交给应用容器；本地运行由宿主进程直接调用 Docker，功能相同但安全边界不同。Docker 不可用时，安装脚本会明确降级到 `optional`，不会伪装成隔离沙箱。
 
-装好后打开 **http://localhost:8797**（方式①）或 **http://localhost:8787**（方式②，二进制默认端口）进入 `/setup` 设置管理员密码。
+装好后打开 **http://localhost:8797**（方式①或方式②；二进制启动脚本会读取 `.env` 的 `PRAETOR_HTTP_PORT`）进入 `/setup` 设置管理员密码。
 
-> 端口不是笔误：容器内固定监听 8787，宿主映射由 `PRAETOR_HTTP_PORT` 决定（默认 **8797**）；直接跑二进制时监听 **8787**。
+> 端口不是笔误：容器内固定监听 8787，宿主映射由 `PRAETOR_HTTP_PORT` 决定（默认 **8797**）；宿主二进制通过 `start.sh` / `start.bat` 启动时同样读取该变量，默认也是 **8797**。只有在完全未加载 `.env` 的情况下直接执行二进制，才会回落到内置 **8787**。
 
 #### 安装完成后：密码在哪、还要做什么
 
@@ -190,6 +190,22 @@ cd PRAETOR
 | ① 全部 Docker（`./install.sh` 选 1） | 使用安装摘要打印的 compose 命令；`PRAETOR_MOUNT_DOCKER_SOCKET=1` 时必须同时带 `-f docker-compose.socket.yml` | `docker compose up -d` 裸命令可能导致应用容器失去 Docker 控制面 |
 | ② 本地编译运行（`./install.sh` 选 2） | `./start.sh` / `start.bat`（Git Bash 里 `./start.sh` 也行）；也可直接 `./praetor`，Windows 为 `./praetor.exe` | — |
 | Releases 预编译包 | 用包里的 `start.sh` / `start.bat` | 直接双击 exe：跳过守护脚本，页面「一键更新」换完装不会被拉起 |
+
+#### Docker 与宿主二进制切换
+
+两种运行方式共用同一套数据库和 `data/`，但不能同时运行。切换时只停另一端即可：
+
+```bash
+# Docker → 宿主二进制
+docker stop praetor-app
+./start.sh            # Windows: start.bat
+
+# 宿主二进制 → Docker
+# 先 Ctrl-C / 停止 start.sh/start.bat
+docker compose -f docker-compose.yml -f docker-compose.socket.yml up -d
+```
+
+运行时会把 `127.0.0.1` / `localhost` 与 `host.docker.internal` 自动翻译到当前执行环境。Burp MCP、Android ADB、系统出口代理、WebSearch 和 LLM 代理因此不需要在切换时反复改 `.env` 或 UI 配置。
 
 **启动横幅是 `PRAETOR` 字形。** 如果终端里看到的是 `ARTEX`，说明跑的是改名之前编译的旧二进制（看 `praetor.exe` 的时间戳）——字形跟着二进制一起编译，改文档不会变，必须重新编译才会更新。
 
@@ -250,7 +266,7 @@ docker compose -f docker-compose.yml -f docker-compose.socket.yml up -d --build
 | 每条 Bash `sandbox unavailable: docker 不可用` | 应用容器缺 `docker` CLI | 重建带 CLI 的镜像；或临时设 `PRAETOR_SANDBOX=optional` 降级 |
 | `npx playwright install chrome` 也被同一原因拒 | 它本身就是一条 Bash，走同一个拒绝通道 | 修好沙箱即可，不必单独装浏览器 |
 | 浏览器提示 `/opt/google/chrome/chrome` 不存在 | 镜像预装的是 Playwright chromium（`~/.cache/ms-playwright`），不是 Chrome stable | 用 Playwright 自带 chromium；沙箱镜像里另需装浏览器 |
-| WebFetch 对所有站点（含对照站点）都 502 | 设置里全局出口代理仍是 `http://127.0.0.1:7897`，容器内指向容器自己 | 系统设置改为 `http://host.docker.internal:7897`，或清空直连 |
+| WebFetch 对所有站点（含对照站点）都 502 | 上游代理未监听、端口错误，或代理拒绝来自容器的连接 | 优先确认代理正在监听；回环地址会按当前运行环境自动翻译为宿主地址 |
 | 修好 CLI 后又报「沙箱镜像不存在」 | 设置里记着旧机构建的 `praetor/sandbox:custom-*` tag | 新版本会自动回退到可用的 `PRAETOR_SANDBOX_IMAGE`；也可在组件面板重新应用预设 |
 | 每条 Bash `OCI runtime exec failed: chdir to cwd ("/work/i622")`，退出码 127 | 任务容器挂错了宿主目录，`/work` 里没有意图子目录 | 见下节；确认启动日志的「工作区」两行指向同一棵树 |
 
@@ -302,15 +318,15 @@ bind mount 宿主源读回来，再拼上 `work/<taskID>` 作为 `-v` 的源。�
   `?sessionId=...` 或 `/message` 端点发送 JSON-RPC。
 
 远程服务需要鉴权时，把请求头写进 MCP 的 `env`，例如
-`{"Authorization":"Bearer <token>"}`。全 Docker 部署不要把宿主机地址写成
-`127.0.0.1`，那指向应用容器自身；使用 `host.docker.internal`。
+`{"Authorization":"Bearer <token>"}`。宿主机地址可以保存为 `127.0.0.1`、
+`localhost` 或 `host.docker.internal`；运行时会在 Docker/宿主二进制之间自动翻译。
 
 Burp 官方 MCP 扩展当前使用 **legacy SSE 根路径**，不是 `/sse`。宿主机确认端口后，
 在 MCP 页面配置：
 
 ```text
 transport: sse
-url:       http://host.docker.internal:9876/
+url:       http://127.0.0.1:9876/   # Docker 中会自动翻译为 host.docker.internal
 env:       {"Host":"localhost:9876"}
 ```
 
@@ -323,7 +339,7 @@ Burp 会校验 Host 头；没有 `Host` 覆盖时可能需要 403。宿主机可
 
 ```bash
 cp config.example.json config.json   # 填好 database 连接
-./start.sh                           # → http://localhost:8787
+./start.sh                           # → http://localhost:8797
 ```
 
 > 请用 `start.sh` / `start.bat` 启动，而不是直接跑 `./praetor`。它是个守护脚本：程序退出后按退出码决定是否重新拉起，**页面上的[一键更新](#方式一页面一键更新推荐)靠它完成换装**。直接运行 `./praetor` 时更新完就不会被拉起了。
@@ -591,7 +607,7 @@ docker compose up -d --force-recreate praetor
 
 **常用参数**：`./start.sh -addr :8787 -proxy :8798`（`-addr` 前端+API，`-proxy` 流量录制代理）。启动脚本会把参数原样透传给 `praetor`。
 
-> ⚠️ 监听地址是 `-addr` **参数**，不是 `.env` 里的端口变量。用 `-addr :8797` 启动就必须访问 `:8797`；默认是 `:8787`。
+> `-addr` 显式参数优先级最高；未传时读取 `PRAETOR_HTTP_PORT`。`start.sh` / `start.bat` 会加载 `.env`，因此宿主默认访问 `:8797`；容器内未注入该变量时仍使用 `:8787`。
 
 ### Windows 上的 Bash（需要 POSIX shell）
 
@@ -617,7 +633,7 @@ docker compose up -d --force-recreate praetor
 
 ### 反向代理部署（HTTPS / 只开放 443）
 
-前端和 API/SSE 都由同一个后端端口（默认 `:8787`）提供，实时活动流默认走**同源**地址，因此**无需配置 `NEXT_PUBLIC_SSE_BASE`**，公网只开放 443、把 8787 留在内网即可。
+前端和 API/SSE 都由同一个后端端口提供（宿主默认 `:8797`，容器内 `:8787`），实时活动流默认走**同源**地址，因此**无需配置 `NEXT_PUBLIC_SSE_BASE`**，公网只开放 443、把后端端口留在内网即可。
 
 SSE 是长连接 + 持续推送，反代**必须关闭缓冲**，否则浏览器能连上却收不到事件（表现为活动流一直转圈）。Nginx 示例：
 
@@ -628,7 +644,7 @@ server {
     # ssl_certificate / ssl_certificate_key ...
 
     location / {
-        proxy_pass http://127.0.0.1:8787;
+        proxy_pass http://127.0.0.1:8797;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;
 
@@ -768,7 +784,7 @@ Burp GUI 截图仍需在宿主机截屏后上传。Burp MCP 当前没有截图�
    PRAETOR_MOBILE_DEVICE_MODE=1
    PRAETOR_TRAFFIC_ADDR=0.0.0.0:8798
    PRAETOR_TRAFFIC_BIND=0.0.0.0
-   PRAETOR_MOBILE_ADB_HOST=host.docker.internal   # 宿主二进制部署改 127.0.0.1
+   PRAETOR_MOBILE_ADB_HOST=host.docker.internal   # 宿主二进制会自动翻译为 127.0.0.1
    PRAETOR_MOBILE_DEVICE_EXCLUDE=192.168.1.50,host.docker.internal:5037,host.docker.internal:27042
    ```
 

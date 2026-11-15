@@ -661,7 +661,7 @@ func (m *Manager) WebSearch() (on bool, backend, braveKey, tavilyKey, proxy stri
 	if backend == "" {
 		backend = defaultWebSearchBackend
 	}
-	return m.webSearchOn, backend, m.braveKey, m.tavilyKey, m.webSearchProxy
+	return m.webSearchOn, backend, m.braveKey, m.tavilyKey, config.TranslateRuntimeURL(m.webSearchProxy)
 }
 
 // WebSearchOpts returns the config as the agent-package struct the server pushes
@@ -884,7 +884,7 @@ func (m *Manager) ProxyCACert() string {
 func (m *Manager) GlobalProxy() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.globalProxy
+	return config.TranslateRuntimeURL(m.globalProxy)
 }
 
 // ProxyPoolConfig returns the current proxy-pool settings.
@@ -953,25 +953,28 @@ func (m *Manager) EffectiveEgress() string {
 
 func (m *Manager) effectiveEgressLocked() string {
 	cfg := m.proxyPoolCfg
+	var raw string
 	if !cfg.Enabled {
-		return m.globalProxy
-	}
-	switch cfg.RouteMode {
-	case "direct":
-		return ""
-	case "system":
-		return m.globalProxy
-	case "pool", "":
-		if m.proxyPoolProxy != "" {
-			return m.proxyPoolProxy
+		raw = m.globalProxy
+	} else {
+		switch cfg.RouteMode {
+		case "direct":
+			raw = ""
+		case "system":
+			raw = m.globalProxy
+		case "pool", "":
+			if m.proxyPoolProxy != "" {
+				raw = m.proxyPoolProxy
+			} else if cfg.FallbackMode == "direct" {
+				raw = ""
+			} else {
+				raw = m.globalProxy
+			}
+		default:
+			raw = m.globalProxy
 		}
-		if cfg.FallbackMode == "direct" {
-			return ""
-		}
-		return m.globalProxy
-	default:
-		return m.globalProxy
 	}
+	return config.TranslateRuntimeURL(raw)
 }
 
 func (m *Manager) applyEgressToTraffic() error {

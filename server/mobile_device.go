@@ -26,7 +26,6 @@ import (
 )
 
 const (
-	mobileADBDefaultHost = "host.docker.internal"
 	mobileADBDefaultPort = 5037
 	mobileProbeTimeout   = 4 * time.Second
 )
@@ -41,26 +40,28 @@ type DeviceCheck struct {
 // DeviceStatus 是一次设备探测的完整结论。
 // Ready=false 时执行链必须降级到静态，Reason 写明是哪一项没过。
 type DeviceStatus struct {
-	Serial     string        `json:"serial"`
-	ADBServer  string        `json:"adb_server"`
-	Reachable  bool          `json:"reachable"`
-	Ready      bool          `json:"ready"`
-	Degraded   bool          `json:"degraded"`
-	Reason     string        `json:"reason"`
-	Checks     []DeviceCheck `json:"checks"`
-	ProbedAt   time.Time     `json:"probed_at"`
-	Devices    []string      `json:"devices,omitempty"` // 未指定 serial 时列出在线设备
+	Serial    string        `json:"serial"`
+	ADBServer string        `json:"adb_server"`
+	Reachable bool          `json:"reachable"`
+	Ready     bool          `json:"ready"`
+	Degraded  bool          `json:"degraded"`
+	Reason    string        `json:"reason"`
+	Checks    []DeviceCheck `json:"checks"`
+	ProbedAt  time.Time     `json:"probed_at"`
+	Devices   []string      `json:"devices,omitempty"` // 未指定 serial 时列出在线设备
 	// SerialList 与 Devices 同一个来源，但只放**裸序列号**（不带 " (device)" 状态后缀）。
 	// 任何要把序列号回写出去的界面都必须用这个：Devices 是给人看的展示串，
 	// 拿它当序列号提交会拼出含空格括号的非法值。展示用 Devices，回写用 SerialList。
 	SerialList []string `json:"serial_list,omitempty"`
-	ManualNote string        `json:"manual_note,omitempty"`
+	ManualNote string   `json:"manual_note,omitempty"`
 }
 
 func mobileADBAddr() string {
 	host := strings.TrimSpace(config.Env("MOBILE_ADB_HOST"))
 	if host == "" {
-		host = mobileADBDefaultHost
+		host = config.RuntimeLoopbackHost()
+	} else {
+		host = config.TranslateRuntimeHost(host)
 	}
 	port := mobileADBDefaultPort
 	if raw := strings.TrimSpace(config.Env("MOBILE_ADB_PORT")); raw != "" {
@@ -218,7 +219,9 @@ func (s *Server) mobileEnvFor(taskID string) []string {
 	}
 	host := strings.TrimSpace(config.Env("MOBILE_ADB_HOST"))
 	if host == "" {
-		host = mobileADBDefaultHost
+		host = config.RuntimeLoopbackHost()
+	} else {
+		host = config.TranslateRuntimeHost(host)
 	}
 	port := strings.TrimSpace(config.Env("MOBILE_ADB_PORT"))
 	if port == "" {

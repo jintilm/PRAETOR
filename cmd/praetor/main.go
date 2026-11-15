@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -56,9 +57,23 @@ func main() {
 	os.Exit(run())
 }
 
+// defaultHTTPAddr keeps the container default at 8787 while allowing the host
+// binary to reuse .env's public PRAETOR_HTTP_PORT (normally 8797).
+func defaultHTTPAddr() string {
+	raw := strings.TrimSpace(strings.TrimPrefix(config.Env("HTTP_PORT"), ":"))
+	if raw == "" {
+		return ":8787"
+	}
+	port, err := strconv.Atoi(raw)
+	if err != nil || port <= 0 || port > 65535 {
+		return ":8787"
+	}
+	return ":" + strconv.Itoa(port)
+}
+
 func run() int {
 	var (
-		addr        = flag.String("addr", ":8787", "HTTP listen address")
+		addr        = flag.String("addr", defaultHTTPAddr(), "HTTP listen address")
 		dataDir     = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the executable)")
 		proxy       = flag.String("proxy", trafficAddrDefault(), "traffic recording proxy address (empty to disable; PRAETOR_TRAFFIC_ADDR overrides the default)")
 		checkConfig = flag.Bool("check-config", false, "只打印配置来源后退出：不连数据库、不启动服务")
@@ -237,7 +252,9 @@ func logConfigDiagnostics(dataDir string) {
 	}
 	adbHost := config.Env("MOBILE_ADB_HOST")
 	if adbHost == "" {
-		adbHost = "host.docker.internal"
+		adbHost = config.RuntimeLoopbackHost()
+	} else {
+		adbHost = config.TranslateRuntimeHost(adbHost)
 	}
 	adbPort := config.Env("MOBILE_ADB_PORT")
 	if adbPort == "" {

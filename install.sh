@@ -66,6 +66,24 @@ env_set(){
   mv "$tmp" .env
 }
 
+# 二进制进程只读进程环境变量。安装脚本直接启动二进制时也必须像 start.sh/bat
+# 一样搬运 .env；否则首轮运行会丢失 HTTP 端口、真机模式和运行目录等配置。
+export_dotenv(){
+  [ -f .env ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=$(printf '%s' "$line" | tr -d '\r')
+    case "$line" in
+      ''|'#'*) continue ;;
+      PRAETOR_*=*|ANTHROPIC_API_KEY=*|OPENAI_API_KEY=*|POSTGRES_USER=*|POSTGRES_PASSWORD=*|POSTGRES_DB=*) ;;
+      *) continue ;;
+    esac
+    key=${line%%=*}
+    [ -n "$key" ] || continue
+    printenv "$key" >/dev/null 2>&1 && continue
+    export "$key=${line#*=}"
+  done < .env
+}
+
 # ── compose 调用（按 .env 里的开关决定是否带上 socket 覆盖层）──
 COMPOSE_ARGS=(-f docker-compose.yml)
 compose(){ docker compose "${COMPOSE_ARGS[@]}" "$@"; }
@@ -336,6 +354,7 @@ local_binary_name(){
 json_escape(){ printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
 install_local(){
+  export_dotenv
   # 之前用选项 1 装过的话 .env 已存在，把库参数带进默认值。否则用户按老习惯
   # 填 5432 + 空密码，会生成一份「看着有配置其实连不上库」的 config.json ——
   # 这正是「config 和环境变量都检测不到」最常见的来源。

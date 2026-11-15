@@ -211,9 +211,9 @@ func FromEnv() (Config, bool) {
 	}
 
 	c := Config{
-		BaseURL: config.Env("LLM_BASE_URL"),
+		BaseURL: config.TranslateRuntimeURL(config.Env("LLM_BASE_URL")),
 		Model:   config.Env("LLM_MODEL"),
-		Proxy:   strings.TrimSpace(config.Env("LLM_PROXY")),
+		Proxy:   config.TranslateRuntimeURL(strings.TrimSpace(config.Env("LLM_PROXY"))),
 		// 思考开关/强度：透传，不做取值校验 —— 不同模型支持的档位不同
 		// （有的只认 low/high，有的还有 xhigh/max），本地猜"这个模型支不支持"
 		// 比让上游返回 400 更容易出错。配错时上游的报错会原样带回日志。
@@ -260,9 +260,9 @@ func FromEnv() (Config, bool) {
 func ConfigFrom(provider, model, baseURL, apiKey, proxy string) Config {
 	c := Config{
 		Model:   strings.TrimSpace(model),
-		BaseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		BaseURL: config.TranslateRuntimeURL(strings.TrimRight(strings.TrimSpace(baseURL), "/")),
 		APIKey:  strings.TrimSpace(apiKey),
-		Proxy:   strings.TrimSpace(proxy),
+		Proxy:   config.TranslateRuntimeURL(strings.TrimSpace(proxy)),
 		Stream:  true, // 默认流式;调用方按 profile 覆盖
 	}
 	switch strings.TrimSpace(provider) {
