@@ -27,7 +27,12 @@ import (
 // tasks never even see these tool names in their prompt.
 func wireAgentAugment(pg *db.DB, skillDir string,
 	hostTools func() ([]actool.CoreTool, map[string][]string),
-	mobileTools func(int64) []actool.CoreTool) {
+	mobileTools func(int64) []actool.CoreTool,
+	miniAppToolProviders ...func(int64) []actool.CoreTool) {
+	var miniAppTools func(int64) []actool.CoreTool
+	if len(miniAppToolProviders) > 0 {
+		miniAppTools = miniAppToolProviders[0]
+	}
 	agent.ToolAugment = func(ctx context.Context, agentKey string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
 		a, err := pg.GetAgentByKey(agentKey)
 		if err != nil || a == nil {
@@ -172,10 +177,15 @@ func wireAgentAugment(pg *db.DB, skillDir string,
 		// 真机动态工具：按当前 run 的 taskID 注入。planner / chat / 未签发授权的
 		// 任务一律拿不到（mobileToolsFor 返回 nil），工具面不会被 9 个用不上的 schema 撑大。
 		// 绑定过滤仍由 ToolResolve 依 tools 表完成：seed 时默认只绑 worker。
-		if mobileTools != nil && agentKey == "worker" {
+		if agentKey == "worker" {
 			ri := agent.RunInfoFrom(ctx)
 			if ri.TaskID > 0 {
-				extra = append(extra, mobileTools(ri.TaskID)...)
+				if mobileTools != nil {
+					extra = append(extra, mobileTools(ri.TaskID)...)
+				}
+				if miniAppTools != nil {
+					extra = append(extra, miniAppTools(ri.TaskID)...)
+				}
 			}
 		}
 
@@ -258,6 +268,12 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		schema, _ := json.Marshal(sp.schema)
 		if err := pg.SeedTool(sp.name, sp.desc, schema, mobileAgents); err != nil {
 			log.Printf("[tools] seed mobile %s 失败: %v", sp.name, err)
+		}
+	}
+	for _, sp := range miniAppToolSpecs() {
+		schema, _ := json.Marshal(sp.schema)
+		if err := pg.SeedTool(sp.name, sp.desc, schema, mobileAgents); err != nil {
+			log.Printf("[tools] seed miniapp %s 失败: %v", sp.name, err)
 		}
 	}
 	// bashInteractiveShellNote is appended to Bash's description ONLY for agents whose

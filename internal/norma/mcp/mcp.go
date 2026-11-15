@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/jintilm/praetor/internal/norma/llm"
@@ -206,6 +207,32 @@ func (c *Client) Tools(ctx context.Context) ([]tool.CoreTool, error) {
 		out = append(out, c.wrap(rt))
 	}
 	return out, nil
+}
+
+// Call invokes one MCP tool for backend batch jobs. Agent-facing tools still go
+// through Tools(), which applies the normal AskUser permission gate.
+func (c *Client) Call(ctx context.Context, name string, args any) (string, error) {
+	raw, err := c.conn.call(ctx, "tools/call", map[string]any{"name": name, "arguments": args})
+	if err != nil {
+		return "", err
+	}
+	var res struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return "", fmt.Errorf("mcp: bad tool response: %w", err)
+	}
+	var text strings.Builder
+	for _, blk := range res.Content {
+		text.WriteString(blk.Text)
+	}
+	if res.IsError {
+		return text.String(), fmt.Errorf("mcp tool %q error: %s", name, text.String())
+	}
+	return text.String(), nil
 }
 
 func (c *Client) wrap(rt remoteTool) tool.CoreTool {

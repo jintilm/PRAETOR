@@ -63,7 +63,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 ## 核心能力
 
-### 任务领域：同一引擎，四套自主性形态
+### 任务领域：同一引擎，五套自主性形态
 
 创建任务时选择**领域**（`domain`），调度拓扑、预算与硬约束随领域切换：
 
@@ -73,8 +73,20 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 | **CTF 靶场** | 延迟竞速（默认单路，停滞才起第二路） | `ctf_challenge` 拉题 / `ctf_board` 竞速看板与放弃决策 / `ctf_submit` 唯一提交出口（去重 + 平台判分）；任务详情有 **CTF 面板**（题面配置、看板、判分记录） |
 | **逆向分析** | 1 planner + 1 worker（**证据串行**） | `re_triage` 定性 → `re_recipe` 8 条静态/动态配方（rizin / Ghidra headless / FLOSS / capa / DIE / gdb / apktool）→ `re_evidence` 证据链落图（claim/ref 硬校验，判据不通过也落库但标记 `inferred`） |
 | **红队战役** | 1 planner + 1 worker（串行） | 意图携带 ATT&CK 阶段（`phase`），**前置未完成不下发**；做过持久化/外传而 cleanup 未完成时**禁止收尾**（`prove_goal` / `goal_met` 均被拦）；可接 Caldera（`caldera_operation` 列 ability / 下发 / 回收，未配置时明确报「未配置」） |
+| **小程序黑盒** | 1 planner + N worker（探索并发） | 默认沿用 `assume` 授权链；通过真实设备、测试账号和 Burp MCP 做已发布小程序黑盒测试，不提供 wxapkg 解包、微信进程注入或平台风控绕过 |
 
 渗透与红队任务下发前必须有可解析的测试范围：目标 URL、域名、IP/CIDR，或已关联企业。范围缺失会直接返回 400；CTF 与逆向不受此限制。操作者不需要写命令级步骤，只需把授权边界、目标、成功标准和硬约束说清楚。
+
+### 微信小程序黑盒
+
+小程序领域只面向**已发布真实小程序**的授权黑盒测试。默认授权模式与 Android 真机工具一致：`PRAETOR_MOBILE_AUTH_MODE` 未显式设为 `required` 时按 `assume` 处理，但任务 Scope、测试账号、请求限速、设备锁和审计仍然生效。
+
+- `miniapp_status` 检查 Burp MCP、默认授权模式、设备模式和真机状态。
+- `burp_sync` 直接调用 Burp MCP 的 Proxy History，把请求/响应归一化为 PRAETOR 流量。
+- 只导入任务 `task_scope`、企业资产范围或任务文本明确目标内的域名；微信平台与第三方流量默认跳过。
+- 导入后的记录继续使用 `traffic_search`、`traffic_get`、`bind_finding_traffic` 和 finding 证据链。
+- `miniapp_screenshot` 从已授权 Android 真机截屏到 `/work/mobile/`，返回路径、大小和 SHA256，不把图片内联进模型上下文。
+- 默认不读取源码、不解包微信缓存、不注入微信进程、不绕过证书绑定或平台风控。需要更高覆盖率时，应由小程序所有者主动提供源码或构建产物，作为独立灰盒模式处理。
 
 ### 子 agent 派生（灰度开关）
 

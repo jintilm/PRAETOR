@@ -174,6 +174,7 @@ const TASK_DOMAIN_LABELS: Record<string, string> = {
   ctf: "CTF",
   reverse: "逆向",
   redteam: "红队",
+  miniapp: "小程序",
 };
 
 const MAX_SOURCE_TASKS = 8;
@@ -3432,12 +3433,18 @@ function CreateTaskSheet({
                   <SelectItem value="ctf">CTF 靶场（多题竞速）</SelectItem>
                   <SelectItem value="reverse">逆向分析（证据串行）</SelectItem>
                   <SelectItem value="redteam">红队战役（ATT&amp;CK 阶段闸门）</SelectItem>
+                  <SelectItem value="miniapp">微信小程序（默认授权黑盒）</SelectItem>
                 </SelectContent>
               </Select>
               <FieldDescription>
                 决定调度拓扑与预算：CTF 按分值/难度竞速分派；逆向按「一条假设验证完再下一条」串行推进并要求证据链；
-                红队按 ATT&amp;CK 阶段闸门下发、收尾强制 cleanup。红队战役意图需带阶段（phase），前置未完成不下发。
+                红队按 ATT&amp;CK 阶段闸门下发、收尾强制 cleanup；微信小程序使用默认授权黑盒模式，通过真实设备与 Burp 流量做有限验证。
               </FieldDescription>
+              {taskDomain === "miniapp" && (
+                <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:text-amber-200">
+                  默认按已获授权处理。任务描述中必须写明小程序名称、AppID、授权后端域名和测试账号范围；不会解包微信缓存、注入微信进程或绕过平台保护与风控。
+                </div>
+              )}
             </Field>
             <Field>
               <FieldLabel htmlFor="task-report-template">报告输出模板</FieldLabel>

@@ -33,6 +33,7 @@ const (
 	RedTeam Key = "redteam" // 红队 / 对手模拟
 	CTF     Key = "ctf"     // CTF 竞赛
 	Reverse Key = "reverse" // 逆向工程
+	Miniapp Key = "miniapp" // 已发布小程序黑盒测试
 )
 
 // SchedulerKind 决定「意图怎么派、并发多少、何时收敛」——四域差异最大的地方。

@@ -839,11 +839,11 @@ func encodeJSON(v any) json.RawMessage {
 }
 
 // HostTools are runtime host-provided tools added to EVERY agent's base list (via
-// ToolAugment); the tools table then filters them per-agent binding. Currently the
-// traffic tools, gated by the global capture switch: empty when capture is off, so
-// no agent gets traffic_search/traffic_get regardless of binding.
+// ToolAugment); the tools table then filters them per-agent binding. Traffic
+// tools remain available when the live recorder is off because external sources
+// such as Burp can still import exchanges into the same index.
 func (m *Manager) HostTools() []actool.CoreTool {
-	if m.traffic == nil || !m.TrafficEnabled() {
+	if m.traffic == nil {
 		return nil
 	}
 	return m.traffic.Tools()

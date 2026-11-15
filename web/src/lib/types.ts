@@ -2,9 +2,9 @@
 // Derived from the functional spec (section 7: 关键数据形状).
 
 export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | "failed" | "timeout";
-// 任务领域：决定调度器拓扑与预算（pentest=探索并发;ctf=竞速;reverse=证据串行;redteam=战役 DAG）。
+// 任务领域：决定调度器拓扑与预算（pentest=探索并发;ctf=竞速;reverse=证据串行;redteam=战役 DAG;miniapp=小程序黑盒）。
 // 省略/缺省 = pentest（与后端 createTaskReq.Domain 的默认一致）。
-export type TaskDomain = "pentest" | "ctf" | "reverse" | "redteam";
+export type TaskDomain = "pentest" | "ctf" | "reverse" | "redteam" | "miniapp";
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 // 报告输出模板：创建任务时选定并持久化，导出时可临时覆盖（不落库）。

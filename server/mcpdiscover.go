@@ -17,6 +17,7 @@ import (
 // so tools/list and cleanup are handled uniformly regardless of transport.
 type mcpClient interface {
 	Tools(context.Context) ([]actool.CoreTool, error)
+	Call(context.Context, string, any) (string, error)
 	Close() error
 }
 

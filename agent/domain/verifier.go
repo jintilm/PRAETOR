@@ -80,3 +80,22 @@ func (reverseVerifier) Verify(_ context.Context, ev Evidence) (Verdict, error) {
 	}
 	return Verdict{Done: true, Reason: fmt.Sprintf("证据链完整（xref=%d, 有动态trace=%v）", static, dynamic != "")}, nil
 }
+
+type miniappVerifier struct{}
+
+func (miniappVerifier) Name() string { return "miniapp/blackbox-evidence" }
+
+func (miniappVerifier) Verify(_ context.Context, ev Evidence) (Verdict, error) {
+	if ev.SHA256 == "" || ev.Ref == "" {
+		return Verdict{Reason: "缺少 Burp 流量或截图证据引用，不可复核"}, nil
+	}
+	if !ev.Reproduced {
+		return Verdict{Reason: "漏洞尚未使用测试账号在真实小程序中复现"}, nil
+	}
+	trafficID, _ := ev.Meta["traffic_id"].(string)
+	screenshot, _ := ev.Meta["screenshot_ref"].(string)
+	if strings.TrimSpace(trafficID) == "" && strings.TrimSpace(screenshot) == "" {
+		return Verdict{Reason: "未绑定 Burp 请求或页面截图，证据链不完整"}, nil
+	}
+	return Verdict{Done: true, Reason: "已在授权黑盒范围内复现并绑定可复核证据"}, nil
+}
