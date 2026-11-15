@@ -167,7 +167,7 @@ cd PRAETOR
 
 装好后打开 **http://localhost:8797**（方式①或方式②；二进制启动脚本会读取 `.env` 的 `PRAETOR_HTTP_PORT`）进入 `/setup` 设置管理员密码。
 
-> 端口不是笔误：容器内固定监听 8787，宿主映射由 `PRAETOR_HTTP_PORT` 决定（默认 **8797**）；宿主二进制通过 `start.sh` / `start.bat` 启动时同样读取该变量，默认也是 **8797**。只有在完全未加载 `.env` 的情况下直接执行二进制，才会回落到内置 **8787**。
+> Docker 容器和宿主二进制统一使用 `PRAETOR_HTTP_PORT`，默认 **8797**。Compose 会把容器监听和宿主映射设置成同一个值，切换部署方式时访问地址不变。
 
 #### 安装完成后：密码在哪、还要做什么
 
@@ -605,9 +605,9 @@ docker compose up -d --force-recreate praetor
 
 **并发**：每个任务的 work agent 数在「系统设置」里配置（默认 3）。
 
-**常用参数**：`./start.sh -addr :8787 -proxy :8798`（`-addr` 前端+API，`-proxy` 流量录制代理）。启动脚本会把参数原样透传给 `praetor`。
+**常用参数**：`./start.sh -addr :8797 -proxy :8798`（`-addr` 前端+API，`-proxy` 流量录制代理）。启动脚本会把参数原样透传给 `praetor`。
 
-> `-addr` 显式参数优先级最高；未传时读取 `PRAETOR_HTTP_PORT`。`start.sh` / `start.bat` 会加载 `.env`，因此宿主默认访问 `:8797`；容器内未注入该变量时仍使用 `:8787`。
+> `-addr` 显式参数优先级最高；未传时读取 `PRAETOR_HTTP_PORT`，默认 `:8797`。Docker 和宿主二进制使用同一规则。
 
 ### Windows 上的 Bash（需要 POSIX shell）
 
@@ -633,7 +633,7 @@ docker compose up -d --force-recreate praetor
 
 ### 反向代理部署（HTTPS / 只开放 443）
 
-前端和 API/SSE 都由同一个后端端口提供（宿主默认 `:8797`，容器内 `:8787`），实时活动流默认走**同源**地址，因此**无需配置 `NEXT_PUBLIC_SSE_BASE`**，公网只开放 443、把后端端口留在内网即可。
+前端和 API/SSE 都由同一个后端端口提供（默认 `:8797`），实时活动流默认走**同源**地址，因此**无需配置 `NEXT_PUBLIC_SSE_BASE`**，公网只开放 443、把后端端口留在内网即可。
 
 SSE 是长连接 + 持续推送，反代**必须关闭缓冲**，否则浏览器能连上却收不到事件（表现为活动流一直转圈）。Nginx 示例：
 
@@ -878,7 +878,7 @@ Burp GUI 截图仍需在宿主机截屏后上传。Burp MCP 当前没有截图�
 ### 本地运行与测试
 
 ```bash
-./dev.sh    # 后端(:8787) + 流量代理(:8798) + 前端 next dev(:5173) → http://localhost:5173
+./dev.sh    # 后端(:8797) + 流量代理(:8798) + 前端 next dev(:5173) → http://localhost:5173
 ```
 
 - 后端：`go run ./cmd/praetor`（不带 `-tags embedui` 则不内嵌前端）

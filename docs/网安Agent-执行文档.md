@@ -951,7 +951,7 @@ export PRAETOR_HEXSTRIKE_DIR=/opt/hexstrike-ai                      # 只要这�
 | compose 项目 | `artex`（目录名推导） | **`praetor`**（`name:` 顶层固定） |
 | 容器 | `artex-postgres-1` / `artex-praetor-1` | **`praetor-pg` / `praetor-app`**（显式 `container_name`） |
 | 数据卷 | `artex_pgdata` | **`praetor-pgdata`** |
-| 应用端口 | 8787 / 8788 | **8797 / 8798**（`PRAETOR_HTTP_PORT` / `PRAETOR_MCP_PORT` 可覆盖） |
+| 应用端口 | 8797 / 8798 | **8797 / 8798**（`PRAETOR_HTTP_PORT` / `PRAETOR_MCP_PORT` 可覆盖） |
 | 数据库端口 | 5432（容器 `artex-pg`） | **55433**（容器 `praetor-pg`，`PRAETOR_PG_PORT` 可覆盖） |
 | 测试库 | — | `praetor-test` 项目 / `praetor-test-pg` 容器 / **55432** |
 

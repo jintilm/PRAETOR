@@ -57,16 +57,16 @@ func main() {
 	os.Exit(run())
 }
 
-// defaultHTTPAddr keeps the container default at 8787 while allowing the host
-// binary to reuse .env's public PRAETOR_HTTP_PORT (normally 8797).
+// defaultHTTPAddr keeps Docker and host binaries on the public
+// PRAETOR_HTTP_PORT (normally 8797).
 func defaultHTTPAddr() string {
 	raw := strings.TrimSpace(strings.TrimPrefix(config.Env("HTTP_PORT"), ":"))
 	if raw == "" {
-		return ":8787"
+		return ":8797"
 	}
 	port, err := strconv.Atoi(raw)
 	if err != nil || port <= 0 || port > 65535 {
-		return ":8787"
+		return ":8797"
 	}
 	return ":" + strconv.Itoa(port)
 }

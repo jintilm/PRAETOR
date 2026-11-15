@@ -4,8 +4,8 @@
 #   1. 顶层 name: praetor → 独立 compose 项目，不共享 network / 容器归属
 #   2. 显式 container_name → praetor-pg / praetor-app，不会和旧容器重名
 #   3. 独立命名卷 praetor-pgdata → 旧库数据物理隔离
-#   4. 宿主端口默认 8797/8798（可用 PRAETOR_HTTP_PORT / PRAETOR_MCP_PORT 覆盖），
-#      容器内监听 8787/8798（代理端口与宿主一致）
+#   4. 应用与录制端口默认 8797/8798（可用 PRAETOR_HTTP_PORT / PRAETOR_MCP_PORT 覆盖），
+#      容器内外使用同一监听端口
 #
 # 起停：
 #   docker compose up -d --build
@@ -66,6 +66,7 @@ services:
         condition: service_healthy
     environment:
       PRAETOR_PG_DSN: postgres://${POSTGRES_USER:-praetor}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-praetor}?sslmode=disable
+      PRAETOR_HTTP_PORT: ${PRAETOR_HTTP_PORT:-8797}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       PRAETOR_LLM_PROVIDER: ${PRAETOR_LLM_PROVIDER:-}
@@ -112,7 +113,7 @@ services:
       # 宿主侧绑定也传进来，让 -check-config 的「宿主绑定」显示真实值而不是 compose 默认猜测
       PRAETOR_TRAFFIC_BIND: ${PRAETOR_TRAFFIC_BIND:-127.0.0.1}
     ports:
-      - "${PRAETOR_HTTP_PORT:-8797}:8787"
+      - "${PRAETOR_HTTP_PORT:-8797}:${PRAETOR_HTTP_PORT:-8797}"
       # 宿主侧绑定也默认回环：真机接入时设 PRAETOR_TRAFFIC_BIND=0.0.0.0，
       # 让手机能访问 <宿主IP>:<PRAETOR_MCP_PORT> 上的录制代理。
       - "${PRAETOR_TRAFFIC_BIND:-127.0.0.1}:${PRAETOR_MCP_PORT:-8798}:8798"

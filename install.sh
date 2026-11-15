@@ -472,7 +472,7 @@ JSON
 
   echo
   echo "────────────────────────────────────────────────────────────"
-  echo "  本次启动   前台运行 ./$bin  → http://localhost:8787（Ctrl-C 停止）"
+  echo "  本次启动   前台运行 ./$bin  → http://localhost:8797（Ctrl-C 停止）"
   echo "  后续启动   Linux/macOS: ./start.sh    Windows: start.bat"
   echo "             这两个脚本会自动读 .env 并组装 PRAETOR_PG_DSN"
   echo "  直接运行   ./$bin —— 只读 config.json + 环境变量，**不读 .env**"
@@ -514,7 +514,7 @@ JSON
     warn "Bash 将跑在宿主进程内，没有 per-task 隔离；需要隔离请先让 docker 对当前用户可用"
   fi
 
-  info "启动…（Ctrl-C 退出）→ http://localhost:8787"
+  info "启动…（Ctrl-C 退出）→ http://localhost:8797"
   "./$bin"
 }
 

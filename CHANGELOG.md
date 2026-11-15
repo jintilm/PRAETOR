@@ -14,7 +14,7 @@
 - **`./update.sh` 回答「不拉取代码」会直接退出**：`sync_repo` 的跳过分支用无参 `return`，会继承上一条失败命令的退出码 1，配合 `set -e` 等于用户答 `n` 就中断。已改为 `return 0`。
 - **`update.sh` 改镜像 tag 会切掉 registry 端口**：`${img%:*}` 对 `localhost:5000/praetor` 会得到 `localhost`。改为「只有最后一个 `/` 之后出现 `:` 才当成 tag」。
 - **容器化部署的沙箱默认不可用**：不挂 `docker.sock` 时 `PRAETOR_SANDBOX=required` 会让每次 Bash 都报 `sandbox unavailable`，而部署本身看起来成功。新增 `docker-compose.socket.yml` 覆盖层，`install.sh` 会显式询问沙箱运行方式并写入 `PRAETOR_MOUNT_DOCKER_SOCKET`。
-- **README 里的地址/命令与实际不符**：Docker 部署实际监听 `localhost:8797`（容器内 8787、宿主映射由 `PRAETOR_HTTP_PORT` 决定），原文写 8787；更新章节也还在教 `docker compose pull`。已按四种安装方式逐条修正，并补了环境变量速查表。
+- **README 里的地址/命令与实际不符**：Docker 部署实际监听 `localhost:8797`（容器内外统一由 `PRAETOR_HTTP_PORT` 决定），原文写 8797；更新章节也还在教 `docker compose pull`。已按四种安装方式逐条修正，并补了环境变量速查表。
 
 #### 新增的功能
 
@@ -100,7 +100,7 @@
 
 #### 修复的问题
 
-- **修复反向代理部署下活动流连不上**：SSE 地址此前无条件拼成 `${hostname}:8787`，反代到 443 的部署里页面从 `https://域名/` 加载、SSE 却被指向未对公网开放的 8787 端口，表现为活动流反复重连。现按 `NODE_ENV` 区分：生产默认同源，仅 `next dev` 保留 `:8787` 以绕过 Next.js 对 SSE 的缓冲；`NEXT_PUBLIC_SSE_BASE` 覆盖口保留。README 补充了反向代理部署说明。
+- **修复反向代理部署下活动流连不上**：SSE 地址此前无条件拼成 `${hostname}:8797`，反代到 443 的部署里页面从 `https://域名/` 加载、SSE 却被指向未对公网开放的 8797 端口，表现为活动流反复重连。现按 `NODE_ENV` 区分：生产默认同源，仅 `next dev` 保留 `:8797` 以绕过 Next.js 对 SSE 的缓冲；`NEXT_PUBLIC_SSE_BASE` 覆盖口保留。README 补充了反向代理部署说明。
 
 ### 发现
 
