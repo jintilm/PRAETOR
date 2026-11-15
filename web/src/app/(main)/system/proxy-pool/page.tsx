@@ -239,6 +239,13 @@ export default function ProxyPoolPage() {
     setCheckingIDs((current) => new Set(current).add(entry.id));
     try {
       const result = await api.proxyPoolCheckEntry(entry.id);
+      if (result.entry) {
+        const updated = result.entry;
+        setData((current) => ({
+          ...current,
+          entries: current.entries.map((item) => (item.id === updated.id ? updated : item)),
+        }));
+      }
       toast.success(result.entry?.status === "healthy" ? "代理可用" : "代理检测完成");
       await load(true);
     } catch (error) {

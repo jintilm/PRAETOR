@@ -104,6 +104,7 @@ func (s *Server) getProxyPool(w http.ResponseWriter, r *http.Request) {
 	if pg == nil {
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	q := r.URL.Query()
 	page := atoiDefault(q.Get("page"), 1)
 	if page < 1 {
