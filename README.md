@@ -2,64 +2,158 @@
 
 # PRAETOR
 
-AI 自主渗透测试系统（Go 后端 + Next.js 前端）
+### 面向授权安全测试的多 Agent 自主渗透平台
 
-二开ARTEX
+从资产建模、图驱动探索、工具执行到证据化漏洞报告，全部收敛在一个可审计的工作台中。
+
+<sub>ARTEX 二次开发版本 · Go + Next.js + PostgreSQL</sub>
+
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs)](https://nextjs.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![License](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+
+[快速开始](#快速开始) · [能力地图](#能力地图) · [核心设计](#核心设计) · [截图](#界面预览) · [文档导航](#文档导航)
 
 </div>
 
----
+> [!IMPORTANT]
+> PRAETOR 仅用于个人学习、源码研究和本地隔离环境中的技术验证。不得用于任何线上系统、实际渗透测试或生产环境。使用前请完整阅读文末的[许可与免责声明](#许可与免责声明)。
 
-## 截图预览
+## 为什么是 PRAETOR
 
-> 完整交互见[在线 Demo](https://praetor-demo.vercel.app/)。
+PRAETOR 不是把聊天框套在扫描器外层，而是把自主安全测试拆成几个可验证的系统问题：
 
-| 仪表盘（总览 / Token 消耗 / 活动流） | 任务列表 |
+- **双图驱动**：资产图维护全局事实，探索图记录每个任务的意图、事实、漏洞和血缘。
+- **多 Agent 闭环**：planner 按图变化规划，worker 领取单一意图执行，结果写回后再次触发规划。
+- **领域可扩展**：渗透、CTF、逆向、红队和微信小程序黑盒共用执行引擎，各自定义调度、工具和验收器。
+- **证据优先**：流量、截图、样本和请求响应独立留存，漏洞结论必须可回到 finding 证据链。
+- **安全边界显式化**：任务 Scope、审批门、每任务沙箱、出口优先级和清理义务都在执行层校验。
+
+## 快速开始
+
+> 需要 Docker Desktop / Docker Engine。全部 Docker 安装会自动构建应用和沙箱镜像，并验证每任务沙箱是否可用。
+
+```bash
+git clone https://github.com/jintilm/PRAETOR.git
+cd PRAETOR
+./install.sh
+```
+
+选择 `1) 全部 Docker 安装`，完成后访问：
+
+```text
+http://localhost:8797
+```
+
+首次打开进入 `/setup` 设置管理员密码。数据库在安装时自动初始化；LLM 可以稍后在 UI 中配置。
+
+<details>
+<summary><strong>使用宿主二进制运行</strong></summary>
+
+```bash
+docker stop praetor-app
+./install.sh   # 选择 2) 本地运行
+```
+
+安装脚本会编译内嵌前端的单二进制，并在宿主 Docker 可用时构建同一沙箱镜像。宿主模式和 Docker 模式都默认使用 `8797`。
+
+完整步骤见[详细安装说明](#安装)。
+
+</details>
+
+## 能力地图
+
+| 能力 | 说明 |
+| --- | --- |
+| **自主渗透** | 资产发现、服务枚举、Web/API 测试、漏洞验证、覆盖度追踪和报告 |
+| **任务领域** | 渗透、CTF、逆向、红队战役、微信小程序黑盒，共用领域包接口 |
+| **双图与人在环路** | 资产图 + 探索图、任务会话、实时播报、审批与人工纠偏 |
+| **证据链** | MITM 流量、finding 请求响应、截图附件、报告导出与历史复测 |
+| **隔离执行** | 每任务 Docker 沙箱、路径翻译、写白名单、出口透明重定向 |
+| **外部接入** | MCP、Burp MCP、ScopeSentry、自定义工具、Skill、LLM 配置链 |
+| **小程序黑盒** | 真机截图、Burp History 同步、Scope 过滤、默认授权模式 |
+| **运维能力** | 代理池、健康检查、一键更新、任务归档、审计、日志与用量统计 |
+
+## 核心设计
+
+```text
+用户目标与授权范围
+        ↓
+ goals / scope / constraints
+        ↓
+ planner ←──── 图变更事件
+        ↓
+ worker × N → 沙箱 / MCP / Burp / 真机
+        ↓
+资产图 + 探索图 + 流量 + 证据
+        ↓
+验证器 → finding → 报告
+```
+
+- **Planner / Worker 分离**：planner 只规划，worker 只执行当前意图，避免单个长上下文既规划又操作。
+- **跨 work 过程复用**：worker 可以检索其他 work 的观察，但不会混淆意图所有权。
+- **Planner todolist**：跨唤醒保留多步攻击链，前置事实满足后才派下一步。
+- **领域包隔离**：新增领域不修改调度核心；工具、角色、预算和 Verifier 由领域声明。
+- **证据不可口头替代**：无法通过确定性验收的结论只能标记为疑似或未确认。
+
+更完整的组件图、双图模型和意图生命周期见[系统技术架构](#architecture-docs)。
+
+## 界面预览
+
+> 在线 Demo：[praetor-demo.vercel.app](https://praetor-demo.vercel.app/)
+
+<p align="center">
+  <img src="screenshots/dashboard.png" alt="PRAETOR 仪表盘" width="100%" />
+</p>
+
+<table>
+  <tr>
+    <td width="50%"><img src="screenshots/tasks.png" alt="任务列表" /></td>
+    <td width="50%"><img src="screenshots/sessions.png" alt="Agent 执行过程" /></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/graph.png" alt="探索链路" /></td>
+    <td><img src="screenshots/findings.png" alt="漏洞发现" /></td>
+  </tr>
+</table>
+
+<details>
+<summary><strong>查看更多界面</strong></summary>
+
+| 资产与覆盖 | 流量与人在环路 |
 | :---: | :---: |
-| ![仪表盘](screenshots/dashboard.png) | ![任务](screenshots/tasks.png) |
+| ![资产](screenshots/assets.png) | ![流量](screenshots/traffic.png) |
+| ![覆盖图](screenshots/assets_test.png) | ![对话](screenshots/chat.png) |
 
-| 任务 · 执行过程（会话 / 工具调用） | 探索链路 |
+| Agent / LLM 配置 | 审批与日志 |
 | :---: | :---: |
-| ![执行过程](screenshots/sessions.png) | ![探索链路](screenshots/graph.png) |
+| ![Agent](screenshots/agents.png) | ![审批](screenshots/intercept.png) |
+| ![LLM](screenshots/llm.png) | ![日志](screenshots/logs.png) |
 
-| 发现 | 资产 |
-| :---: | :---: |
-| ![发现](screenshots/findings.png) | ![资产](screenshots/assets.png) |
+</details>
 
-| 资产覆盖图（力导向布局 · 已测高亮 · 节点折叠展开） |
-| :---: |
-| ![资产覆盖图](screenshots/assets_test.png) |
+## 集成与边界
 
-| 流量录制 | 人在环路对话 |
-| :---: | :---: |
-| ![流量](screenshots/traffic.png) | ![对话](screenshots/chat.png) |
+- **ScopeSentry**：按项目或任务同步域名、子域、IP、端口、站点和端点，直接进入资产图。
+- **Burp MCP**：读取 Proxy History、正则筛选历史，并归一化为 finding 可用流量。
+- **MCP / Skill / 自定义工具**：按 Agent 可见性装配，工具描述和绑定可在 UI 管理。
+- **审批详情**：全局审批、任务内拦截和会话审批卡片均可展开查看调用详情。
+- **公开代理风险**：代理池只用于目标流量出口隔离，公开代理不可信，不应承载凭据或敏感数据。
+- **不提供平台绕过**：小程序领域不解包微信缓存、不注入微信进程、不绕过证书绑定或平台风控。
 
-| Agent 管理 | LLM 配置 |
-| :---: | :---: |
-| ![Agent](screenshots/agents.png) | ![LLM](screenshots/llm.png) |
+## 文档导航
 
-| 拦截审批 | 后端日志 |
-| :---: | :---: |
-| ![拦截](screenshots/intercept.png) | ![日志](screenshots/logs.png) |
-
-
----
-
-## 审批记录详情
-
-全局「审批记录」、任务内「拦截审批」及对话中的审批卡片均支持展开查看详情。展示结构参考
-[AegisHook 的审批详情组件](https://github.com/RuoJi6/AegisHook/blob/main/web/src/components/CallDetail.vue)，沿用 PRAETOR 的组件和主题：
-
-
-## 资产同步（ScopeSentry）
-
-支持从 [ScopeSentry](https://github.com/Autumn-27/ScopeSentry) 直接同步资产数据，免去重复收集：
-
-- 在「**资产同步**」页填 ScopeSentry 的地址与 API Key，接入数据源；
-- 按**项目**或**任务**维度选择要同步的目标与资产类型（域名 / 子域 / IP / 端口 / 站点 / 端点…）；
-- 一键导入并按公司资产范围归并，直接进入 PRAETOR 的资产图供 agent 探索使用。
-
----
+| 文档 | 内容 |
+| --- | --- |
+| [安装与部署](#install-docs) | 一键安装、Docker Compose、宿主二进制、Releases、跨平台构建 |
+| [Docker 与二进制切换](#docker-binary-switch) | 两种运行模式共用数据库、数据目录和地址翻译 |
+| [配置](#configuration-docs) | 环境变量、数据库密码、Windows Bash、反向代理 |
+| [报告模板](#report-docs) | Markdown 模板、截图附件、字段来源 |
+| [移动端与小程序](#mobile-docs) | APK 静态配方、Android 真机授权、动态工具和证据 |
+| [系统架构](#architecture-docs) | 双图、调度器、Agent 生命周期、领域包 |
+| [更新与卸载](#update-docs) | 页面更新、脚本更新、Docker、备份与清理 |
 
 ## 核心能力
 
@@ -137,6 +231,14 @@ CTF 与逆向域的 worker 即领域 lead，可通过 `Agent` 工具把「解一
 
 ---
 
+## 详细参考
+
+以下章节保留完整运维和实现细节。第一次使用建议先完成[快速开始](#快速开始)，再按需查阅。
+
+---
+
+<a id="install-docs"></a>
+
 ## 安装
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
@@ -190,6 +292,8 @@ cd PRAETOR
 | ① 全部 Docker（`./install.sh` 选 1） | 使用安装摘要打印的 compose 命令；`PRAETOR_MOUNT_DOCKER_SOCKET=1` 时必须同时带 `-f docker-compose.socket.yml` | `docker compose up -d` 裸命令可能导致应用容器失去 Docker 控制面 |
 | ② 本地编译运行（`./install.sh` 选 2） | `./start.sh` / `start.bat`（Git Bash 里 `./start.sh` 也行）；也可直接 `./praetor`，Windows 为 `./praetor.exe` | — |
 | Releases 预编译包 | 用包里的 `start.sh` / `start.bat` | 直接双击 exe：跳过守护脚本，页面「一键更新」换完装不会被拉起 |
+
+<a id="docker-binary-switch"></a>
 
 #### Docker 与宿主二进制切换
 
@@ -437,6 +541,8 @@ Windows 上不要写 `.env` 的 POSIX 语法到 `cmd`；`dev.sh` 与 `start.sh` 
 
 ---
 
+<a id="update-docs"></a>
+
 ## 更新升级
 
 > 升级只换程序、不动数据：Postgres 数据卷 `pgdata`、`./data`（jwt.key / SQLite 等）、`./skills` 都会保留。**数据库迁移无需手动执行**——`praetor` 每次启动会幂等重跑 `schema.sql`（含 `ADD COLUMN` / `CREATE INDEX IF NOT EXISTS`），即“重启即迁移”。升级前仍建议先备份 `./data` 与数据库。
@@ -551,6 +657,8 @@ removed/             # 档位 2/3 移出的文件，按原相对路径存放
 
 ---
 
+<a id="configuration-docs"></a>
+
 ## 配置
 
 **数据库**（`config.json`，或用环境变量 `PRAETOR_PG_DSN` 覆盖）：
@@ -664,6 +772,8 @@ server {
 
 
 
+<a id="report-docs"></a>
+
 ## 报告输出模板
 
 创建任务时可在「新建任务」抽屉里选**报告输出模板**，选定后写入 `tasks.report_template`；报告页与发现页导出时也能临时切换（只影响本次请求，不落库）。优先级：`?template=` 显式覆盖 > 任务的 `report_template` > `praetor`。
@@ -721,6 +831,8 @@ Burp GUI 截图仍需在宿主机截屏后上传。Burp MCP 当前没有截图�
 判定刻意保守：只认明确的 Android / iOS 特征词，不因为正文里出现 "app" 就把 Web 漏洞误判成移动端。补天沿用平台已有的「IOT漏洞」类别，不新增类别与细分类型联动下拉；edusrc 在「内容」里用三级小节避免标题跳级，并在归档提示里附一行移动端目标。非移动端任务不输出这一段，存量 praetor 报告**字节不变**。
 
 报告页在模板控件下展示同一份数据（`GET /api/tasks/{id}/mobile-meta`），与导出共用同一个后端取数函数，避免「页面显示一份、提交材料写另一份」。
+
+<a id="mobile-docs"></a>
 
 ## 移动端静态分析（P0 / P2 扩展）
 
@@ -887,6 +999,8 @@ Burp GUI 截图仍需在宿主机截屏后上传。Burp MCP 当前没有截图�
 - Mock 预览（无后端）：`cd web && NEXT_PUBLIC_MOCK=1 npm run dev`
 
 ---
+
+<a id="architecture-docs"></a>
 
 ## 系统技术架构
 
