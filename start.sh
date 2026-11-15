@@ -6,7 +6,8 @@
 #   nohup ./start.sh >praetor.log 2>&1 &   后台常驻
 #   ./start.sh -addr :9000           额外参数原样透传给 praetor
 #
-# 它只做一件事：把 praetor 跑起来，进程退出后按退出码决定要不要再拉起。
+# 它负责：载入 .env / 组装本地 DSN / 补齐 required 沙箱镜像 / 守护 praetor 进程。
+# 进程退出后按退出码决定要不要再拉起。
 #
 #   0      用户正常停止        → 退出循环
 #   75     程序请求重启        → 立刻重跑（页面点了"一键更新"或"回滚"）
@@ -47,6 +48,34 @@ load_dotenv() {
 }
 
 load_dotenv
+
+# 宿主二进制启动时自动补齐与 install.sh / Docker 安装相同的沙箱镜像。
+# 应用容器内的 start.sh 不在这里 build（镜像内没有仓库构建上下文），由全 Docker
+# 安装/更新流程在宿主侧构建。
+prepare_sandbox_image() {
+	case "${PRAETOR_SANDBOX:-required}" in off|optional) return 0 ;; esac
+	[ ! -f /.dockerenv ] || return 0
+	command -v docker >/dev/null 2>&1 || {
+		echo "[praetor] 警告：Docker 不可达，required 模式下 Bash 将被拒绝" >&2
+		return 0
+	}
+	docker info >/dev/null 2>&1 || {
+		echo "[praetor] 警告：Docker daemon 不可达，required 模式下 Bash 将被拒绝" >&2
+		return 0
+	}
+	img="${PRAETOR_SANDBOX_IMAGE:-praetor/sandbox:latest}"
+	docker image inspect "$img" >/dev/null 2>&1 && return 0
+	echo "[praetor] 沙箱镜像 $img 不存在，开始构建（仅首次）…"
+	set --
+	if [ -n "${PRAETOR_KALI_MIRROR:-}" ]; then
+		set -- --build-arg "PRAETOR_KALI_MIRROR=${PRAETOR_KALI_MIRROR}"
+	fi
+	if ! docker build -f sandbox/Dockerfile -t "$img" "$@" .; then
+		echo "[praetor] 警告：沙箱镜像构建失败；required 模式下 Bash 将被拒绝" >&2
+	fi
+}
+
+prepare_sandbox_image
 
 # compose 用 POSTGRES_* + PRAETOR_PG_PORT，二进制要的是一个完整 DSN。
 # 仅在没有显式 PRAETOR_PG_DSN 时组装（CI / 手工配置永远优先）。

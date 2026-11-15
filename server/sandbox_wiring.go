@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"os/exec"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -80,6 +81,12 @@ func WireSandbox(ctx context.Context, dataDir string) {
 // 的最终分支才知道真相，所以由它写、别处只读。
 var sandboxPerTaskActive atomic.Bool
 
+var sandboxImageInspect = func(ctx context.Context, image string) bool {
+	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	return exec.CommandContext(cctx, "docker", "image", "inspect", image).Run() == nil
+}
+
 // SandboxPerTaskActive 报告当前 Bash 是否跑在按任务创建的容器里。
 func SandboxPerTaskActive() bool { return sandboxPerTaskActive.Load() }
 
@@ -113,10 +120,7 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string, routing San
 	case sandbox.IsolationShared:
 		runner = sandbox.NewDocker(sandbox.ContainerFromEnv(), SandboxContainerRoot)
 	default:
-		image := strings.TrimSpace(imageOverride)
-		if image == "" {
-			image = envOr("SANDBOX_IMAGE", "praetor/sandbox:latest")
-		}
+		image := resolveSandboxDefaultImage(ctx, imageOverride)
 		view, viewErr := sandbox.ResolvePathView(ctx, localWorkRoot, config.Env("SANDBOX_WORK_HOST_ROOT"))
 		if viewErr != nil {
 			// 绝不把 Local 当 Daemon 兜底：那正是本次事故（宿主上不存在的
@@ -189,6 +193,36 @@ func wireSandbox(ctx context.Context, dataDir, imageOverride string, routing San
 		sandboxPerTaskActive.Store(true)
 	}
 	log.Printf("[sandbox] 已启用：mode=%s isolation=%s runner=%s", mode, isolation, runner.Name())
+}
+
+// resolveSandboxDefaultImage prevents a stale settings tag from making an
+// otherwise reproducible install unavailable. The components UI stores
+// praetor/sandbox:custom-* in settings; after moving a database or cloning on a
+// new machine that tag may not exist even though .env's base sandbox image does.
+// Keep operator-selected images when present, otherwise fall back to the image
+// the repository/installer guarantees.
+func resolveSandboxDefaultImage(ctx context.Context, override string) string {
+	configured := strings.TrimSpace(override)
+	if configured == "" {
+		configured = envOr("SANDBOX_IMAGE", "praetor/sandbox:latest")
+	}
+	if sandboxImageExists(ctx, configured) {
+		return configured
+	}
+	fallback := envOr("SANDBOX_IMAGE", "praetor/sandbox:latest")
+	if fallback != configured && sandboxImageExists(ctx, fallback) {
+		log.Printf("[sandbox] 配置镜像 %q 不存在，回退到 PRAETOR_SANDBOX_IMAGE=%q", configured, fallback)
+		return fallback
+	}
+	return configured
+}
+
+func sandboxImageExists(ctx context.Context, image string) bool {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return false
+	}
+	return sandboxImageInspect(ctx, image)
 }
 
 // SandboxWorkRootDiagnostics 给 `-check-config` 用：一行说清工作区的两个视角。

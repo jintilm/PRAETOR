@@ -7,7 +7,8 @@ rem 用法：
 rem   start.bat                  前台运行（Ctrl-C 停止）
 rem   start.bat -addr :9000      额外参数原样透传给 praetor
 rem
-rem 它只做一件事：把 praetor.exe 跑起来，进程退出后按退出码决定要不要再拉起。
+rem 它负责：载入 .env / 组装本地 DSN / 补齐 required 沙箱镜像 / 守护 praetor.exe。
+rem 进程退出后按退出码决定要不要再拉起。
 rem
 rem   0      用户正常停止     -> 退出循环
 rem   75     程序请求重启     -> 立刻重跑（页面点了"一键更新"或"回滚"）
@@ -49,6 +50,24 @@ if not defined PRAETOR_PG_DSN (
 		if not "!PGPASS!"=="change-me-please" (
 			set "PRAETOR_PG_DSN=postgres://!PGUSER!:!PGPASS!@127.0.0.1:!PGPORT!/!PGDB!?sslmode=disable"
 			echo [praetor] 已从 .env 组装 PRAETOR_PG_DSN (127.0.0.1:!PGPORT!/!PGDB!)
+		)
+	)
+)
+
+rem 宿主启动时补齐与 install.sh / Docker 安装相同的沙箱镜像。
+if /i not "!PRAETOR_SANDBOX!"=="off" if /i not "!PRAETOR_SANDBOX!"=="optional" (
+	docker info >nul 2>&1
+	if errorlevel 1 (
+		echo [praetor] 警告：Docker daemon 不可达，required 模式下 Bash 将被拒绝 1>&2
+	) else (
+		if not defined PRAETOR_SANDBOX_IMAGE set "PRAETOR_SANDBOX_IMAGE=praetor/sandbox:latest"
+		docker image inspect "!PRAETOR_SANDBOX_IMAGE!" >nul 2>&1
+		if errorlevel 1 (
+			echo [praetor] 沙箱镜像 !PRAETOR_SANDBOX_IMAGE! 不存在，开始构建（仅首次）…
+			set "BUILD_ARGS="
+			if defined PRAETOR_KALI_MIRROR set "BUILD_ARGS=--build-arg PRAETOR_KALI_MIRROR=!PRAETOR_KALI_MIRROR!"
+			docker build -f sandbox\Dockerfile -t "!PRAETOR_SANDBOX_IMAGE!" !BUILD_ARGS! .
+			if errorlevel 1 echo [praetor] 警告：沙箱镜像构建失败；required 模式下 Bash 将被拒绝 1>&2
 		)
 	)
 )

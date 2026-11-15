@@ -112,6 +112,57 @@ ensure_docker_cli_image(){
   env_set PRAETOR_DOCKER_CLI_IMAGE "$mirror"
 }
 
+# 两种安装方式使用同一个沙箱镜像，避免「Docker 安装能用、本地安装没有镜像」。
+sandbox_image_name(){
+  local img
+  img="$(env_get PRAETOR_SANDBOX_IMAGE)"
+  printf '%s' "${img:-praetor/sandbox:latest}"
+}
+
+ensure_sandbox_image(){
+  local img="$1" kali
+  if docker image inspect "$img" >/dev/null 2>&1; then
+    ok "沙箱镜像已存在：$img"
+    return 0
+  fi
+  info "构建沙箱镜像 ${img}（Kali 工具链，首次可能较慢）…"
+  kali="$(env_get PRAETOR_KALI_MIRROR)"
+  set --
+  if [ -n "$kali" ]; then set -- --build-arg "PRAETOR_KALI_MIRROR=$kali"; fi
+  if ! docker build -f sandbox/Dockerfile -t "$img" "$@" .; then
+    return 1
+  fi
+  ok "沙箱镜像构建完成：$img"
+}
+
+verify_docker_sandbox(){
+  [ "$(env_get PRAETOR_MOUNT_DOCKER_SOCKET)" = "1" ] || return 0
+  case "$(env_get PRAETOR_SANDBOX)" in
+    off|optional) return 0 ;;
+  esac
+  local img
+  img="$(sandbox_image_name)"
+  info "验证应用容器到宿主 Docker 与沙箱镜像…"
+  compose exec -T praetor docker info >/dev/null 2>&1 \
+    || die "应用容器无法访问宿主 Docker；确认 docker-compose.socket.yml 已随 compose 一起加载"
+  compose exec -T praetor docker image inspect "$img" >/dev/null 2>&1 \
+    || die "应用容器看不到沙箱镜像 ${img}；请先 docker compose build sandbox"
+  local i logs
+  for i in $(seq 1 15); do
+    logs="$(compose logs --no-color --since 2m praetor 2>/dev/null || true)"
+    if printf '%s\n' "$logs" | grep -q '\[sandbox\] 已启用'; then
+      ok "沙箱 Docker 通道、镜像与 Runner 均可用"
+      return 0
+    fi
+    if printf '%s\n' "$logs" | grep -q '\[sandbox\] 不可用'; then
+      printf '%s\n' "$logs" | grep '\[sandbox\]' | tail -8 >&2 || true
+      die "应用已启动，但沙箱 Runner 不可用；请按上面的日志修复"
+    fi
+    sleep 1
+  done
+  die "30 秒内未确认沙箱 Runner 启用；运行 docker compose ${COMPOSE_ARGS[*]} logs praetor 查看原因"
+}
+
 # ── 启动后验证 ──────────────────────────────────
 # up -d 是异步的：端口冲突 / 库起不来 / 构建半途失败时，脚本照样会打印
 # 「安装完成 → http://...」，用户打开是白页。这里把「真的能响应」作为成功前置。
@@ -140,9 +191,12 @@ wait_http_ready(){
 # up -d 是后台启动，脚本到这里就该结束；但"结束"和用户"知道怎么用"是两回事。
 # 把凭据位置、初始化入口、端口、日志命令一次讲清，别让人翻代码找密码。
 show_install_summary(){
-  local port pg_port
+  local port pg_port sandbox_mode sandbox_img socket_mode
   port="$(http_port)"
   pg_port="$(env_get PRAETOR_PG_PORT)"; pg_port="${pg_port:-55433}"
+  sandbox_mode="$(env_get PRAETOR_SANDBOX)"; sandbox_mode="${sandbox_mode:-required}"
+  sandbox_img="$(sandbox_image_name)"
+  socket_mode="$(env_get PRAETOR_MOUNT_DOCKER_SOCKET)"
   echo
   ok "安装完成 → http://localhost:${port}"
   echo "────────────────────────────────────────────────────────────"
@@ -155,6 +209,7 @@ show_install_summary(){
   echo "  查看日志   docker compose ${COMPOSE_ARGS[*]} logs -f praetor"
   echo "  路径自查   docker compose ${COMPOSE_ARGS[*]} logs praetor | grep '沙箱工作区'"
   echo "             （宿主路径自动推导，.env 无需写任何本机绝对路径）"
+  echo "  沙箱       mode=${sandbox_mode} image=${sandbox_img} docker_socket=${socket_mode:-0}"
   echo "  后续启动   docker compose ${COMPOSE_ARGS[*]} up -d（选项 1 是容器部署，"
   echo "             不要去跑 ./praetor.exe；那个二进制属于选项 2 / Releases 包）"
   echo "  停止卸载   ./uninstall.sh（默认只停服务，数据全保留）"
@@ -214,6 +269,11 @@ install_docker(){
         ;;
     esac
   fi
+  if [ "$(env_get PRAETOR_MOUNT_DOCKER_SOCKET)" = "0" ] &&
+     [ "$(env_get PRAETOR_SANDBOX)" = "required" ]; then
+    warn "当前 .env 选择不挂 docker.sock，但 PRAETOR_SANDBOX=required；自动改为 optional"
+    env_set PRAETOR_SANDBOX optional
+  fi
   # 可移植性：任务工作区的宿主路径由程序在启动期自动推导，.env 里不写任何
   # 机器相关的绝对路径。老版本若手工填过 HOST_ROOT，它会覆盖自动推导 ——
   # 换机器 / 挪动仓库后就会挂错目录，这里明确提醒一次而不是静默沿用。
@@ -227,6 +287,10 @@ install_docker(){
   if [ -n "$img" ]; then
     info "使用镜像 ${img}（.env 的 PRAETOR_IMAGE）…"
     compose pull praetor || die "拉取 ${img} 失败；确认仓库地址/tag，或清空 PRAETOR_IMAGE 改走源码构建"
+    if [ "$(env_get PRAETOR_MOUNT_DOCKER_SOCKET)" = "1" ]; then
+      ensure_sandbox_image "$(sandbox_image_name)" \
+        || die "沙箱镜像构建失败；全 Docker required 模式无法启动"
+    fi
   else
     info "从当前仓库源码构建镜像（先编 praetor：装 Go/Node 依赖与 Playwright，约 5~10 分钟；"
     info "随后构建沙箱镜像 praetor/sandbox —— 基于 Kali，装安全工具，时间取决于网络）…"
@@ -246,9 +310,19 @@ install_docker(){
     if [ "$#" -gt 0 ]; then info "构建期换源：$*"; fi
     compose build "$@"
   fi
+  if [ "$(env_get PRAETOR_MOUNT_DOCKER_SOCKET)" = "1" ]; then
+    case "$(env_get PRAETOR_SANDBOX)" in
+      off|optional) ;;
+      *)
+        ensure_sandbox_image "$(sandbox_image_name)" \
+          || die "沙箱镜像构建失败；全 Docker required 模式无法启动"
+        ;;
+    esac
+  fi
   info "启动…"
   compose up -d
   wait_http_ready
+  verify_docker_sandbox
   show_install_summary
 }
 
@@ -392,14 +466,30 @@ JSON
   fi
   echo "────────────────────────────────────────────────────────────"
 
-  # 沙箱预判：宿主二进制直接摸本机 docker。
+  # 沙箱预判：宿主二进制直接摸本机 docker，并构建与全 Docker 安装相同的镜像。
   # Docker Desktop（Windows/macOS）的 socket 在虚拟机内，宿主二进制通常连不上；
   # 而 PRAETOR_SANDBOX 默认 required —— 连不上就把每条 Bash 都拒掉，
   # 表现为「编译成功、页面能开、一用就废」。这里显式判一次再启动。
-  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    export PRAETOR_SANDBOX="${PRAETOR_SANDBOX:-required}"
-    ok "沙箱：required（已探测到本机 docker，Bash 走一任务一容器）"
+  local local_sandbox img
+  local_sandbox="$(env_get PRAETOR_SANDBOX)"; local_sandbox="${local_sandbox:-required}"
+  if [ "$local_sandbox" = "off" ]; then
+    export PRAETOR_SANDBOX=off
+    warn "沙箱按 .env 显式设置为 off：Bash 直接运行在宿主"
+  elif [ "$local_sandbox" = "optional" ]; then
+    export PRAETOR_SANDBOX=optional
+    warn "沙箱按 .env 显式设置为 optional：Bash 在应用进程内执行，没有每任务隔离"
+  elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    img="$(sandbox_image_name)"
+    ensure_sandbox_image "$img" \
+      || die "沙箱镜像 ${img} 构建失败；修复 Docker/网络后重试，或显式设 PRAETOR_SANDBOX=optional 降级"
+    env_set PRAETOR_SANDBOX required
+    export PRAETOR_SANDBOX=required
+    export PRAETOR_SANDBOX_IMAGE="$img"
+    export PRAETOR_SANDBOX_ISOLATION="$(env_get PRAETOR_SANDBOX_ISOLATION)"
+    export PRAETOR_SANDBOX_ISOLATION="${PRAETOR_SANDBOX_ISOLATION:-per-task}"
+    ok "沙箱：required（Bash 走一任务一容器，镜像 ${img}）"
   else
+    env_set PRAETOR_SANDBOX optional
     export PRAETOR_SANDBOX=optional
     warn "本机 docker 不可达 → 本次以 PRAETOR_SANDBOX=optional 启动"
     warn "Bash 将跑在宿主进程内，没有 per-task 隔离；需要隔离请先让 docker 对当前用户可用"

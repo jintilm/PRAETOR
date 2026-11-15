@@ -160,8 +160,10 @@ cd PRAETOR
 
 脚本会：检测 / 自动安装 Docker → 让你选 **① 全部 Docker** 或 **② 本地编译运行**：
 
-- **① 全部 Docker**：填一个 Postgres 密码（可回车随机）→ 写 `.env` → 询问沙箱方式（是否挂 `docker.sock`）→ `docker compose build` + `up -d`。
-- **② 本地运行**：选数据库（连已有 / 用 Docker 起一个）→ 生成 `config.json` → `go` 编译内嵌单二进制 → 启动。
+- **① 全部 Docker**：填一个 Postgres 密码（可回车随机）→ 写 `.env` → 询问沙箱方式（是否挂 `docker.sock`）→ 构建应用与**同一沙箱镜像** → 自动带上 `docker-compose.socket.yml` 启动 → 验证容器内 Docker 通道和沙箱 Runner。
+- **② 本地运行**：选数据库（连已有 / 用 Docker 起一个）→ 生成 `config.json` → 若本机 Docker 可用则构建**同一沙箱镜像**并启用 `required` → `go` 编译内嵌单二进制 → 启动。
+
+两种方式在 Docker 可用时得到同等的每任务沙箱能力。全 Docker 把 Docker 控制面通过 socket 交给应用容器；本地运行由宿主进程直接调用 Docker，功能相同但安全边界不同。Docker 不可用时，安装脚本会明确降级到 `optional`，不会伪装成隔离沙箱。
 
 装好后打开 **http://localhost:8797**（方式①）或 **http://localhost:8787**（方式②，二进制默认端口）进入 `/setup` 设置管理员密码。
 
@@ -185,7 +187,7 @@ cd PRAETOR
 
 | 安装方式 | 后续启动 | 不要用 |
 | --- | --- | --- |
-| ① 全部 Docker（`./install.sh` 选 1） | `docker compose up -d`（挂了 socket 时加 `-f docker-compose.socket.yml`） | `./praetor.exe` —— 那是另一套部署的产物。硬跑会另起一个实例，而且读不到容器里由 compose 注入的 `PRAETOR_PG_DSN` |
+| ① 全部 Docker（`./install.sh` 选 1） | 使用安装摘要打印的 compose 命令；`PRAETOR_MOUNT_DOCKER_SOCKET=1` 时必须同时带 `-f docker-compose.socket.yml` | `docker compose up -d` 裸命令可能导致应用容器失去 Docker 控制面 |
 | ② 本地编译运行（`./install.sh` 选 2） | `./start.sh` / `start.bat`（Git Bash 里 `./start.sh` 也行）；也可直接 `./praetor`，Windows 为 `./praetor.exe` | — |
 | Releases 预编译包 | 用包里的 `start.sh` / `start.bat` | 直接双击 exe：跳过守护脚本，页面「一键更新」换完装不会被拉起 |
 
@@ -228,6 +230,8 @@ docker compose up -d --build    # 从本仓库源码构建 praetor 镜像 + 起 
 docker compose -f docker-compose.yml -f docker-compose.socket.yml up -d --build
 ```
 
+如果先执行了普通 `docker compose up -d`，改用上面的完整命令重建应用容器即可；数据库卷和数据目录不会被删除。
+
 > 不挂 `docker.sock` 时，`PRAETOR_SANDBOX=required` 会让每次 Bash 都被拒绝
 > （`sandbox unavailable`）——部署看着成功、一用就报错。要么挂 socket，要么把
 > `PRAETOR_SANDBOX` 改成 `optional`（Bash 跑在应用容器内，用镜像自带工具链）。
@@ -247,7 +251,7 @@ docker compose -f docker-compose.yml -f docker-compose.socket.yml up -d --build
 | `npx playwright install chrome` 也被同一原因拒 | 它本身就是一条 Bash，走同一个拒绝通道 | 修好沙箱即可，不必单独装浏览器 |
 | 浏览器提示 `/opt/google/chrome/chrome` 不存在 | 镜像预装的是 Playwright chromium（`~/.cache/ms-playwright`），不是 Chrome stable | 用 Playwright 自带 chromium；沙箱镜像里另需装浏览器 |
 | WebFetch 对所有站点（含对照站点）都 502 | 设置里全局出口代理仍是 `http://127.0.0.1:7897`，容器内指向容器自己 | 系统设置改为 `http://host.docker.internal:7897`，或清空直连 |
-| 修好 CLI 后又报「沙箱镜像不存在」 | 设置里记着旧机构建的 `praetor/sandbox:custom-*` tag | 组件面板重新应用预设，或清空 `sandbox.image` 回落 `PRAETOR_SANDBOX_IMAGE` |
+| 修好 CLI 后又报「沙箱镜像不存在」 | 设置里记着旧机构建的 `praetor/sandbox:custom-*` tag | 新版本会自动回退到可用的 `PRAETOR_SANDBOX_IMAGE`；也可在组件面板重新应用预设 |
 | 每条 Bash `OCI runtime exec failed: chdir to cwd ("/work/i622")`，退出码 127 | 任务容器挂错了宿主目录，`/work` 里没有意图子目录 | 见下节；确认启动日志的「工作区」两行指向同一棵树 |
 
 `required` 是 **fail-closed**：探测失败不阻断启动（UI 能进），但注入一个永远拒绝的 Runner，
