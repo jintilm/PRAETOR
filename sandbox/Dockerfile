@@ -21,6 +21,8 @@
 #   - Acquire::Retries：镜像偶发 5xx 时 apt 默认不重试，加 5 次能显著减少构建失败。
 FROM kalilinux/kali-rolling
 
+LABEL org.praetor.sandbox.egress="1"
+
 # 见上文：默认走可用的国内镜像，非 CN 环境用 --build-arg 改回官方
 ARG PRAETOR_KALI_MIRROR=http://mirrors.aliyun.com/kali
 

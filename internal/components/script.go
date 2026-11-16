@@ -20,6 +20,12 @@ import (
 // 但 extras 层可能叠在旧基镜像上，所以这里再兜一次底。
 const KaliMirror = "http://mirrors.aliyun.com/kali"
 
+// ImageContract invalidates cached component tags when the base sandbox
+// capability contract changes. Without this, an old custom image with the same
+// component IDs would be reused forever even if it lacks a newly required
+// runtime such as iptables/redsocks/praetor-egress.
+const ImageContract = "2026-11-16-egress-v2"
+
 // ImageTag 由所选组件集合算出稳定镜像 tag：同一组选择永远得到同一个 tag（构建缓存命中），
 // 换一组选择就是另一个 tag（旧镜像还在，切回去即可回滚）。
 func ImageTag(items []Item) string {
@@ -30,7 +36,7 @@ func ImageTag(items []Item) string {
 	for _, it := range items {
 		ids = append(ids, it.ID)
 	}
-	sum := sha256.Sum256([]byte(strings.Join(ids, ",")))
+	sum := sha256.Sum256([]byte(strings.Join(ids, ",") + "|" + ImageContract))
 	return "praetor/sandbox:custom-" + hex.EncodeToString(sum[:])[:8]
 }
 

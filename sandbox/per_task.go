@@ -579,14 +579,19 @@ func (p *PerTaskRunner) box(ctx context.Context, taskID string) (*taskBox, error
 	box.mountKey = mk
 	box.verified = true
 
-	// 出口隐身初始化：环境变量已在 run 时注入，这里只触发脚本。
-	// exec -d 异步执行，失败降级为直连并记日志 —— 隐身失败不该让任务失败，
-	// 但必须说清楚（安静地"以为在隐身"比明说没隐身危险得多）。
+	// 出口隐身初始化必须同步成功。代理池/系统出口的意义就是避免真实来源 IP
+	// 暴露；失败后继续直连会把“配置了隐身”变成静默泄漏。失败时删除这个尚未
+	// 注册到 boxes 的容器，并把错误返回给 Bash 调用方。
 	if egress != nil {
-		if _, stderr, code, ierr := p.exec(ctx, []string{
-			"exec", "-d", box.container, "sh", "-lc", "praetor-egress",
-		}, ""); ierr != nil || code != 0 {
-			log.Printf("[sandbox] 出口隐身初始化失败，容器保持直连：%v %s", ierr, strings.TrimSpace(stderr))
+		stdout, stderr, code, ierr := p.exec(ctx, []string{
+			"exec", box.container, "sh", "-lc", "praetor-egress",
+		}, "")
+		if ierr != nil || code != 0 {
+			_, _, _, _ = p.exec(context.Background(), []string{"rm", "-f", box.container}, "")
+			return nil, fmt.Errorf(
+				"sandbox: 出口隐身初始化失败，已拒绝直连降级: %v %s %s",
+				ierr, strings.TrimSpace(stderr), strings.TrimSpace(stdout),
+			)
 		}
 	}
 	return box, nil

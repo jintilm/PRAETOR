@@ -7,6 +7,7 @@ import (
 	"log"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -86,6 +87,17 @@ var sandboxImageInspect = func(ctx context.Context, image string) bool {
 	defer cancel()
 	return exec.CommandContext(cctx, "docker", "image", "inspect", image).Run() == nil
 }
+
+var sandboxImageEgressProbe = func(ctx context.Context, image string) bool {
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	return exec.CommandContext(cctx, "docker", "run", "--rm", "--network", "none",
+		"--entrypoint", "sh", image, "-lc",
+		"command -v iptables >/dev/null 2>&1 && command -v redsocks >/dev/null 2>&1 && command -v praetor-egress >/dev/null 2>&1",
+	).Run() == nil
+}
+
+var sandboxEgressCapability = sync.Map{} // image -> bool
 
 // SandboxPerTaskActive 报告当前 Bash 是否跑在按任务创建的容器里。
 func SandboxPerTaskActive() bool { return sandboxPerTaskActive.Load() }
@@ -206,13 +218,16 @@ func resolveSandboxDefaultImage(ctx context.Context, override string) string {
 	if configured == "" {
 		configured = envOr("SANDBOX_IMAGE", "praetor/sandbox:latest")
 	}
-	if sandboxImageExists(ctx, configured) {
+	if sandboxImageExists(ctx, configured) && sandboxImageSupportsEgress(ctx, configured) {
 		return configured
 	}
 	fallback := envOr("SANDBOX_IMAGE", "praetor/sandbox:latest")
-	if fallback != configured && sandboxImageExists(ctx, fallback) {
-		log.Printf("[sandbox] 配置镜像 %q 不存在，回退到 PRAETOR_SANDBOX_IMAGE=%q", configured, fallback)
+	if fallback != configured && sandboxImageExists(ctx, fallback) && sandboxImageSupportsEgress(ctx, fallback) {
+		log.Printf("[sandbox] 配置镜像 %q 不存在或不支持全量出口隐身，回退到 PRAETOR_SANDBOX_IMAGE=%q", configured, fallback)
 		return fallback
+	}
+	if sandboxImageExists(ctx, configured) {
+		log.Printf("[sandbox] 配置镜像 %q 存在但缺少 iptables/redsocks/praetor-egress，拒绝把它用于透明出口", configured)
 	}
 	return configured
 }
@@ -223,6 +238,19 @@ func sandboxImageExists(ctx context.Context, image string) bool {
 		return false
 	}
 	return sandboxImageInspect(ctx, image)
+}
+
+func sandboxImageSupportsEgress(ctx context.Context, image string) bool {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return false
+	}
+	if cached, ok := sandboxEgressCapability.Load(image); ok {
+		return cached.(bool)
+	}
+	ok := sandboxImageEgressProbe(ctx, image)
+	sandboxEgressCapability.Store(image, ok)
+	return ok
 }
 
 // SandboxWorkRootDiagnostics 给 `-check-config` 用：一行说清工作区的两个视角。
