@@ -1283,6 +1283,7 @@ export interface ProxyPoolResponse {
   selected_proxy: string;
   route_mode: string;
   effective_egress: string;
+  task_egress_upstreams: string[];
   running: boolean;
   last_error: string;
   sources: ProxyPoolSource[];

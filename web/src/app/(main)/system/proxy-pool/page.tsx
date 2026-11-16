@@ -78,6 +78,7 @@ const EMPTY_DATA: ProxyPoolResponse = {
   selected_proxy: "",
   route_mode: "pool",
   effective_egress: "",
+  task_egress_upstreams: [],
   running: false,
   last_error: "",
   sources: [],
@@ -393,6 +394,21 @@ export default function ProxyPoolPage() {
           </Button>
         </div>
       </div>
+
+      {data.task_egress_upstreams.length > 0 && (
+        <Alert variant="destructive">
+          <ShieldAlertIcon />
+          <AlertTitle>沙箱出口池正在覆盖代理池</AlertTitle>
+          <AlertDescription>
+            当前配置了 {data.task_egress_upstreams.length} 个任务出口上游，代理池健康节点不会被使用。
+            出口池中的节点不可用时不会自动回落。请到
+            <a className="ml-1 font-medium underline underline-offset-2" href="/system/settings">
+              系统设置
+            </a>
+            检查或清空“沙箱出口池”。
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Alert className="border-amber-500/40 bg-amber-500/5 text-amber-900 dark:text-amber-200">
         <AlertTriangleIcon />

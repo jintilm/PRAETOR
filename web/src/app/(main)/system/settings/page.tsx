@@ -405,6 +405,8 @@ export default function SystemSettingsPage() {
               会在 IP 层重定向到按任务分配的出口——同一任务的容器重建后仍用同一出口（会话不漂移），
               不同任务的出口互相隔离。留空 = 所有任务回落上面的全局出口代理。
               <br />
+              <b>该出口池优先级高于代理池。</b>只要列表非空，代理池健康节点不会被使用；上游不可用也不会自动回落。
+              <br />
               例：mihomo 可为每个节点开一个 listener（配置里 <code>proxy: 节点名</code>），
               逐行填 <code>http://127.0.0.1:7891</code> 等；gost / 商业隧道 / 自建 VPS 同理。
             </CardDescription>

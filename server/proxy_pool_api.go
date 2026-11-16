@@ -99,6 +99,14 @@ func maskProxyPoolSources(sources []pgdb.ProxyPoolSource) []pgdb.ProxyPoolSource
 	return out
 }
 
+func maskEgressUpstreams(items []string) []string {
+	out := make([]string, len(items))
+	for i, item := range items {
+		out[i] = proxypool.MaskURL(item)
+	}
+	return out
+}
+
 func (s *Server) getProxyPool(w http.ResponseWriter, r *http.Request) {
 	pg := s.proxyPoolDB(w)
 	if pg == nil {
@@ -155,19 +163,20 @@ func (s *Server) getProxyPool(w http.ResponseWriter, r *http.Request) {
 		running, lastErr = s.proxyPool.Status()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"entries":          maskProxyPoolEntries(entries),
-		"total":            total,
-		"page":             page,
-		"page_size":        pageSize,
-		"stats":            stats,
-		"config":           s.m.ProxyPoolConfig(),
-		"selected_proxy":   proxypool.MaskURL(s.m.ProxyPoolSelection()),
-		"route_mode":       s.m.ProxyPoolConfig().RouteMode,
-		"effective_egress": proxypool.MaskURL(s.m.EffectiveEgress()),
-		"running":          running,
-		"last_error":       lastErr,
-		"sources":          maskProxyPoolSources(sources),
-		"runs":             runs,
+		"entries":               maskProxyPoolEntries(entries),
+		"total":                 total,
+		"page":                  page,
+		"page_size":             pageSize,
+		"stats":                 stats,
+		"config":                s.m.ProxyPoolConfig(),
+		"selected_proxy":        proxypool.MaskURL(s.m.ProxyPoolSelection()),
+		"route_mode":            s.m.ProxyPoolConfig().RouteMode,
+		"effective_egress":      proxypool.MaskURL(s.m.EffectiveEgress()),
+		"task_egress_upstreams": maskEgressUpstreams(s.m.EgressUpstreams()),
+		"running":               running,
+		"last_error":            lastErr,
+		"sources":               maskProxyPoolSources(sources),
+		"runs":                  runs,
 	})
 }
 
