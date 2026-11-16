@@ -125,5 +125,27 @@ func (u *EgressUpstream) env() []string {
 	if len(u.Exclude) > 0 {
 		env = append(env, "PRAETOR_EGRESS_EXCLUDE="+strings.Join(u.Exclude, ","))
 	}
+	// Standard proxy variables are the reliable path for tools that resolve
+	// hostnames locally. In particular, socks5h keeps DNS resolution remote and
+	// avoids the host's fake-IP addresses being sent through an HTTP CONNECT
+	// proxy. Transparent iptables remains the backstop for tools that ignore
+	// proxy environment variables.
+	scheme := "http"
+	if u.Type == "socks5" {
+		scheme = "socks5h"
+	}
+	pu := &url.URL{Scheme: scheme, Host: net.JoinHostPort(u.Host, fmt.Sprint(u.Port))}
+	if u.User != "" {
+		pu.User = url.UserPassword(u.User, u.Pass)
+	}
+	proxyURL := pu.String()
+	noProxy := []string{"localhost", "127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	noProxy = append(noProxy, u.Exclude...)
+	noProxyValue := strings.Join(noProxy, ",")
+	env = append(env,
+		"HTTP_PROXY="+proxyURL, "HTTPS_PROXY="+proxyURL, "ALL_PROXY="+proxyURL,
+		"http_proxy="+proxyURL, "https_proxy="+proxyURL, "all_proxy="+proxyURL,
+		"NO_PROXY="+noProxyValue, "no_proxy="+noProxyValue,
+	)
 	return env
 }
