@@ -74,6 +74,10 @@ Thumbs.db
 /bench/*
 !/bench/xbow/
 !/bench/ctf/
+# 离线评测（语料/计分/对照）是产品能力，不是临时产物
+!/bench/corpus/
+!/bench/*.go
+!/bench/REVIEW_METRICS.md
 /bench/*/out/
 /bench/*/runs/
 /Dockerfile.bench
@@ -87,6 +91,8 @@ Thumbs.db
 # 测试源码不进版本库（按用户 2026-10-30 要求：只推产品代码）
 _test.go
 *_test.go
+# 评测与门禁用例要跟产品代码一起走
+!/bench/*_test.go
 agent/testdata/
 
 # 本地工作记忆（含机器路径与工作日志），只留在本机

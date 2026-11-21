@@ -179,6 +179,8 @@ func (s *Server) bindFindingTraffic(w http.ResponseWriter, r *http.Request) {
 		evidenceError(w, err)
 		return
 	}
+	// 标注证据来源与任务范围的匹配程度（不拒绝，见 annotateBindingScope 的注释）。
+	s.annotateBindingScope(r.Context(), id, out)
 	writeJSON(w, 200, trafficSummary(out))
 }
 

@@ -1,0 +1,8 @@
+id: error_not_injection
+class: sqli
+kind: trap
+fixture: error-only
+url: http://fixture.test/search?q=x
+payload: "q=%27"
+expected_oracle: fail
+expected_conclusion: rejected

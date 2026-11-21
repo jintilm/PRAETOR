@@ -14,7 +14,7 @@ import (
 type FindingVerifyResult struct {
 	FindingID  int64    `json:"finding_id"`
 	BindingID  int64    `json:"binding_id"`
-	State      string   `json:"state"` // verified / suspected
+	State      string   `json:"state"` // verified / suspected / stale（验证期间证据变了，本次结论未落库）
 	Reproduced bool     `json:"reproduced"`
 	Status     int      `json:"status"`
 	Similarity float64  `json:"similarity"`
@@ -31,19 +31,29 @@ type FindingVerifier interface {
 }
 
 // SetFindingVerifier 注入验证器；nil = 该 agent 看不到 verify_finding 的能力（调用会明确报错）。
-func (t *ToolSet) SetFindingVerifier(v FindingVerifier)   { t.findingVerifier = v }
-func (w *Worker) SetFindingVerifier(v FindingVerifier)    { w.findingVerifier = v }
-func (p *Planner) SetFindingVerifier(v FindingVerifier)   { p.findingVerifier = v }
-func (m *MainAgent) SetFindingVerifier(v FindingVerifier) { m.findingVerifier = v }
+func (t *ToolSet) SetFindingVerifier(v FindingVerifier) { t.findingVerifier = v }
+
+// SetAcceptancePolicy 注入完成判定策略（渗透域 fail-closed 用）。
+func (w *Worker) SetAcceptancePolicy(p AcceptancePolicy) { w.accept = p }
+
+// SetHTTPProber 注入受控 HTTP 探针（server 在构造 worker 时调用）。
+func (w *Worker) SetHTTPProber(p HTTPProber)                { w.prober = p }
+func (p *Planner) SetAcceptancePolicy(pol AcceptancePolicy) { p.accept = pol }
+func (m *MainAgent) SetAcceptancePolicy(p AcceptancePolicy) { m.accept = p }
+func (w *Worker) SetFindingVerifier(v FindingVerifier)      { w.findingVerifier = v }
+func (p *Planner) SetFindingVerifier(v FindingVerifier)     { p.findingVerifier = v }
+func (m *MainAgent) SetFindingVerifier(v FindingVerifier)   { m.findingVerifier = v }
 
 // verifyFinding 是「确定性验证」工具：重放绑定的证据，判定漏洞是否仍成立。
 func (t *ToolSet) verifyFinding() actool.CoreTool {
 	return actool.Build(actool.Spec{
 		Name: "verify_finding",
 		Description: "对已登记漏洞执行确定性复现验证：重放它绑定的证据请求，比对状态码、响应长度与结构相似度，" +
-			"把结论落库为 verified（仍可复现）或 suspected（不一致/证据不足）。不依赖模型判断。",
+			"把结论落库为 verified（仍可复现）或 suspected（不一致/证据不足）。不依赖模型判断。" +
+			"若返回 stale，说明验证期间该漏洞的证据绑定被改过，本次结论已作废，重新调一次即可。",
 		Prompt: "在 report_finding 且 bind_finding_traffic 成功后调用。可选 binding_id 指定证据；不传则自动挑 proof/verification 那条。" +
 			"返回 suspected 时要看 reasons：状态码变化通常意味着已修复或被 WAF 拦，长度/相似度不足可能是页面改版或证据过期。" +
+			"stale 不是失败，是并发改动，重跑一次即可；被范围校验拒绝时 reason 会写明目标不在任务 scope 内，别换个 URL 绕。" +
 			"不要为了让它变绿而反复重放同一请求；也不能用它替代真实复现——它只回答「原证据是否仍成立」。",
 		Schema: map[string]any{
 			"type": "object",

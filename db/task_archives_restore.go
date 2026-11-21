@@ -388,6 +388,16 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 			return err
 		}
 	}
+	// findings 上的新列都是 NOT NULL：归档时还不存在的列会被 json_populate_recordset 写成 NULL，
+	// 一次 NULL 就让整个恢复事务回滚（症状是「几个月前的归档恢复不了」，且没人会想到是新列）。
+	// 与上面 side_question 的处理同一思路：缺列补默认值。
+	if table == "findings" && len(raw) > 0 {
+		var err error
+		raw, err = fillMissingFindingDefaults(raw)
+		if err != nil {
+			return err
+		}
+	}
 	allowed := map[string]bool{
 		"exploration_nodes": true, "exploration_edges": true, "exploration_anchors": true,
 		"task_constraints": true, "activity": true, "task_asset_links": true, "findings": true, "finding_attachments": true,
@@ -794,4 +804,37 @@ WHERE task.archived_at IS NOT NULL`)
 		out = append(out, raw)
 	}
 	return out, rows.Err()
+}
+
+// findingRestoreDefaults 是「归档里可能缺失、但库里 NOT NULL」的列及其默认值。
+//
+// 只碰判定/取证相关的列：这些是后加的，老归档必然没有；业务列（title/summary）不在此列。
+var findingRestoreDefaults = map[string]json.RawMessage{
+	"evidence_version":              json.RawMessage("0"),
+	"report_evidence_version":       json.RawMessage("0"),
+	"verification_state":            json.RawMessage("\"unverified\""),
+	"verification_note":             json.RawMessage("\"\""),
+	"verification_evidence_version": json.RawMessage("0"),
+	"impact_kind":                   json.RawMessage("\"\""),
+	"impact_level":                  json.RawMessage("0"),
+	"impact_summary":                json.RawMessage("\"\""),
+	"impact_metrics":                json.RawMessage("{}"),
+	"impact_artifacts":              json.RawMessage("[]"),
+}
+
+// fillMissingFindingDefaults 给归档行补上缺失或显式为 null 的 NOT NULL 列。
+func fillMissingFindingDefaults(raw json.RawMessage) (json.RawMessage, error) {
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		for col, def := range findingRestoreDefaults {
+			if v, ok := row[col]; ok && len(v) > 0 && string(v) != "null" {
+				continue
+			}
+			row[col] = def
+		}
+	}
+	return json.Marshal(rows)
 }

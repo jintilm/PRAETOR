@@ -447,6 +447,13 @@ func (s *Server) toolUpdateFindingReport() actool.CoreTool {
 			if nodeID <= 0 {
 				return actool.Errorf("finding_id 无效"), nil
 			}
+			// 影响面小节由服务端从取证记录生成：模型可以写自己的分析，但危害数字必须能回到
+			// impact_metrics 与绑定流量。没有取证记录（level=0）就不追加，保持报告原样。
+			if s.m != nil && s.m.pg != nil {
+				if imp, ierr := s.m.pg.GetFindingImpactByNodeID(ctx, nodeID); ierr == nil && imp != nil {
+					a.Report = appendImpactSection(a.Report, imp)
+				}
+			}
 			n, err := s.m.pg.SetFindingReportVersionByNodeID(ctx, nodeID, a.Report, a.EvidenceVersion)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil

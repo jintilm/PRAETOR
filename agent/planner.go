@@ -30,26 +30,28 @@ type Planner struct {
 	findingRecorder    FindingRecorder
 	attachmentRecorder FindingAttachmentRecorder
 	findingVerifier    FindingVerifier // nil = 未启用确定性验证
-	prov               llm.Provider
-	model              string
-	tx                 *transcript.Store                      // raw LLM conversation persistence (nil = off)
-	window             int                                    // context window in tokens (for compaction)
-	windowFn           func() int                             // optional dynamic task-chain minimum
-	maxTurns           int                                    // max agent turns per run (0 = unlimited)
-	domain             string                                 // 任务领域（ctf/reverse/redteam/pentest），决定工具面
-	killWork           func(intentID int64) error             // engine callback to terminate a running work (nil = off)
-	steerWork          func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
-	proxyAddr          string                                 // recording proxy for WebFetch (empty = direct)
-	proxyCACert        string                                 // recording proxy's CA cert path (HTTPS verify)
-	webSearch          WebSearchOpts                          // web_search tool backend selection (off by default)
-	workDir            string                                 // shared work dir (surfaced in prompt as artifact-output target)
-	injectConstraints  func() bool                            // resolver: inject task operation constraints into system prompt? (nil = yes)
-	nonStreamingFn     func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
-	noaEnabledFn       func() bool                            // resolver: use experimental noa compaction? (nil = off)
-	maxTokensFn        func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
-	compactor          *Compactor                             // cold-node compaction (§7); nil = disabled
-	hooks              harness.HookRunner                     // shared task guard / lifecycle hooks (nil = none)
-	vulnKnowledge      VulnKnowledgeSearcher                  // reviewed vulnerability patterns (nil = tool unavailable)
+	// accept 是完成判定策略（渗透域 fail-closed 用）；零值 = strict + 用 ts 查。
+	accept            AcceptancePolicy
+	prov              llm.Provider
+	model             string
+	tx                *transcript.Store                      // raw LLM conversation persistence (nil = off)
+	window            int                                    // context window in tokens (for compaction)
+	windowFn          func() int                             // optional dynamic task-chain minimum
+	maxTurns          int                                    // max agent turns per run (0 = unlimited)
+	domain            string                                 // 任务领域（ctf/reverse/redteam/pentest），决定工具面
+	killWork          func(intentID int64) error             // engine callback to terminate a running work (nil = off)
+	steerWork         func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
+	proxyAddr         string                                 // recording proxy for WebFetch (empty = direct)
+	proxyCACert       string                                 // recording proxy's CA cert path (HTTPS verify)
+	webSearch         WebSearchOpts                          // web_search tool backend selection (off by default)
+	workDir           string                                 // shared work dir (surfaced in prompt as artifact-output target)
+	injectConstraints func() bool                            // resolver: inject task operation constraints into system prompt? (nil = yes)
+	nonStreamingFn    func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
+	noaEnabledFn      func() bool                            // resolver: use experimental noa compaction? (nil = off)
+	maxTokensFn       func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	compactor         *Compactor                             // cold-node compaction (§7); nil = disabled
+	hooks             harness.HookRunner                     // shared task guard / lifecycle hooks (nil = none)
+	vulnKnowledge     VulnKnowledgeSearcher                  // reviewed vulnerability patterns (nil = tool unavailable)
 
 	// todos keeps ONE plan-scratchpad per task (keyed by exploration id) so the
 	// planner's multi-step plan survives across wake-ups — each Plan() is a fresh
@@ -436,6 +438,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	tsx.SetFindingRecorder(p.findingRecorder)
 	tsx.SetAttachmentRecorder(p.attachmentRecorder)
 	tsx.SetFindingVerifier(p.findingVerifier)
+	tsx.SetAcceptancePolicy(p.accept)
 	tsx.SetVulnKnowledge(p.vulnKnowledge)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
@@ -513,9 +516,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		WorkingDir:            taskDir,                              // 本任务工作目录 <workDir>/tasks/<taskID>
 		ToolOutputDir:         cmdOutDir(taskDir),
 		ArtifactSink:          saveAgentArtifact,
-		// 与 worker 同口径（12000，而非 SDK 默认 30000）：planner 也会被抓页面/长输出
-		// 一次吃掉 10K tokens，且同样每轮重发。见 worker.go 的详细说明。
-		MaxToolOutputChars: 12000,
+		// 与 worker 同口径（见 maxToolOutputChars 的说明）：planner 也会被抓页面/长输出
+		// 一次吃掉 10K tokens，且同样每轮重发。
+		MaxToolOutputChars: maxToolOutputChars,
 		MaxTurns:           p.maxTurns, // 0 = unlimited (configurable in agent management)
 		MaxDuration:        maxDur,     // 0=不限;有 deadline 时=距 deadline 剩余
 		Compaction:         compactionConfig(p.compactionWindow()),

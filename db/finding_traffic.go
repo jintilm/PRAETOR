@@ -104,6 +104,10 @@ type FindingTraffic struct {
 	Version       int64                   `json:"version"`
 	ReportVersion int64                   `json:"report_version"`
 	Bindings      []FindingTrafficBinding `json:"bindings"`
+	// 下面两个是**附加标注**（不落这张表，绑定后由 server 计算）：证据来源与任务范围的匹配程度。
+	// 只标注不阻断：scope 是从任务文本推断出来的，用推断去拦会误杀合法目标。
+	ScopeState string `json:"scope_state,omitempty"`
+	ScopeNote  string `json:"scope_note,omitempty"`
 }
 
 type PreparedTrafficEvidence struct {
@@ -236,7 +240,10 @@ VALUES($1,$2,$3,$4,$5) ON CONFLICT(finding_id,snapshot_id) DO NOTHING`, findingI
 }
 
 func bumpEvidenceVersionTx(tx *sql.Tx, findingID int64) error {
-	_, err := tx.Exec(`UPDATE findings SET evidence_version=evidence_version+1 WHERE id=$1`, findingID)
+	// Preserve verification history, but the current projection no longer describes
+	// the changed bindings/attachments. It must be checked again before acceptance.
+	_, err := tx.Exec(`UPDATE findings SET evidence_version=evidence_version+1,
+verification_state='unverified', verification_binding_id=NULL WHERE id=$1`, findingID)
 	return err
 }
 

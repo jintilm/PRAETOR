@@ -53,5 +53,12 @@ RUN pip3 install --no-cache-dir --break-system-packages requests
 
 WORKDIR /work
 
+# HOME 必须指向任务工作目录：工具的默认落盘位置几乎全在 $HOME 下
+#   （sqlmap ~/.sqlmap、nuclei ~/nuclei-config.yaml、msf ~/.msf4、git ~/.gitconfig）。
+# 宿主侧只有 /work 是映射过的可写挂载，其余路径一律拒写（见 server/sandbox_mounts.go）——
+# HOME 留在默认的 /root 时，这些工具会以「写不进去」失败，看起来像工具坏了。
+ENV HOME=/work
+
+
 # 常驻等待 exec；不用 -d（容器本身就是长期运行的）
 CMD ["sleep", "infinity"]

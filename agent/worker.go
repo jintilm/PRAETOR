@@ -63,16 +63,22 @@ type Worker struct {
 	findingRecorder    FindingRecorder
 	attachmentRecorder FindingAttachmentRecorder
 	findingVerifier    FindingVerifier // nil = 未启用确定性验证
-	prov               llm.Provider
-	model              string
-	workDir            string
-	proxyAddr          string
-	proxyCACert        string            // recording proxy's CA cert path (for WebFetch HTTPS verify)
-	webSearch          WebSearchOpts     // web_search tool backend selection (off by default)
-	tx                 *transcript.Store // raw LLM conversation persistence (nil = off)
-	window             int               // context window in tokens (for compaction)
-	windowFn           func() int        // optional dynamic task-chain minimum
-	maxTurns           int               // max agent turns per run (0 = unlimited)
+	// accept 是完成判定策略（渗透域 fail-closed 用）；零值 = strict + 用 ts 查。
+	accept AcceptancePolicy
+	// prober 是受控 HTTP 探针（记录代理 + 范围校验）；nil = http_probe 不可用。
+	prober         HTTPProber
+	identityDiffer IdentityDiffer
+	oobProber      OOBProber
+	prov           llm.Provider
+	model          string
+	workDir        string
+	proxyAddr      string
+	proxyCACert    string            // recording proxy's CA cert path (for WebFetch HTTPS verify)
+	webSearch      WebSearchOpts     // web_search tool backend selection (off by default)
+	tx             *transcript.Store // raw LLM conversation persistence (nil = off)
+	window         int               // context window in tokens (for compaction)
+	windowFn       func() int        // optional dynamic task-chain minimum
+	maxTurns       int               // max agent turns per run (0 = unlimited)
 	// runTimeout is the wall-clock budget for the main exploration of one intent
 	// (0 = unlimited). When it fires, the run is cut and a settlement round is
 	// forced so already-identified facts get written back instead of being lost.
@@ -238,6 +244,15 @@ func (w *Worker) maxTokens() int {
 	}
 	return w.maxTokensFn()
 }
+
+// maxToolOutputChars 是单条工具输出进入上下文的字符上限。
+//
+// 工具输出会留在对话里、之后每轮重发，所以它是最贵的一类 token；但截太狠会让
+// agent 看不到页面后半段的反射点/接口表，多花一轮 Read 反而更贵。20000 是这两者
+// 的折中：覆盖多数 JSON / API 列表 / 表单页，超长 HTML 仍截断并 spill 到磁盘。
+//
+// worker 与 planner 同口径（以前两处各写一个 12000，改一处就会漂移）。
+const maxToolOutputChars = 20000
 
 // SetConstraintInject wires a resolver deciding whether this task's operation
 // constraints get injected into the worker system prompt. nil = inject (default).
@@ -565,6 +580,10 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetAttachmentRecorder(w.attachmentRecorder)
 	tsx.SetFindingVerifier(w.findingVerifier)
+	tsx.SetAcceptancePolicy(w.accept)
+	tsx.SetHTTPProber(w.prober)
+	tsx.SetIdentityDiffer(w.identityDiffer)
+	tsx.SetOOBProber(w.oobProber)
 	tsx.SetVulnKnowledge(w.vulnKnowledge)
 	tsx.SetTaskID(taskID)
 	tsx.SetDefaultIntent(intent.ID)     // 图写回归口：子 agent（solver）没传 intent_id 时落到本意图
@@ -795,16 +814,17 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		// large tool output spills to cmd-output/ with a head + pointer (SDK tool.Capture);
 		// full output preserved on disk.
 		//
-		// 上限收紧到 12000 字符（SDK 默认 30000）——这是实测算出来的账：
+		// 上限 20000 字符（SDK 默认 30000）——实测算出来的账：
 		// benchmark 里 agent 最爱干的一件事是 `curl http://target/`，一个整页 HTML
-		// 就有 30KB≈10K tokens。而**工具输出会留在对话里，之后每一轮都重发**，
-		// 一次抓页面按 20 轮算就是 200K tokens 的输入账单（实测 XBEN-019 单题
-		// 368K input，其中 30KB 那一条占了工具输出的 64%）。
-		// 12000 字符仍够看清一个页面的结构/表单/链接（真正需要全文时 agent 可以
-		// Read 落盘的 cmd-output 文件——spill 保留了全文，只是不塞进上下文）。
+		// 就有 30KB≈10K tokens；而**工具输出会留在对话里，之后每一轮都重发**。
+		//
+		// 为什么从 12000 提到 20000：12000 只够看页面开头，反射点/接口表/表单尾部
+		// 经常落在截断之后，agent 得多花一轮 Read 去捞——那一轮的输入成本比省下的
+		// token 更贵，还多一次「没看到所以没发现」。20000 覆盖绝大多数 JSON 响应、
+		// API 列表页和表单页；真正超长的 HTML 仍截断，全文留在 cmd-output/ 里按需 Read。
 		ToolOutputDir:      cmdOutDir(runDir),
 		ArtifactSink:       saveAgentArtifact,
-		MaxToolOutputChars: 12000,
+		MaxToolOutputChars: maxToolOutputChars,
 		Compaction:         compactionConfig(w.compactionWindow()), // long tool-heavy runs stay within the window
 		Todos:              actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢
 		NonStreaming:       w.nonStreaming(),                       // 该 profile 选非流式时走 Provider.Complete

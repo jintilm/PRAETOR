@@ -27,6 +27,7 @@ import (
 	"github.com/jintilm/praetor/internal/norma/llm"
 	actool "github.com/jintilm/praetor/internal/norma/tool"
 	"github.com/jintilm/praetor/internal/norma/transcript"
+	"github.com/jintilm/praetor/internal/oob"
 	"github.com/jintilm/praetor/llmpool"
 	"github.com/jintilm/praetor/llmrec"
 	"github.com/jintilm/praetor/report"
@@ -41,9 +42,19 @@ var BuildVersion = "dev"
 // Server exposes the PRAETOR backend over a JSON HTTP API for the shadcn/ui
 // frontend.
 type Server struct {
-	m      *Manager
-	engine *Engine
-	ctx    context.Context
+	// autoVerifyBusy 按任务串行化「上报后自动复验」，避免同一任务并发重放刷目标。
+	autoVerifyBusy sync.Map
+	// oob 是带外回连捕获器（按 oob_base_url 懒建）；oobBase 记住建它的地址。
+	oobMu   sync.Mutex
+	oob     *oob.Catcher
+	oobBase string
+	// 公网回连端点（零配置，按需申请一次后复用）。
+	oobPubMu  sync.Mutex
+	oobPub    *oob.Public
+	oobPubErr string
+	m         *Manager
+	engine    *Engine
+	ctx       context.Context
 
 	skillDir string // root directory for skill subdirectories
 	jwtKey   []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
@@ -268,8 +279,10 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 			TargetHosts: s.taskTargetHosts,
 		})
 		s.logDomainImages(s.ctx)
-		seedMCPPresets(m.pg)                             // 已配置的外部 MCP 预设（如 hexstrike）：只在缺失时插入
-		WarnEvidenceChainDisarmed(m.pg)                  // 证据链前置开关（捕获/自动绑定）关掉时告警：静默失效很难查
+		seedMCPPresets(m.pg) // 已配置的外部 MCP 预设（如 hexstrike）：只在缺失时插入
+		WarnEvidenceChainDisarmed(m.pg)
+		// 回连地址：空或 auto 时自动探测本机内网地址，省掉每次手填。
+		ensureOOBBaseURL(m.pg, httpPort())               // 证据链前置开关（捕获/自动绑定）关掉时告警：静默失效很难查
 		seedPrompts(m.pg)                                // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
 		seedDomainAgents(m.pg)                           // 领域角色（ctf_lead/solver_*/re_lead/re_analyst）播种成一等 agent：可见/可编辑/可绑模型
 		warnSubagentBudgets(s.agentRunSeconds("worker")) // 角色墙钟 vs worker 预算：不匹配会让子 agent 静默全废
@@ -1096,6 +1109,16 @@ func (s *Server) Handler() http.Handler {
 	api := cors(s.requireAuth(mux))
 	root := http.NewServeMux()
 	root.Handle("/api/", api)
+	// 带外回连必须公网可达且免鉴权：它是给「目标」访问的，不是给浏览器。
+	// 捕获器按 oob_base_url 懒建，所以这里每请求解析一次，改了设置不用重启。
+	root.Handle("/oob/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := s.oobCatcher()
+		if c == nil {
+			http.NotFound(w, r)
+			return
+		}
+		c.Handler().ServeHTTP(w, r)
+	}))
 	root.Handle("/", s.webuiHandler())
 	return root
 }
@@ -3587,9 +3610,10 @@ func (s *Server) settingsPayload() map[string]any {
 		"web_search_backend":       backend,
 		"brave_key_set":            strings.TrimSpace(braveKey) != "",
 		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
-		"web_search_proxy":         proxy,                       // 独立出口代理(http/https/socks5)，空=直连
-		"global_proxy":             s.m.GlobalProxy(),           // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
-		"egress_upstreams":         s.m.EgressUpstreams(),       // 任务级出口池(沙箱透明层按任务稳定分配)；空=回落全局出口
+		"web_search_proxy":         proxy,             // 独立出口代理(http/https/socks5)，空=直连
+		"global_proxy":             s.m.GlobalProxy(), // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		"egress_upstreams":         s.m.EgressUpstreams(),
+		"oob_base_url":             s.oobBaseURL(),              // 任务级出口池(沙箱透明层按任务稳定分配)；空=回落全局出口
 		"python_interpreter":       strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
 		"workers":                  s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
 		"task_concurrency_enabled": concOn,                      // 任务并发上限开关(默认关)
@@ -3682,6 +3706,8 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		NotifyEnabled    *bool   `json:"notify_enabled"`
 		NotifyBaseURL    *string `json:"notify_public_base_url"`
 		NotifyDigestMins *int    `json:"notify_digest_interval_min"`
+		// OOBBaseURL 是目标可访问的回连根地址（如 https://praetor.example.com）；空=关闭该能力。
+		OOBBaseURL *string `json:"oob_base_url"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -3762,6 +3788,20 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		// 立即协调一次:关闭时放行全部排队,调高上限时补位启动,不必等下一个 tick。
 		go s.reconcileConcurrency()
+	}
+	if req.OOBBaseURL != nil {
+		v := trimTrailingSlash(strings.TrimSpace(*req.OOBBaseURL))
+		// 两种写法：自带 scheme = 自己的 /oob 捕获器；裸域名 = interactsh 之类的外部收包域。
+		if v != "" && !strings.HasPrefix(v, "http://") && !strings.HasPrefix(v, "https://") {
+			if strings.ContainsAny(v, " /") || !strings.Contains(v, ".") {
+				writeErr(w, 400, "回连地址需为 http(s):// 地址或裸域名（如 xxx.oast.fun）")
+				return
+			}
+		}
+		if err := s.m.pg.SetSetting(settingOOBBaseURL, v); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
 	}
 	if req.PythonInterp != nil {
 		if err := s.m.pg.SetSetting(settingPythonInterp, strings.TrimSpace(*req.PythonInterp)); err != nil {

@@ -1,0 +1,8 @@
+id: gzip_large_response
+class: xss
+kind: boundary
+fixture: gzip-4m
+url: http://fixture.test/echo?q=x
+payload: "q=boundary"
+expected_oracle: inconclusive
+expected_conclusion: inconclusive

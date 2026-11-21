@@ -332,6 +332,12 @@ type FindingDTO struct {
 	Inherited       bool              `json:"inherited,omitempty"`
 	Assets          []FindingAssetDTO `json:"assets,omitempty"`
 	TS              string            `json:"ts"`
+
+	// 危害取证投影：审核看的是这一级（0/空 = 只有结论或还没取证）。
+	ImpactKind      string         `json:"impact_kind,omitempty"`
+	ImpactLevel     int            `json:"impact_level"`
+	ImpactMetrics   map[string]any `json:"impact_metrics,omitempty"`
+	ImpactArtifacts []string       `json:"impact_artifacts,omitempty"`
 }
 
 // FindingAssetDTO is one asset a finding is anchored to, pre-labelled for display.
@@ -464,6 +470,11 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 		Evidence:    f.Evidence,
 		Report:      f.Report,
 		TS:          rfc3339(f.CreatedAt),
+
+		ImpactKind:      f.ImpactKind,
+		ImpactLevel:     f.ImpactLevel,
+		ImpactMetrics:   f.ImpactMetrics,
+		ImpactArtifacts: f.ImpactArtifacts,
 	}
 	d.Assets = findingAssetDTOs(f.AssetIDs, assets)
 	if f.TaskID != nil {

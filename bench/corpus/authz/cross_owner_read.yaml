@@ -1,0 +1,8 @@
+id: cross_owner_read
+class: authz
+kind: positive
+fixture: vulnerable
+url: http://fixture.test/api/records/2
+payload: "GET /api/records/2 as ROLE_A"
+expected_oracle: pass
+expected_conclusion: confirmed

@@ -22,21 +22,23 @@ type MainAgent struct {
 	findingRecorder    FindingRecorder
 	attachmentRecorder FindingAttachmentRecorder
 	findingVerifier    FindingVerifier // nil = 未启用确定性验证
-	prov               llm.Provider
-	model              string
-	tx                 *transcript.Store                      // raw LLM conversation persistence (nil = off)
-	window             int                                    // context window in tokens (for compaction)
-	windowFn           func() int                             // optional dynamic task-chain minimum
-	maxTurns           int                                    // max agent turns per run (0 = unlimited)
-	proxyAddr          string                                 // recording proxy for WebFetch (empty = direct)
-	proxyCACert        string                                 // recording proxy's CA cert path (HTTPS verify)
-	webSearch          WebSearchOpts                          // web_search tool backend selection (off by default)
-	workDir            string                                 // shared work dir (surfaced in prompt as artifact-output target)
-	steerWork          func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
-	nonStreamingFn     func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
-	noaEnabledFn       func() bool                            // resolver: use experimental noa compaction? (nil = off)
-	maxTokensFn        func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
-	hooks              harness.HookRunner                     // shared task guard / lifecycle hooks (nil = none)
+	// accept 是完成判定策略（渗透域 fail-closed 用）；零值 = strict + 用 ts 查。
+	accept         AcceptancePolicy
+	prov           llm.Provider
+	model          string
+	tx             *transcript.Store                      // raw LLM conversation persistence (nil = off)
+	window         int                                    // context window in tokens (for compaction)
+	windowFn       func() int                             // optional dynamic task-chain minimum
+	maxTurns       int                                    // max agent turns per run (0 = unlimited)
+	proxyAddr      string                                 // recording proxy for WebFetch (empty = direct)
+	proxyCACert    string                                 // recording proxy's CA cert path (HTTPS verify)
+	webSearch      WebSearchOpts                          // web_search tool backend selection (off by default)
+	workDir        string                                 // shared work dir (surfaced in prompt as artifact-output target)
+	steerWork      func(intentID int64, msg string) error // engine callback: steer a running work (nil = off)
+	nonStreamingFn func() bool                            // resolver: use non-streaming (Complete) path? (nil = streaming)
+	noaEnabledFn   func() bool                            // resolver: use experimental noa compaction? (nil = off)
+	maxTokensFn    func() int                             // resolver: per-reply output cap (nil/0 = send no cap)
+	hooks          harness.HookRunner                     // shared task guard / lifecycle hooks (nil = none)
 }
 
 // SetNoaEnabled wires a resolver deciding whether runs use the experimental noa
@@ -123,6 +125,7 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	tsx.SetFindingRecorder(m.findingRecorder)
 	tsx.SetAttachmentRecorder(m.attachmentRecorder)
 	tsx.SetFindingVerifier(m.findingVerifier)
+	tsx.SetAcceptancePolicy(m.accept)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
 	}

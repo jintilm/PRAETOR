@@ -167,6 +167,8 @@ func (s *Server) toolBindFindingTraffic() actool.CoreTool {
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
+			// 只标注不阻断：范围外目标照样能绑，但证据会带上 scope_state，审核一眼能看出处。
+			s.annotateBindingScope(ctx, id, list)
 			return jsonResult(trafficSummary(list))
 		})
 }

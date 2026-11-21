@@ -173,7 +173,43 @@ function FindingDetailInner() {
                   <p className="text-sm leading-relaxed whitespace-pre-wrap">{finding.summary || "（无摘要）"}</p>
                 </CardContent>
               </Card>
-              <FindingRetestPanel key={id} findingId={id} readOnly={finding.inherited} onCompleted={load} />
+              {finding.impact_level ? (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm">危害证明</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2 text-sm">
+                    <div className="flex items-center gap-2">
+                      <Badge variant={finding.impact_level >= 2 ? "default" : "secondary"}>
+                        L{finding.impact_level}
+                      </Badge>
+                      <span>
+                        {finding.impact_level >= 3
+                          ? "已产生业务副作用"
+                          : finding.impact_level === 2
+                            ? "已提取目标侧内容"
+                            : "仅可复现（审核会判危害不足）"}
+                      </span>
+                      {finding.impact_kind ? (
+                        <span className="text-xs text-muted-foreground">· {finding.impact_kind}</span>
+                      ) : null}
+                    </div>
+                    {(finding.impact_artifacts?.length ?? 0) > 0 && (
+                      <div className="text-xs text-muted-foreground">
+                        证据流量：{finding.impact_artifacts?.join("、")}
+                      </div>
+                    )}
+                    {Object.keys(finding.impact_metrics ?? {}).length > 0 && (
+                      <div className="text-xs text-muted-foreground">
+                        {Object.entries(finding.impact_metrics ?? {})
+                          .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+                          .join(" · ")}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              ) : null}
+<FindingRetestPanel key={id} findingId={id} readOnly={finding.inherited} onCompleted={load} />
               <Card>
                 <CardHeader>
                   <CardTitle className="text-sm">证据 / PoC</CardTitle>

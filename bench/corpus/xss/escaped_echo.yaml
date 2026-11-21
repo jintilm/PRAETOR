@@ -1,0 +1,8 @@
+id: escaped_echo
+class: xss
+kind: negative
+fixture: patched
+url: http://fixture.test/echo?q=x
+payload: "q=<svg/onload=alert(1)>"
+expected_oracle: fail
+expected_conclusion: rejected

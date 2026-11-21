@@ -32,6 +32,8 @@ export default function SystemSettingsPage() {
   const [proxyInput, setProxyInput] = React.useState("");
   const [savingProxy, setSavingProxy] = React.useState(false);
   const [globalProxyInput, setGlobalProxyInput] = React.useState("");
+  const [oobBaseInput, setOobBaseInput] = React.useState("");
+  const [savingOob, setSavingOob] = React.useState(false);
   // 任务级出口池：每行一个上游 URL。沙箱容器按任务稳定分配（hash），实现任务间 IP 隔离；
   // 留空 = 所有任务回落全局出口代理。
   const [egressUpstreamsInput, setEgressUpstreamsInput] = React.useState("");
@@ -61,6 +63,7 @@ export default function SystemSettingsPage() {
     setTavilyKeySet(!!s.tavily_key_set);
     setProxyInput(s.web_search_proxy ?? "");
     setGlobalProxyInput(s.global_proxy ?? "");
+    setOobBaseInput(s.oob_base_url ?? "");
     setEgressUpstreamsInput((s.egress_upstreams ?? []).join("\n"));
     setPyInterp(s.python_interpreter ?? "");
     setWorkers(String(s.workers ?? 3));
@@ -239,6 +242,18 @@ export default function SystemSettingsPage() {
       .finally(() => setSavingGlobalProxy(false));
   };
 
+  const saveOobBase = () => {
+    setSavingOob(true);
+    api
+      .setSettings({ oob_base_url: oobBaseInput.trim() })
+      .then((s) => {
+        apply(s);
+        toast.success(oobBaseInput.trim() ? "已保存回连地址" : "已关闭带外回连");
+      })
+      .catch((e) => toast.error("保存失败：" + (e as Error).message))
+      .finally(() => setSavingOob(false));
+  };
+
   const saveEgressUpstreams = () => {
     const list = egressUpstreamsInput
       .split("\n")
@@ -390,6 +405,36 @@ export default function SystemSettingsPage() {
             </div>
             <p className="text-muted-foreground text-xs">
               {globalProxyInput.trim() ? "已配置 · 所有目标流量经此代理出网" : "未配置 · 目标流量直连出网"}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="mb-4 break-inside-avoid md:mb-6">
+          <CardHeader>
+            <CardTitle className="text-base">带外回连（盲 SSRF / 盲注入）</CardTitle>
+            <CardDescription>
+              oob_probe 会把目标招回到这个地址；必须是目标能访问到的公网地址，留空则关闭该工具。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            <Label htmlFor="oob-base" className="text-sm font-normal text-muted-foreground">
+              回连根地址
+            </Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="oob-base"
+                autoComplete="off"
+                placeholder="https://praetor.example.com（留空=关闭）"
+                value={oobBaseInput}
+                disabled={!loaded || savingOob}
+                onChange={(e) => setOobBaseInput(e.target.value)}
+              />
+              <Button type="button" onClick={saveOobBase} disabled={!loaded || savingOob}>
+                保存
+              </Button>
+            </div>
+            <p className="text-muted-foreground text-xs">
+              {oobBaseInput.trim() ? "已配置 · 回连地址为 " + oobBaseInput.trim() + "/oob/<token>" : "未配置 · 盲测类漏洞只能靠响应推断"}
             </p>
           </CardContent>
         </Card>

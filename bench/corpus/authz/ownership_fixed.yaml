@@ -1,0 +1,8 @@
+id: ownership_fixed
+class: authz
+kind: negative
+fixture: patched
+url: http://fixture.test/api/records/2
+payload: "GET /api/records/2 as ROLE_A"
+expected_oracle: fail
+expected_conclusion: rejected

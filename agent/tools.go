@@ -69,6 +69,14 @@ type ToolSet struct {
 	cleanupGuard func() (bool, []string)
 	ts           *db.ExplorationStore
 	worker       string
+	// accept 是完成判定策略（渗透域消费）；零值 = strict + 用 t.ts 查。
+	accept AcceptancePolicy
+	// prober 是受控 HTTP 探针（server 注入）；nil = http_probe 不可用。
+	prober HTTPProber
+	// identityDiffer 是越权差分执行器（server 注入）；nil = identity_diff 不可用。
+	identityDiffer IdentityDiffer
+	// oobProber 是带外回连执行器（server 注入）；nil = oob_probe 不可用。
+	oobProber OOBProber
 	// domain 是任务所属领域（pentest/reverse/ctf/...）。用于**按领域裁剪工具面**：
 	// 逆向/CTF 专属工具不该出现在渗透任务的提示词里（每个工具每轮都要付 schema）。
 	domain string
@@ -195,6 +203,20 @@ func (t *ToolSet) isCTF() bool     { return t.domain == "ctf" }
 // SetTaskID sets the PG task id on this ToolSet so that report_finding can
 // dual-write to the standalone findings table (which survives task deletion).
 func (t *ToolSet) SetTaskID(id int64) { t.taskID = id }
+
+// AcceptancePolicy 是「任务完成」的判定策略，按域使用（目前只有渗透域消费）。
+//
+//	Mode=strict    没有 verified 漏洞就拒绝 prove_goal（默认）
+//	Mode=advisory  只记日志放行（调试/存量任务用）
+//
+// Lookup 为 nil 时用 t.ts（生产路径）；单测注入假实现，避免为了测一段判定去起 PG。
+type AcceptancePolicy struct {
+	Mode   string
+	Lookup func(ctx context.Context, taskID int64) (*db.FindingAcceptance, error)
+}
+
+// SetAcceptancePolicy 由 server 在构造 agent 时注入。
+func (t *ToolSet) SetAcceptancePolicy(p AcceptancePolicy) { t.accept = p }
 
 // SetDefaultIntent 设置图写回（record_fact / report_finding）的默认意图。
 //
@@ -1264,8 +1286,15 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			if v, enforced := t.verifyGoalEvidence(ctx, evidenceNode); enforced && !v.Done {
 				return actool.Errorf("目标判定被确定性验收拒绝：" + v.Reason), nil
 			}
-			_ = t.ts.Link(ev, db.RelProves, goal)
-			_ = t.ts.SetNodeState(goal, "met")
+			if t.strictPentestAcceptance() {
+				err = t.ts.ProvePentestGoal(ctx, t.taskID, goal, ev)
+			} else {
+				err = t.ts.ProveGoal(ctx, goal, ev)
+			}
+			if err != nil {
+				return actool.Errorf("目标证明未提交：" + err.Error()), nil
+			}
+
 			// 每标记一个目标 met，就检查本任务是否【所有目标】都已 met；若是，自动判定
 			// 任务完成（置 GoalMet），无需再依赖模型显式调 goal_met。
 			if goals, err := t.ts.ListByKind(db.KindGoal, 1000); err == nil && len(goals) > 0 {

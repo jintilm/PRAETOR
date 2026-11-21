@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib" // pgx database/sql driver ("pgx")
 	"github.com/jintilm/praetor/config"
+	"log"
 )
 
 //go:embed schema.sql
@@ -282,6 +283,9 @@ ON CONFLICT (name) DO NOTHING`,
 	if err := d.seedDefaultAssetInterceptRules(); err != nil {
 		return fmt.Errorf("seed asset intercept rules: %w", err)
 	}
+	if err := d.disableCleanupBlockingRules(); err != nil {
+		return fmt.Errorf("disable cleanup-blocking rules: %w", err)
+	}
 	return nil
 }
 
@@ -357,6 +361,8 @@ func (d *DB) seedDefaultInterceptRules() error {
 		action   string
 		message  string
 		priority int
+		// off = 出厂默认关闭（规则仍写进库里，可在「系统 → 拦截」一键开启）。
+		off bool
 	}
 	rules := []rule{
 		// ── 系统破坏性命令 (priority 100) ──────────────────────────────────
@@ -520,12 +526,25 @@ func (d *DB) seedDefaultInterceptRules() error {
 			priority: 80,
 		},
 	}
+	// 「删除 / 清空 / 覆盖」类规则出厂默认**关闭**：
+	//   - 清除渗透痕迹（删自己上传的 webshell、清理测试数据、rm -rf 掉工作目录）本身就依赖这些动作；
+	//   - 把它们硬拦下来，等于让「清理义务」无法执行，而误删风险由模型按上下文判断更合适；
+	//   - 规则仍然写进库里（enabled=false），需要强约束时在「系统 → 拦截」一键开启即可。
+	// 保留默认开启的只有「毁运行环境」类（mkfs / dd / fork 炸弹 / 关机重启 / 杀全部进程）：
+	// 它们与清痕迹无关，属于纯破坏。
+	offByDefault := cleanupRuleNames()
+	for i := range rules {
+		if offByDefault[rules[i].name] {
+			rules[i].off = true
+		}
+	}
+
 	for _, r := range rules {
 		if _, err := d.Exec(`
 INSERT INTO intercept_rules(name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action)
-VALUES ($1, true, $2, $3, $4, $5, $6, $7, false, 60, 'deny')
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false, 60, 'deny')
 ON CONFLICT DO NOTHING`,
-			r.name, r.priority, r.target, r.typ, r.pattern, r.action, r.message,
+			r.name, !r.off, r.priority, r.target, r.typ, r.pattern, r.action, r.message,
 		); err != nil {
 			return fmt.Errorf("rule %q: %w", r.name, err)
 		}
@@ -605,7 +624,7 @@ func (d *DB) seedDefaultInterceptRulesV3() error {
 	const name = "[内置] 删除类接口路径"
 	if _, err := d.Exec(`
 INSERT INTO intercept_rules(name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action)
-SELECT $1, true, 80, 'tool_input', 'regex', $2, 'deny', $3, false, 60, 'deny'
+SELECT $1, false, 80, 'tool_input', 'regex', $2, 'deny', $3, false, 60, 'deny'
 WHERE NOT EXISTS (SELECT 1 FROM intercept_rules WHERE name = $1)`,
 		name,
 		deleteEndpointPathPattern,
@@ -614,4 +633,61 @@ WHERE NOT EXISTS (SELECT 1 FROM intercept_rules WHERE name = $1)`,
 		return fmt.Errorf("rule %q: %w", name, err)
 	}
 	return d.SetSetting("intercept_default_rules_v3", "done")
+}
+
+// cleanupRuleNames 是「删除 / 清空 / 覆盖」类内置规则：出厂默认关闭。
+//
+// 判定口径：这些动作既用于攻击，也用于**清除渗透痕迹**（删自己上传的 webshell、
+// 清理测试数据、rm -rf 掉工作目录、DROP 测试库表）。硬拦会让「清理义务」无法执行，
+// 而是否误删应由模型结合上下文判断。保留默认开启的只有「毁运行环境」类。
+//
+// 需要强约束时：系统 → 拦截 → 把对应规则 enable 回来（本函数只跑一次，不会覆盖）。
+func cleanupRuleNames() map[string]bool {
+	names := []string{
+		"[内置] 递归强制删除 rm -rf",
+		"[内置] 删除系统关键目录",
+		"[内置] 磁盘擦除 shred / wipe",
+		"[内置] 清空防火墙规则",
+		"[内置] SQL DROP DATABASE / TABLE / SCHEMA",
+		"[内置] SQL TRUNCATE",
+		"[内置] MongoDB drop / dropDatabase",
+		"[内置] Redis FLUSHALL / FLUSHDB",
+		"[内置] curl / wget 发送 DELETE 请求",
+		"[内置] Python HTTP 客户端 DELETE（requests/httpx/aiohttp）",
+		"[内置] 脚本中声明 HTTP DELETE 方法（JS/通用）",
+		"[内置] 批量清空 / 清除接口路径",
+		"[内置] 删除类接口路径",
+		"[内置] 破坏性系统命令",
+	}
+	out := make(map[string]bool, len(names))
+	for _, n := range names {
+		out[n] = true
+	}
+	return out
+}
+
+// disableCleanupBlockingRules 把老库里这些「出厂应默认关闭」的规则关掉一次。
+//
+// 为什么需要它：v1/v3 的播种用的是 ON CONFLICT DO NOTHING，改种子对已有库无效；
+// 不迁移的话，老装继续拦截清理动作，且没有任何地方能看到差异。
+// 只跑一次并留下 setting 标记——用户之后手动开启的规则不会被再次关掉。
+func (d *DB) disableCleanupBlockingRules() error {
+	const marker = "intercept_cleanup_rules_disabled_v1"
+	if v, _, _ := d.GetSetting(marker); v == "done" {
+		return nil
+	}
+	var changed int64
+	for name := range cleanupRuleNames() {
+		res, err := d.Exec(`UPDATE intercept_rules SET enabled=false WHERE name=$1 AND enabled`, name)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			changed += n
+		}
+	}
+	if changed > 0 {
+		log.Printf("[intercept] 已关闭 %d 条「删除/清空类」内置规则：清除渗透痕迹需要这些动作，改由模型判断（系统 → 拦截 可重新启用）", changed)
+	}
+	return d.SetSetting(marker, "done")
 }

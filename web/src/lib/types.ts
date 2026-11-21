@@ -667,6 +667,12 @@ export interface Finding {
   attachment_count?: number;
   evidence_version?: number;
   report_evidence_version?: number;
+
+  // 危害取证（0/缺省 = 还没记录）。审核看的是这一级，不是「能不能复现」。
+  impact_kind?: string;
+  impact_level?: number;
+  impact_metrics?: Record<string, unknown>;
+  impact_artifacts?: string[];
   report_stale?: boolean;
   id: string;
   finding_id?: string; // 独立 findings 表的行 id,状态更新的句柄(任务内旧节点可能缺失)
@@ -1308,6 +1314,7 @@ export interface Settings {
   // 全局出口代理(http/https/socks5，可带 user:pass)，所有目标流量走它。开启流量捕获时作为
   // MITM 上游；关闭捕获时直接注入 agent 的 bash/WebFetch。空=直连。
   global_proxy?: string;
+  oob_base_url?: string;
   egress_upstreams?: string[]; // 任务级出口池；空=回落全局出口
   python_interpreter?: string; // 自定义脚本工具的 python 解释器路径(空=运行时检测)
   workers?: number; // 并发工作 agent 数(默认3)；对之后启动的任务生效

@@ -37,6 +37,9 @@ type Snapshot struct {
 	RespBody []byte      // 记录时的响应体；为空时退化为只比哈希/长度
 	RespHash string      // 记录时的响应体 sha256（hex）；RespBody 为空且有它时用于必中判断
 	RespLen  int64       // 记录时的响应长度；0 = 不校验长度
+	// Truncated 表示记录侧的请求/响应体超过上限被截断（只存了前缀）。
+	// 为 true 时长度、哈希、相似度三条判据全部不适用——它们是拿完整正文设计的。
+	Truncated bool
 }
 
 // Options 控制判定松紧。
@@ -146,7 +149,11 @@ func Verify(ctx context.Context, rt http.RoundTripper, snap Snapshot, opt Option
 		v.Reasons = append(v.Reasons, fmt.Sprintf("状态码变化 %d→%d", snap.Status, resp.StatusCode))
 	}
 
-	if snap.RespLen > 0 {
+	switch {
+	case snap.Truncated:
+		// 截断的证据只存了前 N 字节，拿它跟完整 RespLen 相除必然「偏差过大」。
+		v.Reasons = append(v.Reasons, "证据正文超限已截断，跳过长度判据")
+	case snap.RespLen > 0:
 		v.LenRatio = float64(len(body)) / float64(snap.RespLen)
 		if v.LenRatio < 1-opt.LenTolerance || v.LenRatio > 1+opt.LenTolerance {
 			ok = false
@@ -155,6 +162,11 @@ func Verify(ctx context.Context, rt http.RoundTripper, snap Snapshot, opt Option
 	}
 
 	switch {
+	case snap.Truncated:
+		// 证据正文只存了前 N 字节：相似度与哈希都不具备可比性。
+		// 这里保留状态码这一条硬判据，并写明原因——宁可显式降级，
+		// 也不要把真实复现判成「未复现」（那是把漏报伪装成严谨）。
+		v.Reasons = append(v.Reasons, "证据正文超限已截断，跳过相似度/哈希判据")
 	case len(snap.RespBody) > 0:
 		v.Similarity = Similarity(snap.RespBody, body)
 		if v.Similarity < opt.MinSimilarity {

@@ -729,9 +729,21 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 			return defs, domain.BudgetFor(pack, domain.RoleSpec{}).MaxDepth, nil
 		})
 	}
-	wk.SetFindingRecorder(s.evidenceStore())
+	// 验证器走记录代理 + 任务范围：复现流量要进流量库，且不能在范围外发请求。
+	verifier := NewTaskEvidenceVerifier(s.evidenceStore(), s.m.ProxyAddr(), s.m.ProxyCACert(), s.taskScopeGuard(t), s.m.Traffic(), s.m.pg, taskID64(t))
+	wk.SetFindingVerifier(verifier)
+	// 上报成功后由服务端自动复验一次：模型经常想不起来调 verify_finding。
+	wk.SetFindingRecorder(newAutoVerifyingRecorder(s.evidenceStore(), verifier, taskID64(t), &s.autoVerifyBusy))
 	wk.SetAttachmentRecorder(s.evidenceStore())
-	wk.SetFindingVerifier(NewEvidenceVerifier(s.evidenceStore(), nil))
+	// 渗透域完成判定：默认 strict，没有 verified 漏洞就拒绝 prove_goal。
+	wk.SetAcceptancePolicy(agent.AcceptancePolicy{Mode: s.m.PentestAcceptance()})
+	// 取证探针：与验证器共用记录代理与范围校验，取证流量同样入库、同样不能越界。
+	wk.SetHTTPProber(NewTaskHTTPProber(s.m.ProxyAddr(), s.m.ProxyCACert(), s.taskScopeGuard(t), s.m.Traffic(), s.m.pg, taskID64(t)))
+	// 越权差分与探针同源：同样走记录代理、同样发送前校验范围，
+	// 结论由 internal/oracle 的纯函数给，模型只负责挑对象和身份。
+	wk.SetIdentityDiffer(NewTaskIdentityDiffer(s.m.ProxyAddr(), s.m.ProxyCACert(), s.taskScopeGuard(t), s.m.Traffic(), s.m.pg, taskID64(t)))
+	// 盲 SSRF / 盲注入：回连地址由平台 /oob 路由接收，未配置时工具报未启用。
+	wk.SetOOBProber(NewTaskOOBProber(s.m.ProxyAddr(), s.m.ProxyCACert(), s.taskScopeGuard(t), s.m.Traffic(), s.oobCatcher(), s.oobDomain(), s.oobCollaborator(s.oobDomain()), s.oobPublicProvider(), taskID64(t)))
 	wk.SetCompactionWindowResolver(workerRuntime.CompactionWindow)
 	wk.SetNonStreaming(workerRuntime.nonStreaming) // 按任务当前激活 profile 的流式开关(每轮读)
 	wk.SetMaxTokens(workerRuntime.maxTokens)       // 同上,输出上限也跟随当前激活 profile
@@ -747,6 +759,8 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl.SetCampaignGate(s.campaignGate(t))
 	pl.SetCleanupGuard(s.campaignCleanupGuard(t))
 	pl.SetFindingRecorder(s.evidenceStore())
+	// planner 也会调 prove_goal，闸门必须与 worker 同口径。
+	pl.SetAcceptancePolicy(agent.AcceptancePolicy{Mode: s.m.PentestAcceptance()})
 	pl.SetAttachmentRecorder(s.evidenceStore())
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
 	pl.SetNonStreaming(plannerRuntime.nonStreaming)

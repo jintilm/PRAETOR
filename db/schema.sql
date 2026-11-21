@@ -660,6 +660,20 @@ CREATE INDEX IF NOT EXISTS idx_tasks_pinned ON tasks(pinned_at DESC)
 CREATE INDEX IF NOT EXISTS idx_tasks_archived ON tasks(archived_at DESC)
     WHERE archived_at IS NOT NULL;
 
+-- Task-bound replay identities. Credentials never appear in tool listings.
+CREATE TABLE IF NOT EXISTS task_identities (
+    id BIGSERIAL PRIMARY KEY,
+    task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    label TEXT NOT NULL CHECK (length(label) BETWEEN 1 AND 80),
+    role TEXT NOT NULL DEFAULT '',
+    headers JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(task_id, label)
+);
+-- canary: 该身份独有的资源标记（私有邮箱/订单号），越权差分的主判据。
+ALTER TABLE task_identities ADD COLUMN IF NOT EXISTS canary TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_task_identities_task ON task_identities(task_id, id);
+
 -- Cold task archives retain only compact metadata in PostgreSQL. The complete
 -- task payload lives in a versioned .tar.zst package under data/archives/tasks.
 -- task_id stays unique so an operation can be retried safely after a restart.
@@ -1235,6 +1249,83 @@ ALTER TABLE findings ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_note TEXT NOT NULL DEFAULT '';
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_similarity DOUBLE PRECISION;
 CREATE INDEX IF NOT EXISTS idx_findings_verification ON findings(verification_state, created_at DESC);
+
+-- 验证结论绑定到「验证时读到的证据版本」：验证期间用户改了绑定（evidence_version 变了），
+-- 旧结论不得覆盖新证据 —— 写入走 CAS，冲突记 stale 且不落库（db.RecordFindingVerification）。
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_evidence_version BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS verification_binding_id BIGINT;
+-- Automated task completion keeps the exact finding/version/binding it consumed.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS accepted_finding_id BIGINT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS accepted_evidence_version BIGINT;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS accepted_binding_id BIGINT;
+
+-- 每次确定性验证留一行历史：只覆盖 findings 上那四列会丢掉「上次为什么没过」，
+-- 而误报排查最需要这条线索。
+CREATE TABLE IF NOT EXISTS finding_verifications (
+    id               BIGSERIAL PRIMARY KEY,
+    finding_id       BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    evidence_version BIGINT NOT NULL,
+    engine           TEXT NOT NULL DEFAULT '',
+    state            TEXT NOT NULL,
+    similarity       DOUBLE PRECISION,
+    detail           TEXT NOT NULL DEFAULT '',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_finding_verifications_finding ON finding_verifications(finding_id, created_at DESC);
+ALTER TABLE finding_verifications ADD COLUMN IF NOT EXISTS binding_id BIGINT;
+
+-- 实质危害证明（impact）：与 verification_state 正交 —— 后者回答「这条证据还成不成立」，
+-- 这里回答「这条漏洞有多严重」。审核打回的大多数是这一级缺失（只有可复现，没有提取物）。
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS impact_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS impact_level SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS impact_summary TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS impact_metrics JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS impact_artifacts JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS impact_recorded_at TIMESTAMPTZ;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS impact_evidence_version BIGINT;
+CREATE INDEX IF NOT EXISTS idx_findings_impact ON findings(impact_level DESC, created_at DESC);
+
+-- 证据来源与任务范围的匹配程度（**标注，不是阻断**）。
+-- scope 只是从任务文本解析出来的推断，拿它硬拦会误杀合法目标；这里只把风险显性化：
+--   in          命中显式声明（add_task_scope / 操作员维护的行）
+--   assumed     只命中从任务文本自动解析的行（目标可能是作者漏写的）
+--   unverified  一条主机维度 scope 都没命中（审核大概率要授权说明）
+--   undeclared  任务本身没声明任何主机维度 scope（企业级任务，无法判定）
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS scope_state TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS scope_checked_at TIMESTAMPTZ;
+
+-- 历史流量归属：旧实现按请求特征回查，现有记录属于推断，仅供审计。
+-- 缺少采集侧关联时，禁止将推断记录作为已确认归属。
+CREATE TABLE IF NOT EXISTS task_traffic (
+  id          BIGSERIAL PRIMARY KEY,
+  task_id     BIGINT NOT NULL,
+  traffic_id  TEXT NOT NULL,
+  host        TEXT NOT NULL DEFAULT '',
+  method      TEXT NOT NULL DEFAULT '',
+  url         TEXT NOT NULL DEFAULT '',
+  status      INT NOT NULL DEFAULT 0,
+  source      TEXT NOT NULL DEFAULT '',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (traffic_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_traffic_task ON task_traffic(task_id, id DESC);
+ALTER TABLE task_traffic ADD COLUMN IF NOT EXISTS attribution_kind TEXT NOT NULL DEFAULT 'inferred';
+
+
+-- 每次危害取证留一行历史：目前 findings 上是 UPDATE 覆盖，
+-- 「上一版指标是什么、什么时候被改小」在误报排查时是唯一线索。
+CREATE TABLE IF NOT EXISTS finding_impacts (
+    id         BIGSERIAL PRIMARY KEY,
+    finding_id BIGINT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL DEFAULT '',
+    level      SMALLINT NOT NULL DEFAULT 0,
+    summary    TEXT NOT NULL DEFAULT '',
+    metrics    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    artifacts  JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_finding_impacts_finding ON finding_impacts(finding_id, created_at DESC);
+ALTER TABLE finding_impacts ADD COLUMN IF NOT EXISTS evidence_version BIGINT;
 
 -- =====================================================================
 -- L2. 漏洞知识库：只沉淀经过确定性验证的可复用模式

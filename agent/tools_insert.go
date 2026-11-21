@@ -648,6 +648,19 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		t.addFinding(), t.addFindingAttachmentTool(), t.recordFact(),
 		// verify_finding：确定性重放验证（P1-2）。只给 worker —— 它是唯一负责证据与复现的角色。
 		t.verifyFinding(),
+		// record_impact：实质危害证明（2/3 级证据）。同样只给 worker——它才握着流量与回连现场。
+		t.recordImpact(),
+		// http_probe：受控取证探针（记录代理 + 范围校验）。取证要留下可复核的流量，
+		// 而不是散落在对话里的 curl 命令。
+		t.httpProbe(),
+		// list_task_traffic：本任务已归属的流量（探针代发的那些），
+		// 绑定/取证直接用它的 traffic_id，省掉「猜 ID」这一步。
+		t.listTaskTraffic(),
+		// 双身份越权：身份落库后由 identity_diff 三次请求定论。
+		// 以前只靠模型自觉拼两个 Cookie，B 常被写成 A 的，差分白跑。
+		t.registerIdentity(), t.listIdentities(), t.identityDiff(),
+		// 盲 SSRF / 盲注入只能靠带外回连证明，响应里看不出来。
+		t.oobProbe(),
 		// asset management (handlers guard nil store internally)。
 		// add_company_scope 不给 worker：定义企业资产范围属规划/主控/Auto 的职责，worker 只执行探索。
 		t.insertAssets(), t.listAssets(),

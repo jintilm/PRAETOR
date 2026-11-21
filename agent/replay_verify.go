@@ -33,12 +33,12 @@ func VerifyBinding(ctx context.Context, src BodySource, snap db.TrafficEvidenceS
 		return replay.Verdict{}, errors.New("verify: snapshot 缺少 URL")
 	}
 
-	reqBody, err := readBody(src, snap, "request")
+	reqBody, reqTruncated, err := readBody(src, snap, "request")
 	if err != nil {
 		return replay.Verdict{}, fmt.Errorf("verify: 读取请求体: %w", err)
 	}
 	// 响应体缺失不算错：replay 会退化为只比哈希/长度。
-	respBody, err := readBody(src, snap, "response")
+	respBody, respTruncated, err := readBody(src, snap, "response")
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return replay.Verdict{}, fmt.Errorf("verify: 读取响应体: %w", err)
 	}
@@ -49,25 +49,37 @@ func VerifyBinding(ctx context.Context, src BodySource, snap db.TrafficEvidenceS
 	}
 
 	return replay.Verify(ctx, rt, replay.Snapshot{
-		Method:   method,
-		URL:      snap.URL,
-		Header:   ParseHeadHeaders(snap.ReqHead),
-		Body:     reqBody,
-		Status:   snap.Status,
-		RespBody: respBody,
-		RespHash: snap.RespHash,
-		RespLen:  snap.RespLen,
+		Method:    method,
+		URL:       snap.URL,
+		Header:    ParseHeadHeaders(snap.ReqHead),
+		Body:      reqBody,
+		Status:    snap.Status,
+		RespBody:  respBody,
+		RespHash:  snap.RespHash,
+		RespLen:   snap.RespLen,
+		Truncated: reqTruncated || respTruncated,
 	}, opt)
 }
 
-func readBody(src BodySource, snap db.TrafficEvidenceSnapshot, side string) ([]byte, error) {
-	f, _, err := src.OpenBody(snap, side)
+// maxEvidenceBody 与 internal/replay 的读取上限保持一致：两边各自发明上限，
+// 就会出现「验证器以为读全了、replay 以为还有」这种静默错判。
+const maxEvidenceBody = 4 << 20
+
+// readBody 读一侧正文，并返回「是否因为超限而被截断」。
+//
+// 截断必须显式往下传：证据快照里的 RespLen 是**完整**长度，拿截断后的字节数去比它
+// 必然对不上 —— 大响应题的真实复现会一直被记成 suspected，且没有任何日志指向原因。
+func readBody(src BodySource, snap db.TrafficEvidenceSnapshot, side string) (data []byte, truncated bool, err error) {
+	f, size, err := src.OpenBody(snap, side)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer f.Close()
-	// 与 replay 的读取上限保持一致，避免把超大响应整个读进内存。
-	return io.ReadAll(io.LimitReader(f, 4<<20))
+	data, err = io.ReadAll(io.LimitReader(f, maxEvidenceBody))
+	if err != nil {
+		return nil, false, err
+	}
+	return data, size > int64(len(data)), nil
 }
 
 // ParseHeadHeaders 从原始 head 文本里提取请求头。

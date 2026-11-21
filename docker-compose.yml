@@ -92,6 +92,8 @@ services:
       # 逃生舱：只有 Docker daemon 不在本机（远程 DOCKER_HOST）等非常规布局才需要，
       # 填 daemon 能识别的宿主绝对路径。留空 = 自动推导。
       PRAETOR_SANDBOX_WORK_HOST_ROOT: ${PRAETOR_SANDBOX_WORK_HOST_ROOT:-}
+      # 带外回连地址：目标要能访问到。留空=启动时自动探测（容器内探测到的是 docker 网段）。
+      PRAETOR_OOB_BASE_URL: ${PRAETOR_OOB_BASE_URL:-}
       PRAETOR_SANDBOX_IDLE_TTL: ${PRAETOR_SANDBOX_IDLE_TTL:-30m}
       # ---- Android 真机接入（默认全关，不接手机时零影响）----
       # 录制代理在**容器内**的监听地址。默认只绑回环；真机 WiFi 代理要连进来时

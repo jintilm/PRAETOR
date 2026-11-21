@@ -86,7 +86,7 @@ export function fmtTime(ts: string) {
   });
 }
 
-const COLUMN_COUNT = 9;
+const COLUMN_COUNT = 10;
 
 interface FindingsTableProps {
   items: Finding[];
@@ -154,6 +154,7 @@ export function FindingsTable({
           </TableHead>
           <TableHead className="w-8" />
           <TableHead className="w-20">严重度</TableHead>
+              <TableHead className="w-16">危害</TableHead>
           <TableHead>漏洞名称</TableHead>
           <TableHead className="w-44">资产</TableHead>
           <TableHead className="w-28">状态</TableHead>
@@ -197,6 +198,9 @@ export function FindingsTable({
                 </TableCell>
                 <TableCell>
                   <StatusBadge domain="severity" value={f.severity} dot />
+                </TableCell>
+                <TableCell>
+                  <ImpactBadge level={f.impact_level ?? 0} kind={f.impact_kind} />
                 </TableCell>
                 <TableCell className="max-w-md">
                   <div className="flex min-w-0 flex-col gap-0.5">
@@ -450,5 +454,27 @@ export function FindingsTable({
         )}
       </TableBody>
     </Table>
+  );
+}
+
+// ImpactBadge 展示危害等级：L2 起才是审核认的「有实质危害」。
+// 只可复现（L1）用灰色，提醒这不是能交差的证据。
+function ImpactBadge({ level, kind }: { level: number; kind?: string }) {
+  if (!level) return <span className="text-xs text-muted-foreground">—</span>;
+  const label = level >= 3 ? "L3" : level === 2 ? "L2" : "L1";
+  const title =
+    level >= 3 ? "已产生业务副作用" : level === 2 ? "已提取目标侧内容" : "仅可复现（危害不足）";
+  return (
+    <span
+      title={kind ? `${title} · ${kind}` : title}
+      className={cn(
+        "inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] font-medium",
+        level >= 2
+          ? "border-primary/40 bg-primary/10 text-primary"
+          : "border-border bg-muted text-muted-foreground",
+      )}
+    >
+      {label}
+    </span>
   );
 }

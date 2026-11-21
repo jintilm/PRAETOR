@@ -7,6 +7,7 @@ package traffic
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -143,7 +144,6 @@ type Traffic struct {
 	addr  string
 	db    *sql.DB
 	wmu   sync.Mutex // serializes record() vs DeleteHost (incl. blob GC)
-	seq   atomic.Int64
 	proxy *mproxy.Proxy
 	// fts reports whether the full-text index is available. False on a driver
 	// build without FTS5: recording and metadata search still work, body search
@@ -173,7 +173,10 @@ type Traffic struct {
 	// through (nil = dial targets directly). Both the intercepted and the
 	// transparent-passthrough paths honor it (go-mitmproxy's getUpstreamConn),
 	// so no host escapes it. Hot-swappable at runtime via SetUpstreamProxy.
-	upstream atomic.Pointer[url.URL]
+	upstream           atomic.Pointer[url.URL]
+	captures           sync.Map // one-time credential -> receipt
+	captureConnections sync.Map // CONNECT connection -> receipt
+	captureFlows       sync.Map // flow UUID -> receipt
 }
 
 // Open initializes the traffic tree, blob store and SQLite index under dir.
@@ -362,6 +365,10 @@ func (t *Traffic) CACertPath() string {
 // Start runs the proxy (blocking); run in a goroutine.
 func (t *Traffic) Start() error { return t.proxy.Start() }
 
+// StopProxy 只停监听，不关索引。Start 是阻塞的，把它放进 goroutine 的调用方
+// （含测试）要先用它让 Start 返回，再 Close；Close 自己不负责停监听。
+func (t *Traffic) StopProxy() error { return t.proxy.Close() }
+
 // Close waits for background tree reclamation to finish before closing the
 // index, so shutdown never leaves a goroutine unlinking files out from under a
 // removed data directory. Index-space reclamation is signalled to stop first:
@@ -393,6 +400,17 @@ type sink struct {
 	t *Traffic
 }
 
+func (s *sink) Requestheaders(f *mproxy.Flow) { s.t.claimCapture(f) }
+
+func (s *sink) ClientDisconnected(c *mproxy.ClientConn) {
+	s.t.captureConnections.Range(func(key, value any) bool {
+		if key.(*mproxy.ConnContext).ClientConn == c {
+			s.t.captureConnections.Delete(key)
+		}
+		return true
+	})
+}
+
 func (s *sink) Response(f *mproxy.Flow) {
 	if f.Request == nil || f.Response == nil {
 		return
@@ -404,7 +422,12 @@ func (s *sink) Response(f *mproxy.Flow) {
 // the failure looks proxy/protocol-caused (h2 quirks, HEAD-with-body, protocol
 // errors) — not a plain target-unreachable error — we flag the host for
 // transparent passthrough so future requests to it succeed instead of dying.
-func (s *sink) RequestError(f *mproxy.Flow, err error) { s.t.maybePassthrough(f, err) }
+func (s *sink) RequestError(f *mproxy.Flow, err error) {
+	if f != nil {
+		s.t.captureFlows.Delete(f.Id)
+	}
+	s.t.maybePassthrough(f, err)
+}
 
 // maybePassthrough marks a host to be tunneled transparently on the next
 // connection, but only for errors the proxy itself caused — a target that is
@@ -442,12 +465,19 @@ func (t *Traffic) record(f *mproxy.Flow) {
 	// can run under the same lock without racing a concurrent record.
 	t.wmu.Lock()
 	defer t.wmu.Unlock()
+	defer t.captureFlows.Delete(f.Id)
 	host := f.Request.URL.Hostname()
 	method := f.Request.Method
 	tmpl := db.TemplatePath(f.Request.URL.EscapedPath())
-	n := t.seq.Add(1)
+	// A random suffix avoids reuse after proxy restart or 10k requests/second.
+	// Collisions fail the INSERT rather than replacing earlier evidence.
 	now := time.Now()
-	id := fmt.Sprintf("%d-%04d", now.Unix(), n%10000)
+	var entropy [16]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		log.Printf("[traffic] 记录 %s 失败（生成唯一编号）：%v", f.Request.URL.String(), err)
+		return
+	}
+	id := fmt.Sprintf("%d-%s", now.Unix(), hex.EncodeToString(entropy[:]))
 
 	ct := f.Response.Header.Get("Content-Type")
 	url := f.Request.URL.String()
@@ -467,7 +497,7 @@ func (t *Traffic) record(f *mproxy.Flow) {
 
 	// path stays empty for db-resident exchanges; a non-empty path marks a legacy
 	// row whose bodies still live in the old on-disk tree (see Get).
-	res, err := tx.Exec(`INSERT OR REPLACE INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path)
+	res, err := tx.Exec(`INSERT INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path)
 VALUES(?,?,?,?,?,?,?,?,?,?,'')`,
 		id, now.Unix(), host, method, tmpl, url, f.Response.StatusCode, ct,
 		len(f.Request.Body), len(f.Response.Body))
@@ -481,7 +511,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,'')`,
 		return
 	}
 
-	if _, err := tx.Exec(`INSERT OR REPLACE INTO exchange_bodies(id,req_head,req_body,req_blob,resp_head,resp_body,resp_blob)
+	if _, err := tx.Exec(`INSERT INTO exchange_bodies(id,req_head,req_body,req_blob,resp_head,resp_body,resp_blob)
 VALUES(?,?,?,?,?,?,?)`,
 		id, reqHead, reqB.inline, nullIfEmpty(reqB.hash), respHead, respB.inline, nullIfEmpty(respB.hash)); err != nil {
 		log.Printf("[traffic] 记录 %s 失败（写正文）：%v", url, err)
@@ -510,7 +540,9 @@ VALUES(?,?,?,?,?,?,?)`,
 
 	if err := tx.Commit(); err != nil {
 		log.Printf("[traffic] 记录 %s 失败（提交）：%v", url, err)
+		return
 	}
+	t.completeCapture(f, ExchangeMeta{ID: id, TS: now.Unix(), Host: host, Method: method, URLTemplate: tmpl, URL: url, Status: f.Response.StatusCode, ContentType: ct, RespLen: len(f.Response.Body)})
 }
 
 // storedBody is one body after the inline/spill decision: inline is what goes in
@@ -927,7 +959,7 @@ func (t *Traffic) Page(f PageQuery, page, size int) (rows []ExchangeMeta, total 
 	if strings.EqualFold(strings.TrimSpace(f.Order), "asc") {
 		dir = "ASC"
 	}
-	// id embeds capture timestamp + sequence, so a trailing id DESC makes the order
+	// id embeds capture timestamp + random entropy; id DESC breaks timestamp ties
 	// total and pagination stable even when the sort column has many ties.
 	sel := `SELECT id,ts,host,method,url_template,url,status,content_type,resp_len,path FROM exchanges` +
 		where + ` ORDER BY ` + col + ` ` + dir + `, id DESC LIMIT ? OFFSET ?`

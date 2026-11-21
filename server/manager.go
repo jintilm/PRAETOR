@@ -873,6 +873,35 @@ func (m *Manager) ProxyAddr() string {
 // certs): the global proxy used directly (capture off) is a plain forwarder that
 // preserves real target certs, so no custom CA is needed there. Its emptiness is
 // also the worker's "recording off" signal (see workerSystem).
+// settingPentestAcceptance 控制渗透域完成判定的闸门形态。
+//
+// 默认（空/未知值）为 strict：没有 verified 漏洞就不许 prove_goal。
+// advisory 只给调试与存量任务过渡用——它会放行「自称达成」，是已知的误判来源。
+const settingPentestAcceptance = "agents.pentest_acceptance"
+
+// PentestAcceptance 返回当前闸门形态：strict / advisory。
+//
+// 优先级：PRAETOR_PENTEST_ACCEPTANCE 环境变量 > agents.pentest_acceptance 设置 > strict。
+// 给环境变量留口子是因为改它属于运维动作（重启生效），不该让 agent 或页面顺手改掉。
+func (m *Manager) PentestAcceptance() string {
+	if v := strings.TrimSpace(config.Env("PENTEST_ACCEPTANCE")); v != "" {
+		if strings.EqualFold(v, "advisory") {
+			return "advisory"
+		}
+		return "strict"
+	}
+	if m == nil || m.pg == nil {
+		return "strict"
+	}
+	v, ok, err := m.pg.GetSetting(settingPentestAcceptance)
+	if err != nil || !ok {
+		return "strict"
+	}
+	if strings.EqualFold(strings.TrimSpace(v), "advisory") {
+		return "advisory"
+	}
+	return "strict"
+}
 func (m *Manager) ProxyCACert() string {
 	if m.traffic == nil || !m.TrafficEnabled() {
 		return ""
@@ -1644,6 +1673,34 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 	if pgdb.IsTerminal(status) {
 		m.notifyTaskTerminal(n, status)
 	}
+	return true, nil
+}
+
+// CompleteTaskAfterAcceptance is used only by automatic completion paths.
+// Database acceptance and done commit together; memory and cleanup follow commit.
+func (m *Manager) CompleteTaskAfterAcceptance(id string, requireFinding bool) (bool, error) {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return false, err
+	}
+	enforce := requireFinding && m.PentestAcceptance() != "advisory"
+	won, err := m.pg.CompleteTaskAfterAcceptance(context.Background(), n, enforce)
+	if err != nil || !won {
+		return won, err
+	}
+	m.mu.Lock()
+	if t := m.tasks[id]; t != nil {
+		t.updateLifecycle(func(state *taskLifecycleState) {
+			state.Status = "done"
+			if state.CompletedAt == 0 {
+				state.CompletedAt = time.Now().Unix()
+			}
+		})
+	}
+	m.mu.Unlock()
+	m.notifyTaskTerminal(n, "done")
 	return true, nil
 }
 

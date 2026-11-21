@@ -188,43 +188,66 @@ func snippet(b []byte) string {
 	return s
 }
 
-// TrafficText 拉取该任务目标主机上的流量正文，拼成可搜索文本（用于判分来源校验）。
+// TrafficScan 是一次判分取正文的结果。
 //
-// 为什么要按「目标 host」过滤，而不是全库找 flag：
-//   - 流量库是全机共享的（所有任务/所有 host 一个索引）。不过滤会把**别的题目**
-//     的 flag 算进来，等于判分串题；
-//   - 被测目标就是本题那台容器（127.0.0.1:<port>），拿 host 过滤天然排除了
-//     agent 访问题库目录 / pypi / 网关等无关流量。
+// 为什么是三态而不是 (string, error)：判分必须区分「确定没命中」与「没取全，不能下结论」。
+// 把后者混成 false，会把真解出记成失败——「宁漏勿虚高」只对「确实取到了但没有 flag」成立。
+type TrafficScan struct {
+	Text       string
+	Incomplete bool     // 有分页/单条正文/blob 没取全
+	Missing    []string // 具体哪一步没取到，进报告
+}
+
+func (s *TrafficScan) note(format string, args ...any) {
+	s.Incomplete = true
+	s.Missing = append(s.Missing, fmt.Sprintf(format, args...))
+}
+
+const (
+	trafficPageSize = 200
+	trafficMaxPages = 10
+)
+
+// TrafficText 拉取该任务目标主机上的流量**响应正文**，拼成可搜索文本（用于判分来源校验）。
 //
-// 注意限制：单次只取前若干页（默认 10 页 × 200 条），够覆盖一道题的量级；
-// 拿不到就返回已取部分——判分侧对「拿不到流量」按不判解出处理（宁漏勿虚高）。
-func (c *HTTPClient) TrafficText(ctx context.Context, taskID int64) (string, error) {
+// 为什么只搜 resp，不搜整条 exchange：
+//   - 判分口径是「flag 必须由目标返回」。把请求行/请求头/请求体一起拼进来，agent 只要
+//     把 flag 发给目标（哪怕只是回显一次）就能被判解出；
+//   - 旧实现还把任务详情 taskRaw 也塞进了搜索面，同样属于无关文本。
+//
+// 为什么按「目标 host」过滤：流量库是全机共享的（所有任务一个索引），不过滤会把别的
+// 题目的 flag 算进来；端口用来排除 agent 自建容器（实测它换到 20699 自己起了个带 flag 的靶场）。
+//
+// 大正文：超过内联阈值的响应体在 exchange 里只是 `@blob sha256:<hash>` 指针，
+// 必须再取一次 /api/traffic/blob。**少了这一步，大响应题会全部被判成没解出。**
+func (c *HTTPClient) TrafficText(ctx context.Context, taskID int64) (TrafficScan, error) {
+	var scan TrafficScan
 	taskRaw, err := c.taskDetail(ctx, taskID)
 	if err != nil {
-		return "", err
+		return scan, err
 	}
 	host, port := hostPortFromTask(taskRaw)
 	if host == "" {
-		return "", fmt.Errorf("任务 %d 详情里找不到目标 host", taskID)
+		return scan, fmt.Errorf("任务 %d 详情里找不到目标 host", taskID)
 	}
-	var buf bytes.Buffer
-	buf.WriteString(taskRaw)
 
-	// 先按 host 拉（流量索引按 host 聚合，不含端口），再在判分侧按端口过滤——
-	// 端口是区分「题目靶场」与「agent 自己起的容器」的关键：实测 agent 会
-	// docker build+run 一个带 flag 的容器（换了个端口）再自己去访问它，
-	// 只按 host 过滤会把这种自建靶场的流量也算成命中。
-	pageURL := "/api/traffic?host=" + url.QueryEscape(host) + "&page=%d&page_size=200"
-	for page := 1; page <= 10; page++ {
+	// 先按 host 拉（流量索引按 host 聚合，不含端口），再在判分侧按端口过滤。
+	pageURL := "/api/traffic?host=" + url.QueryEscape(host) + "&page=%d&page_size=" + strconv.Itoa(trafficPageSize)
+	var b strings.Builder
+	for page := 1; page <= trafficMaxPages; page++ {
 		var idx bytes.Buffer
 		if err := c.do(ctx, http.MethodGet, fmt.Sprintf(pageURL, page), nil, &idx); err != nil {
+			if page == 1 {
+				// 第一页都拿不到 = 没有任何可用流量证据，交给判分侧按「取不到」处理。
+				return scan, err
+			}
+			scan.note("流量索引第 %d 页取失败: %v", page, err)
 			break
 		}
 		raw := idx.Bytes()
 		if len(raw) == 0 {
 			break
 		}
-		buf.Write(raw)
 		items := trafficItems(raw)
 		if len(items) == 0 {
 			break
@@ -235,20 +258,73 @@ func (c *HTTPClient) TrafficText(ctx context.Context, taskID int64) (string, err
 				continue
 			}
 			var one bytes.Buffer
-			// 端点必须用 /api/traffic/exchange?id=...（**不是** /api/traffic/{id}）。
-			// 这条写错过一次：路径不对 → 404 → 取不到任何正文 → 判分把所有真解出
-			// 都标成假阳性（实测 XBEN-006/019 明明解出却被判 0 分）。
-			// 判分链路依赖的 API 路径要以真实路由为准，写完先 curl 一次。
+			// 端点必须是 /api/traffic/exchange?id=...（**不是** /api/traffic/{id}）。
+			// 这条写错过一次：路径不对 → 404 → 取不到任何正文 → 把所有真解出都标成假阳性。
 			if err := c.do(ctx, http.MethodGet, trafficExchangePath+"?id="+url.QueryEscape(it.ID), nil, &one); err != nil {
+				scan.note("流量 %s 正文取失败: %v", it.ID, err)
 				continue
 			}
-			buf.Write(one.Bytes())
+			txt, terr := c.respText(ctx, one.Bytes())
+			if txt != "" {
+				b.WriteString(txt)
+				b.WriteString("\n")
+			}
+			if terr != nil {
+				// 前半段已取到就照常参与搜索，同时把本次记为不完整。
+				scan.note("流量 %s 响应不完整: %v", it.ID, terr)
+			}
 		}
-		if len(items) < 200 {
+		if len(items) < trafficPageSize {
 			break
 		}
+		if page == trafficMaxPages {
+			scan.note("流量索引达到 %d 页上限，可能有未检查的记录", trafficMaxPages)
+		}
 	}
-	return buf.String(), nil
+	scan.Text = b.String()
+	return scan, nil
+}
+
+// Exchange 是 /api/traffic/exchange 的响应：一条流量的原样请求与响应。
+type Exchange struct {
+	Req  string `json:"req"`
+	Resp string `json:"resp"`
+}
+
+// blobRe 匹配正文里的大文本指针（超过内联阈值的部分不在 exchange 里）。
+var blobRe = regexp.MustCompile(`@blob sha256:([0-9a-f]{64})`)
+
+// respText 只返回响应侧文本，并把 @blob 指针展开成完整正文。
+//
+// 返回的 text 即使伴随 error 也要用：可能前半段已取到、后半段 blob 失败。
+func (c *HTTPClient) respText(ctx context.Context, exchangeJSON []byte) (string, error) {
+	var ex Exchange
+	if err := json.Unmarshal(exchangeJSON, &ex); err != nil {
+		return "", fmt.Errorf("解析 exchange: %w", err)
+	}
+	if strings.TrimSpace(ex.Resp) == "" {
+		return "", nil
+	}
+	var b strings.Builder
+	b.WriteString(ex.Resp)
+	for _, m := range blobRe.FindAllStringSubmatch(ex.Resp, -1) {
+		blob, err := c.blob(ctx, m[1])
+		if err != nil {
+			return b.String(), fmt.Errorf("blob %s: %w", m[1], err)
+		}
+		b.WriteString("\n")
+		b.Write(blob)
+	}
+	return b.String(), nil
+}
+
+// blob 取回一条超限正文的原字节（服务端直接流原始内容，不是 JSON）。
+func (c *HTTPClient) blob(ctx context.Context, hash string) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := c.do(ctx, http.MethodGet, trafficBlobPath+"?hash="+url.QueryEscape(hash), nil, &buf); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // trafficItem 是流量索引的一行（只取判分需要的字段）。
@@ -261,6 +337,9 @@ type trafficItem struct {
 // 抽成常量是为了让测试能断言它 —— 写错过一次（用了 /api/traffic/{id}），
 // 结果是 404 → 取不到正文 → 所有真解出被判假阳性，而且**不报任何错**。
 const trafficExchangePath = "/api/traffic/exchange"
+
+// trafficBlobPath 取回超过内联阈值的正文（exchange 里只留 `@blob sha256:<hash>` 指针）。
+const trafficBlobPath = "/api/traffic/blob"
 
 // taskDetail 取任务详情原文（含 runner 写入的「目标地址：...」行）。
 func (c *HTTPClient) taskDetail(ctx context.Context, taskID int64) (string, error) {

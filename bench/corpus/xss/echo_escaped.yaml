@@ -1,0 +1,8 @@
+id: echo_escaped
+class: xss
+kind: trap
+fixture: escaped-text
+url: http://fixture.test/echo?q=x
+payload: "q=<script>alert(1)</script>"
+expected_oracle: fail
+expected_conclusion: rejected

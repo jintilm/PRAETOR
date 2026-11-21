@@ -1,0 +1,8 @@
+id: looks_like_idor
+class: authz
+kind: trap
+fixture: owner-check
+url: http://fixture.test/api/records/2
+payload: "GET /api/records/2 as ROLE_A"
+expected_oracle: fail
+expected_conclusion: rejected

@@ -36,6 +36,13 @@ type DBFinding struct {
 	Report          string // 详细报告(Markdown);仅 GetFinding 填充,列表查询不带
 	CreatedAt       time.Time
 	TaskDescription string // populated via LEFT JOIN on tasks
+
+	// 危害取证投影（Level 0 = 还没记录）。列表与详情都带，前端据此展示危害等级，
+	// 审核也据此判断「只证明了存在」还是「已经拿到东西」。
+	ImpactKind      string
+	ImpactLevel     int
+	ImpactMetrics   map[string]any
+	ImpactArtifacts []string
 }
 
 // Finding triage states (findings.status).
@@ -108,7 +115,9 @@ const findingSelectCols = `f.id, f.task_id, f.node_id, f.vulnclass, COALESCE(f.n
 	       f.evidence, f.worker, f.asset_ids, COALESCE(f.status, 'pending'), f.created_at,
 	       COALESCE(t.description, '') AS task_description, f.evidence_version, f.report_evidence_version,
  (SELECT count(*) FROM finding_traffic_bindings b WHERE b.finding_id=f.id),
- (SELECT count(*) FROM finding_attachments a WHERE a.finding_id=f.id)`
+ (SELECT count(*) FROM finding_attachments a WHERE a.finding_id=f.id),
+	       COALESCE(f.impact_kind, ''), COALESCE(f.impact_level, 0),
+	       COALESCE(f.impact_metrics, '{}'::jsonb), COALESCE(f.impact_artifacts, '[]'::jsonb)`
 
 // scanFindings materializes rows selected via findingSelectCols.
 func scanFindings(rows interface {
@@ -120,11 +129,15 @@ func scanFindings(rows interface {
 	for rows.Next() {
 		f := &DBFinding{}
 		var aidsJSON string
+		var metricsJSON, artifactsJSON []byte
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
-			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.AttachmentCount); err != nil {
+			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.AttachmentCount,
+			&f.ImpactKind, &f.ImpactLevel, &metricsJSON, &artifactsJSON); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+		_ = json.Unmarshal(metricsJSON, &f.ImpactMetrics)
+		_ = json.Unmarshal(artifactsJSON, &f.ImpactArtifacts)
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -512,12 +525,16 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 	for rows.Next() {
 		f := &DBFinding{}
 		var aidsJSON string
+		var metricsJSON, artifactsJSON []byte
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.AttachmentCount, &f.Report); err != nil {
+			&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.AttachmentCount,
+			&f.ImpactKind, &f.ImpactLevel, &metricsJSON, &artifactsJSON, &f.Report); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+		_ = json.Unmarshal(metricsJSON, &f.ImpactMetrics)
+		_ = json.Unmarshal(artifactsJSON, &f.ImpactArtifacts)
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -636,13 +653,15 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 	f := &DBFinding{}
 	var aidsJSON string
+	var metricsJSON, artifactsJSON []byte
 	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, '')
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
 		WHERE f.id = $1`, id).Scan(
 		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.AttachmentCount, &f.Report)
+		&f.TaskDescription, &f.EvidenceVersion, &f.ReportEvidenceVersion, &f.TrafficCount, &f.AttachmentCount,
+		&f.ImpactKind, &f.ImpactLevel, &metricsJSON, &artifactsJSON, &f.Report)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -650,6 +669,8 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+	_ = json.Unmarshal(metricsJSON, &f.ImpactMetrics)
+	_ = json.Unmarshal(artifactsJSON, &f.ImpactArtifacts)
 	return f, nil
 }
 
